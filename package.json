@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:build:portable": "tauri build --no-bundle"
   },
   "dependencies": {
     "@fontsource/noto-sans-kr": "^5.3.0",
