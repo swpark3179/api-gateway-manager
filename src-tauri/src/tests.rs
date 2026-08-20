@@ -1,9 +1,11 @@
 //! 회귀 테스트.
 //!
-//! 이 앱에서 조용히 틀리면 가장 위험한 세 가지를 고정한다:
+//! 이 앱에서 조용히 틀리면 가장 위험한 다섯 가지를 고정한다:
 //!   1. **프록시 우회** — 시스템/환경변수 프록시가 걸려 있어도 직접 나가야 한다.
 //!   2. **플러그인 보존** — 저장이 게이트웨이의 다른 플러그인을 지우면 안 된다.
 //!   3. **JWT 형식** — 게이트웨이가 받아들이는 HS256 토큰이어야 한다.
+//!   4. **OAS 파싱** — 스펙 한 줄이 어긋나도 경로 비교는 계속 되어야 한다.
+//!   5. **등록 판정** — 이미 등록된 API 를 "미등록"으로 보여 주면 중복 route 가 생긴다.
 
 use serde_json::json;
 
@@ -500,4 +502,401 @@ fn http_status_maps_to_actionable_error() {
     let e = AppError::from_status(503, "upstream down");
     assert_eq!(e.kind, ErrorKind::Gateway);
     assert!(e.message.contains("503"));
+}
+
+// ── 7. OAS 파싱 ──────────────────────────────────────────────
+
+mod oas_parse {
+    use crate::oas;
+
+    /// 최소한의 정상 OAS 3.0 문서.
+    const SPEC: &str = r#"
+openapi: 3.0.3
+info:
+  title: Pet Store
+  version: "1.2.0"
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      summary: 목록 조회
+      tags: [pets]
+      responses:
+        "200": { description: ok }
+    post:
+      operationId: createPet
+      responses:
+        "201": { description: created }
+  /pets/{petId}:
+    get:
+      operationId: getPet
+      responses:
+        "200": { description: ok }
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        schema: { type: string }
+"#;
+
+    fn find<'a>(doc: &'a oas::OasDoc, method: &str, path: &str) -> &'a oas::OasOp {
+        doc.ops
+            .iter()
+            .find(|o| o.method == method && o.path == path)
+            .unwrap_or_else(|| panic!("{method} {path} 를 찾지 못했다"))
+    }
+
+    #[test]
+    fn extracts_paths_methods_and_metadata() {
+        let doc = oas::parse(SPEC).expect("정상 스펙은 파싱되어야 한다");
+
+        assert_eq!(doc.title, "Pet Store");
+        assert_eq!(doc.version, "1.2.0");
+        // servers 의 경로 부분만 접두사로 쓴다 (호스트는 게이트웨이가 대신한다).
+        assert_eq!(doc.server_prefix, "/v1");
+        assert!(doc.warning.is_none(), "엄격 파싱이 성공했으면 경고가 없어야 한다");
+
+        assert_eq!(doc.ops.len(), 3, "path 아래 parameters 는 오퍼레이션이 아니다");
+
+        let op = find(&doc, "GET", "/pets");
+        assert_eq!(op.operation_id, "listPets");
+        assert_eq!(op.summary, "목록 조회");
+        assert_eq!(op.tags, vec!["pets".to_string()]);
+
+        find(&doc, "POST", "/pets");
+        find(&doc, "GET", "/pets/{petId}");
+    }
+
+    #[test]
+    fn reads_json_spec_and_bare_path_server() {
+        // YAML 파서로 JSON 도 읽는다 — 확장자가 .json 인 스펙을 따로 다루지 않는다.
+        let doc = oas::parse(
+            r#"{"openapi":"3.0.0","info":{"title":"T","version":"1"},
+                "servers":[{"url":"/api/v2/"}],
+                "paths":{"/a":{"delete":{"operationId":"delA"}}}}"#,
+        )
+        .expect("JSON 스펙");
+
+        assert_eq!(doc.server_prefix, "/api/v2", "끝의 / 는 떼어 낸다");
+        assert_eq!(doc.ops.len(), 1);
+        assert_eq!(doc.ops[0].method, "DELETE");
+    }
+
+    #[test]
+    fn server_prefix_is_dropped_when_templated() {
+        // {basePath} 가 남아 있으면 게이트웨이 uri 와 맞을 수 없으므로 쓰지 않는다.
+        let doc = oas::parse(
+            r#"{"openapi":"3.0.0","info":{},"servers":[{"url":"https://h/{basePath}"}],
+                "paths":{"/a":{"get":{}}}}"#,
+        )
+        .expect("파싱");
+        assert_eq!(doc.server_prefix, "");
+    }
+
+    #[test]
+    fn falls_back_when_schema_is_violated() {
+        // `type: [string, null]` 은 3.1 문법이라 3.0 타입 모델에서 거부된다.
+        // 그래도 경로·메서드 비교는 되어야 한다 — 스펙 한 줄에 Import 전체가 막히면 안 된다.
+        let spec = r#"
+openapi: 3.0.1
+info: { title: Loose, version: "1" }
+paths:
+  /things:
+    get:
+      operationId: listThings
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: [string, "null"]
+"#;
+        let doc = oas::parse(spec).expect("폴백으로라도 읽혀야 한다");
+        assert!(doc.warning.is_some(), "폴백을 썼으면 사용자에게 알려야 한다");
+        assert_eq!(doc.ops.len(), 1);
+        assert_eq!(doc.ops[0].method, "GET");
+        assert_eq!(doc.ops[0].path, "/things");
+        assert_eq!(doc.ops[0].operation_id, "listThings");
+    }
+
+    #[test]
+    fn rejects_swagger_2_and_non_specs() {
+        let e = oas::parse(r#"{"swagger":"2.0","paths":{}}"#).expect_err("swagger 2.0 은 거부");
+        assert!(e.message.contains("swagger 2.0"), "무엇이 문제인지 알려야 한다: {}", e.message);
+
+        assert!(oas::parse(r#"{"openapi":"4.0.0","paths":{}}"#).is_err());
+        assert!(oas::parse("{}").is_err());
+        assert!(oas::parse("").is_err());
+        // paths 가 비면 비교할 것이 없다.
+        assert!(oas::parse(r#"{"openapi":"3.0.0","paths":{}}"#).is_err());
+    }
+}
+
+// ── 8. uri 정규화 ────────────────────────────────────────────
+
+#[test]
+fn folds_every_path_param_syntax_to_one_shape() {
+    use crate::oas;
+
+    // OAS 는 {id}, APISIX 파라미터 라우터는 :id, 와일드카드는 * — 셋 다 같은 자리로 접힌다.
+    let a = oas::normalize("/pets/{petId}/toys");
+    let b = oas::normalize("/pets/:petId/toys");
+    let c = oas::normalize("/pets/*/toys");
+    assert_eq!(a.norm, b.norm);
+    assert_eq!(b.norm, c.norm);
+    assert!(!a.wildcard, "중간의 파라미터는 접두 매칭이 아니다");
+
+    // 끝의 * 만 접두 매칭이다.
+    let w = oas::normalize("/pets/*");
+    assert!(w.wildcard);
+    assert_eq!(w.prefix, "/pets/");
+
+    // /* 는 전체 매칭.
+    let all = oas::normalize("/*");
+    assert!(all.wildcard);
+    assert_eq!(all.prefix, "/");
+
+    // 끝의 / 와 쿼리스트링은 무시하고, 대소문자는 보존한다 (APISIX 는 구분한다).
+    assert_eq!(oas::normalize("/Pets/").norm, "/Pets");
+    assert_ne!(oas::normalize("/pets").norm, oas::normalize("/Pets").norm);
+    assert_eq!(oas::normalize("/pets?x=1").norm, "/pets");
+    assert_eq!(oas::normalize("/").norm, "/");
+}
+
+#[test]
+fn suggests_apisix_uri_from_oas_path() {
+    use crate::oas;
+
+    // 마지막 세그먼트의 파라미터는 접두 와일드카드로 둘 수 있다.
+    assert_eq!(oas::to_apisix_uri("", "/pets/{petId}"), "/pets/*");
+    // 중간 파라미터를 * 로 두면 기본 라우터(radixtree_uri)가 매칭하지 못한다 → :name 을 쓴다.
+    assert_eq!(oas::to_apisix_uri("", "/pets/{petId}/toys"), "/pets/:petId/toys");
+    assert_eq!(oas::to_apisix_uri("/v1", "/pets"), "/v1/pets");
+    assert_eq!(oas::to_apisix_uri("v1/", "/pets/{id}/x"), "/v1/pets/:id/x");
+    assert_eq!(oas::join_path("/v1", "/"), "/v1");
+    assert_eq!(oas::join_path("", "pets"), "/pets");
+}
+
+// ── 9. 등록 판정 (내장 SQLite) ───────────────────────────────
+
+mod compare {
+    use crate::apisix::models::RouteView;
+    use crate::db;
+    use crate::oas::OasOp;
+    use rusqlite::Connection;
+    use serde_json::json;
+
+    fn conn() -> Connection {
+        let c = Connection::open_in_memory().expect("메모리 DB");
+        db::init(&c).expect("스키마");
+        c
+    }
+
+    /// 게이트웨이 응답 모양에서 RouteView 를 만든다 — 실제 경로와 같은 변환을 타게 한다.
+    fn route(id: &str, service: &str, uri: serde_json::Value, methods: &[&str]) -> RouteView {
+        let mut v = json!({ "id": id, "name": format!("route-{id}"), "service_id": service });
+        let obj = v.as_object_mut().unwrap();
+        match &uri {
+            serde_json::Value::Array(_) => {
+                obj.insert("uris".into(), uri.clone());
+            }
+            _ => {
+                obj.insert("uri".into(), uri.clone());
+            }
+        }
+        if !methods.is_empty() {
+            obj.insert("methods".into(), json!(methods));
+        }
+        RouteView::from_value(&v)
+    }
+
+    fn op(method: &str, path: &str) -> OasOp {
+        OasOp {
+            path: path.into(),
+            method: method.into(),
+            operation_id: String::new(),
+            summary: String::new(),
+            tags: vec![],
+        }
+    }
+
+    #[test]
+    fn marks_registered_mismatch_and_unregistered() {
+        let c = conn();
+        db::sync_routes(
+            &c,
+            "dev",
+            &[
+                route("1", "svc", json!("/pets"), &["GET"]),
+                route("2", "svc", json!("/pets/*"), &["GET"]),
+                // methods 키가 없는 라우트는 APISIX 에서 모든 메서드를 허용한다.
+                route("3", "svc", json!("/health"), &[]),
+            ],
+        )
+        .unwrap();
+
+        db::load_oas_ops(
+            &c,
+            &[
+                op("GET", "/pets"),          // 정확 일치 + 메서드 일치
+                op("POST", "/pets"),         // uri 는 있으나 메서드가 없다
+                op("GET", "/pets/{petId}"),  // 와일드카드로 걸린다
+                op("DELETE", "/health"),     // methods 없는 라우트 → 전 메서드 허용
+                op("GET", "/orders"),        // 어디에도 없다
+            ],
+        )
+        .unwrap();
+
+        let rows = db::compare(&c, "dev", "svc", "").unwrap();
+        assert_eq!(rows.len(), 5, "오퍼레이션마다 정확히 한 행이 나와야 한다");
+
+        assert_eq!(rows[0].state, db::REGISTERED);
+        assert_eq!(rows[0].route_id, "1");
+        assert!(!rows[0].wildcard);
+
+        assert_eq!(rows[1].state, db::METHOD_MISMATCH);
+        assert_eq!(rows[1].route_id, "1", "메서드를 추가할 대상 라우트를 가리켜야 한다");
+
+        assert_eq!(rows[2].state, db::REGISTERED);
+        assert_eq!(rows[2].route_id, "2");
+        assert!(rows[2].wildcard, "와일드카드로 걸렸음을 알려야 한다");
+
+        assert_eq!(rows[3].state, db::REGISTERED, "methods 가 없으면 전 메서드 허용");
+        assert_eq!(rows[3].route_id, "3");
+
+        assert_eq!(rows[4].state, db::UNREGISTERED);
+        assert_eq!(rows[4].route_id, "");
+        // 미등록 건은 신규 폼에 채울 uri 후보를 들고 온다.
+        assert_eq!(rows[4].suggested_uri, "/orders");
+    }
+
+    #[test]
+    fn prefers_route_that_allows_the_method() {
+        // 정확 일치하지만 메서드가 없는 라우트와, 와일드카드지만 메서드가 맞는 라우트가
+        // 함께 있으면 실제 호출은 후자로 흘러간다. "등록됨"이 정직한 답이다.
+        let c = conn();
+        db::sync_routes(
+            &c,
+            "dev",
+            &[
+                route("exact", "svc", json!("/pets/list"), &["GET"]),
+                route("wild", "svc", json!("/pets/*"), &["POST"]),
+            ],
+        )
+        .unwrap();
+        db::load_oas_ops(&c, &[op("POST", "/pets/list")]).unwrap();
+
+        let rows = db::compare(&c, "dev", "svc", "").unwrap();
+        assert_eq!(rows[0].state, db::REGISTERED);
+        assert_eq!(rows[0].route_id, "wild");
+    }
+
+    #[test]
+    fn scopes_to_selected_service_and_env() {
+        let c = conn();
+        db::sync_routes(&c, "dev", &[route("1", "other-svc", json!("/pets"), &["GET"])]).unwrap();
+        db::sync_routes(&c, "prod", &[route("9", "svc", json!("/pets"), &["GET"])]).unwrap();
+        db::load_oas_ops(&c, &[op("GET", "/pets")]).unwrap();
+
+        // 다른 service 의 같은 uri 는 이 비교에서 등록으로 볼 수 없다.
+        assert_eq!(db::compare(&c, "dev", "svc", "").unwrap()[0].state, db::UNREGISTERED);
+        // 다른 환경(prod)의 라우트도 섞이지 않는다.
+        assert_eq!(db::compare(&c, "prod", "svc", "").unwrap()[0].state, db::REGISTERED);
+    }
+
+    #[test]
+    fn applies_path_prefix() {
+        let c = conn();
+        db::sync_routes(&c, "dev", &[route("1", "svc", json!("/v1/pets"), &["GET"])]).unwrap();
+        db::load_oas_ops(&c, &[op("GET", "/pets")]).unwrap();
+
+        // 접두사 없이는 어긋나고, servers 의 /v1 을 붙이면 맞는다.
+        assert_eq!(db::compare(&c, "dev", "svc", "").unwrap()[0].state, db::UNREGISTERED);
+
+        let rows = db::compare(&c, "dev", "svc", "/v1").unwrap();
+        assert_eq!(rows[0].state, db::REGISTERED);
+        assert_eq!(rows[0].full_path, "/v1/pets", "무엇과 비교했는지 보여 준다");
+        assert_eq!(rows[0].path, "/pets", "원본 경로도 유지한다");
+    }
+
+    #[test]
+    fn expands_uris_array() {
+        // uris 배열은 행 하나씩 펼쳐야 둘 다 매칭된다. RouteView.uri 는 ", " 로 이어 붙인
+        // 표시용 문자열이라 그대로 쓰면 어느 쪽도 맞지 않는다.
+        let c = conn();
+        db::sync_routes(
+            &c,
+            "dev",
+            &[route("1", "svc", json!(["/a", "/b"]), &["GET"])],
+        )
+        .unwrap();
+        db::load_oas_ops(&c, &[op("GET", "/a"), op("GET", "/b")]).unwrap();
+
+        let rows = db::compare(&c, "dev", "svc", "").unwrap();
+        assert_eq!(rows[0].state, db::REGISTERED);
+        assert_eq!(rows[1].state, db::REGISTERED);
+    }
+}
+
+// ── 10. 목록 검색 (내장 SQLite) ──────────────────────────────
+
+#[test]
+fn sqlite_search_and_counts_replace_the_old_array_filter() {
+    use crate::apisix::models::RouteView;
+    use crate::db;
+    use rusqlite::Connection;
+
+    let c = Connection::open_in_memory().unwrap();
+    db::init(&c).unwrap();
+
+    let mk = |id: &str, name: &str, uri: &str, status: i64| {
+        RouteView::from_value(&json!({
+            "id": id, "name": name, "uri": uri, "status": status,
+            "service_id": "svc", "methods": ["GET"],
+        }))
+    };
+    db::sync_routes(
+        &c,
+        "dev",
+        &[
+            mk("1", "order-api", "/orders", 1),
+            mk("2", "pet-api", "/pets", 1),
+            mk("3", "legacy-api", "/legacy_v1/x", 0),
+        ],
+    )
+    .unwrap();
+
+    // 검색어 없음 → 전체, 원래 순서 유지.
+    let page = db::query_routes(&c, "dev", "all", "").unwrap();
+    assert_eq!(page.total, 3);
+    assert_eq!(page.items.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);
+
+    // 예전 필터가 JSON 전체를 훑었으므로 name·uri 어느 쪽으로도 잡혀야 한다.
+    assert_eq!(db::query_routes(&c, "dev", "all", "pet").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "/orders").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "API").unwrap().total, 3, "대소문자 무시");
+
+    // '_' 가 LIKE 의 단일문자 와일드카드로 해석되면 안 된다.
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacy_v1").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacyXv1").unwrap().total, 0);
+
+    // chip 은 status 로 나눈다.
+    assert_eq!(db::query_routes(&c, "dev", "on", "").unwrap().total, 2);
+    assert_eq!(db::query_routes(&c, "dev", "off", "").unwrap().total, 1);
+
+    // counts 는 chip 을 빼고 검색어만 반영한다 — chip 을 눌러도 라벨 숫자가 흔들리지 않아야 한다.
+    let page = db::query_routes(&c, "dev", "off", "").unwrap();
+    assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
+    let page = db::query_routes(&c, "dev", "all", "api").unwrap();
+    assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
+
+    // 단건 조회 (Import 결과 → 상세 이동 경로).
+    assert_eq!(db::route_view(&c, "dev", "2").unwrap().unwrap().name, "pet-api");
+    assert!(db::route_view(&c, "dev", "nope").unwrap().is_none());
+
+    // 재동기화는 전체 교체다 — 게이트웨이에서 사라진 라우트가 남으면 Import 가 잘못 판정한다.
+    db::sync_routes(&c, "dev", &[mk("1", "order-api", "/orders", 1)]).unwrap();
+    assert_eq!(db::query_routes(&c, "dev", "all", "").unwrap().total, 1);
+    assert!(db::route_view(&c, "dev", "2").unwrap().is_none());
 }

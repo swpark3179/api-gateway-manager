@@ -14,6 +14,8 @@ export default function EditScreen() {
   const form = useStore((s) => s.form);
   const saving = useStore((s) => s.saving);
   const backToList = useStore((s) => s.backToList);
+  // Import 비교 결과에서 넘어왔으면 '목록' 링크가 그쪽으로 돌아간다 (store.backToList).
+  const fromImport = useStore((s) => s.importReturn && !!s.importDoc);
   const save = useStore((s) => s.save);
   const remove = useStore((s) => s.remove);
 
@@ -22,7 +24,7 @@ export default function EditScreen() {
   const kind = kindOf(section);
   const isConsumer = kind === "consumer";
   const isCreate = view === "create";
-  const listTitle = isConsumer ? "Consumer" : "Route";
+  const listTitle = isConsumer ? "Consumer" : fromImport ? "API 스펙 Import" : "Route";
 
   const label = form.kind === "consumer" ? form.username : form.name;
   const crumb = isCreate ? "신규 등록" : label;

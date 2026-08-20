@@ -19,7 +19,9 @@ export default function SidePanel() {
   const env = useStore((s) => s.env);
   const chip = useStore((s) => s.chip);
   const view = useStore((s) => s.view);
-  const routes = useStore((s) => s.routes);
+  // Route 는 목록 배열이 아니라 캐시가 돌려준 건수를 쓴다 — 배열은 필터된 결과라
+  // 여기서 세면 검색 중에 숫자가 흔들린다 (store.ts 모듈 주석 참조).
+  const routeCounts = useStore((s) => s.routeCounts);
   const consumers = useStore((s) => s.consumers);
   const dash = useStore((s) => s.dash);
   const settings = useStore((s) => s.settings);
@@ -31,17 +33,9 @@ export default function SidePanel() {
         return {
           title: "ROUTES",
           rows: [
-            { label: "전체", count: routes.length, chip: "all" },
-            {
-              label: "활성 (status 1)",
-              count: routes.filter((r) => r.status === 1).length,
-              chip: "on",
-            },
-            {
-              label: "비활성 (status 0)",
-              count: routes.filter((r) => r.status !== 1).length,
-              chip: "off",
-            },
+            { label: "전체", count: routeCounts.all, chip: "all" },
+            { label: "활성 (status 1)", count: routeCounts.on, chip: "on" },
+            { label: "비활성 (status 0)", count: routeCounts.off, chip: "off" },
           ],
         };
       case "consumers":
@@ -77,7 +71,7 @@ export default function SidePanel() {
           ],
         };
     }
-  }, [section, routes, consumers, settings, dash]);
+  }, [section, routeCounts, consumers, settings, dash]);
 
   const cfg = settings?.[env];
   const hasToken = !!cfg?.hasToken;

@@ -261,7 +261,9 @@ pub fn set_groups_at(m: &mut Map<String, Value>, loc: &GroupsLocation, groups: &
 
 // ── Route ────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+/// `Deserialize` 는 SQLite 캐시(`db.rs`)가 `view` 열에 넣어 둔 JSON 을 되읽기 위한 것이다.
+/// 목록/검색이 캐시를 거치므로 이 왕복이 무손실이어야 한다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteView {
     pub id: String,

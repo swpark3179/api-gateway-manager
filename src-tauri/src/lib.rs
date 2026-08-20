@@ -3,9 +3,11 @@
 mod apisix;
 mod commands;
 mod config;
+mod db;
 mod error;
 mod history;
 mod jwt;
+mod oas;
 
 #[cfg(windows)]
 mod win;
@@ -62,6 +64,10 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
+            // Route 목록 검색과 OAS Import 비교가 함께 쓰는 메모리 SQLite 캐시.
+            // 열지 못하면 목록 화면이 아무것도 못 하므로 조용히 넘기지 않고 기동을 멈춘다.
+            app.manage(db::Cache::new().map_err(|e| e.message)?);
+
             // 저장된 호출 이력 복원 (대시보드 activity)
             history::init(&handle);
 
@@ -90,9 +96,13 @@ pub fn run() {
             commands::settings_get,
             commands::settings_save,
             commands::settings_test,
-            commands::routes_list,
             commands::route_save,
             commands::route_delete,
+            commands::routes_sync,
+            commands::routes_query,
+            commands::route_cached,
+            commands::oas_load,
+            commands::oas_compare,
             commands::consumers_list,
             commands::consumer_save,
             commands::consumer_delete,

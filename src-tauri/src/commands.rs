@@ -12,9 +12,11 @@ use crate::apisix::models::{ConsumerView, RouteView, ServiceOption};
 use crate::apisix::routes::{self, RouteForm};
 use crate::apisix::client;
 use crate::config::{self, Env, EnvConfig, SettingsView};
+use crate::db::{self, Cache, CompareRow, RoutesPage};
 use crate::error::{AppError, AppResult};
 use crate::history::{self, EntryView};
 use crate::jwt::{self, JwtResult};
+use crate::oas::{self, OasDoc};
 
 // ── 설정 ─────────────────────────────────────────────────────
 
@@ -106,11 +108,9 @@ pub async fn settings_test(app: AppHandle<Wry>, env: Env, payload: EnvPayload) -
 }
 
 // ── Route ────────────────────────────────────────────────────
-
-#[tauri::command]
-pub async fn routes_list(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<RouteView>> {
-    routes::list(&app, env).await
-}
+//
+// 목록 조회 커맨드는 `routes_sync` 다 — 게이트웨이 응답을 그대로 내려보내는 대신
+// 캐시를 갱신하고 조회 결과를 돌려준다 (아래 'Route 캐시' 절).
 
 #[tauri::command]
 pub async fn route_save(app: AppHandle<Wry>, env: Env, form: RouteForm) -> AppResult<RouteView> {
@@ -125,6 +125,103 @@ pub async fn route_delete(
     name: Option<String>,
 ) -> AppResult<()> {
     routes::delete(&app, env, &id, name.as_deref().unwrap_or("")).await
+}
+
+// ── Route 캐시 (내장 SQLite) ─────────────────────────────────
+//
+// 목록 검색·필터는 게이트웨이를 다시 부르지 않고 캐시에서 처리한다. 캐시를 채우는 경로는
+// `routes_sync` 하나뿐이다 — 목록 화면 진입과 상단 리프레시 버튼이 이걸 호출한다.
+
+fn cache(app: &AppHandle<Wry>) -> AppResult<tauri::State<'_, Cache>> {
+    app.try_state::<Cache>()
+        .ok_or_else(|| AppError::internal("로컬 캐시가 초기화되지 않았습니다."))
+}
+
+/// 게이트웨이에서 전체 목록을 다시 받아 캐시를 통째로 갱신하고 첫 조회 결과를 돌려준다.
+#[tauri::command]
+pub async fn routes_sync(app: AppHandle<Wry>, env: Env, chip: String, q: String) -> AppResult<RoutesPage> {
+    let routes = routes::list(&app, env).await?;
+    let cache = cache(&app)?;
+    cache.with(|conn| {
+        db::sync_routes(conn, env.as_str(), &routes)?;
+        db::query_routes(conn, env.as_str(), &chip, &q)
+    })
+}
+
+/// 캐시만 조회한다 (게이트웨이 호출 없음).
+#[tauri::command]
+pub fn routes_query(app: AppHandle<Wry>, env: Env, chip: String, q: String) -> AppResult<RoutesPage> {
+    cache(&app)?.with(|conn| db::query_routes(conn, env.as_str(), &chip, &q))
+}
+
+/// 캐시에서 라우트 한 건. 목록이 필터돼 있어도 상세로 갈 수 있게 해 준다.
+#[tauri::command]
+pub fn route_cached(app: AppHandle<Wry>, env: Env, id: String) -> AppResult<Option<RouteView>> {
+    cache(&app)?.with(|conn| db::route_view(conn, env.as_str(), &id))
+}
+
+// ── OAS Import ───────────────────────────────────────────────
+
+/// 스펙을 어디서 읽을지. 프런트는 세 경로 모두 이 커맨드로 모은다.
+///
+/// - `text` — 드래그&드롭. 웹뷰가 이미 내용을 들고 있으므로 그대로 넘긴다.
+/// - `path` — 파일 다이얼로그가 준 경로. 웹뷰에 `fs:` 권한을 주지 않으려고 Rust 가 읽는다.
+/// - `url`  — CSP 가 프런트 fetch 를 막고 있으므로 반드시 여기서 받아야 한다.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSource {
+    pub kind: String,
+    pub value: String,
+    /// `url` 일 때만 의미 있다. 미지정이면 해당 환경의 설정을 따른다.
+    #[serde(default)]
+    pub no_proxy: Option<bool>,
+}
+
+/// URL 로 받는 스펙의 크기 상한. 이보다 큰 OAS 문서는 실무에서 나오지 않는다.
+const MAX_SPEC_BYTES: usize = 8 * 1024 * 1024;
+
+/// 스펙을 읽어 파싱하고, 비교용으로 캐시에 적재한다.
+#[tauri::command]
+pub async fn oas_load(app: AppHandle<Wry>, env: Env, source: ImportSource) -> AppResult<OasDoc> {
+    let text = match source.kind.as_str() {
+        "text" => source.value.clone(),
+        "path" => std::fs::read_to_string(&source.value).map_err(|e| {
+            AppError::new(
+                crate::error::ErrorKind::BadRequest,
+                format!("파일을 읽지 못했습니다: {e}"),
+            )
+            .with_hint("파일이 이동·삭제되지 않았는지 확인하세요.")
+        })?,
+        "url" => {
+            let settings = config::load(&app);
+            let mut cfg = settings.get(env).clone();
+            if let Some(np) = source.no_proxy {
+                cfg.no_proxy = np;
+            }
+            client::fetch_text(&cfg, &source.value, MAX_SPEC_BYTES).await?
+        }
+        other => {
+            return Err(AppError::internal(format!("알 수 없는 입력 방식입니다: {other}")));
+        }
+    };
+
+    let doc = oas::parse(&text)?;
+    cache(&app)?.with(|conn| db::load_oas_ops(conn, &doc.ops))?;
+    Ok(doc)
+}
+
+/// 적재된 스펙을 선택한 service 안의 라우트와 비교한다.
+#[tauri::command]
+pub fn oas_compare(
+    app: AppHandle<Wry>,
+    env: Env,
+    service_id: String,
+    prefix: String,
+) -> AppResult<Vec<CompareRow>> {
+    if service_id.trim().is_empty() {
+        return Err(AppError::config("비교할 service 를 선택하세요."));
+    }
+    cache(&app)?.with(|conn| db::compare(conn, env.as_str(), service_id.trim(), &prefix))
 }
 
 // ── Consumer ─────────────────────────────────────────────────
