@@ -56,7 +56,32 @@ jobs:
           BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
-          PREV_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
+          # releases/latest 는 쓰지 않는다. 릴리스가 하나도 없으면 404 를 내면서
+          # 에러 JSON 본문을 stdout 으로 뱉으므로, 종료 코드를 삼키는 순간
+          # {"message":"Not Found",...} 가 그대로 버전 문자열로 잡혀버린다.
+          # 목록 API 는 릴리스가 없어도 200 + [] 라서 예외 경로가 없고, 덤으로
+          # created_at 순서가 아닌 semver 최대값을 고를 수 있다 (backport 대비).
+          # 여기서 gh 가 실패하면 진짜 오류이므로 set -e 로 그대로 중단시킨다.
+          TAGS=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --paginate \
+            --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name')
+
+          PREV_TAG=$(printf '%s\n' "$TAGS" | node -e '
+            const RE = /^v?(\d+)\.(\d+)\.(\d+)$/;
+            let best = null;
+            let bestTag = "";
+            for (const line of require("node:fs").readFileSync(0, "utf8").split("\n")) {
+              const m = RE.exec(line.trim());
+              if (!m) continue;
+              const v = [Number(m[1]), Number(m[2]), Number(m[3])];
+              const newer = !best
+                || v[0] > best[0]
+                || (v[0] === best[0] && (v[1] > best[1] || (v[1] === best[1] && v[2] > best[2])));
+              if (newer) { best = v; bestTag = line.trim(); }
+            }
+            // 개행을 붙이지 않는다 — 명령 치환 결과가 태그 그 자체가 되도록
+            process.stdout.write(bestTag);
+          ')
+
           if [ -n "$PREV_TAG" ]; then
             BASE="${PREV_TAG#v}"
             echo "발행된 최신 릴리스: $PREV_TAG (기준 $BASE)"
@@ -64,6 +89,8 @@ jobs:
             BASE=$(node -p "require('./package.json').version")
             echo "발행된 릴리스 없음 → package.json 기준: $BASE"
           fi
+          # Windows 러너의 Git Bash 가 섞어 넣을 수 있는 CR 등 공백류 제거
+          BASE="${BASE//[[:space:]]/}"
           if ! [[ "$BASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::기준 버전 형식 오류: $BASE"
             exit 1
@@ -240,7 +267,10 @@ jobs:
           else
             git commit -m "chore(release): v$NEXT"
           fi
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # 명령 치환을 echo 안에 두면 실패해도 echo 가 성공해 sha= 가 빈 값으로
+          # 새어나간다. 별도 대입으로 두어 set -e 가 잡도록 한다.
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
           for delay in 2 4 8 16; do
             if git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"; then
