@@ -3,13 +3,7 @@
 import { useMemo } from "react";
 
 import { maskSecret } from "../lib/design";
-import {
-  consumerGroupBuckets,
-  filterConsumers,
-  filterRoutes,
-  kindOf,
-  useStore,
-} from "../store";
+import { consumerGroupBuckets, filterConsumers, kindOf, useStore } from "../store";
 
 const ROW_H = "14px 16px";
 
@@ -35,17 +29,21 @@ export default function ListScreen() {
   const setChip = useStore((s) => s.setChip);
   const newItem = useStore((s) => s.newItem);
   const openItem = useStore((s) => s.openItem);
+  const openImport = useStore((s) => s.openImport);
+  const hardRefresh = useStore((s) => s.hardRefresh);
   const loading = useStore((s) => s.loading);
   const error = useStore((s) => s.error);
   const settings = useStore((s) => s.settings);
-  const allRoutes = useStore((s) => s.routes);
+  // Route 는 내장 SQLite 가 이미 필터링해 준 결과다 (store.ts 모듈 주석 참조).
+  const routes = useStore((s) => s.routes);
+  const routesTotal = useStore((s) => s.routesTotal);
+  const routeCounts = useStore((s) => s.routeCounts);
   const allConsumers = useStore((s) => s.consumers);
 
   const kind = kindOf(section);
   const isConsumer = kind === "consumer";
 
   // 새 배열을 만드는 계산이라 스토어 셀렉터가 아니라 useMemo 로 감싼다.
-  const routes = useMemo(() => filterRoutes(allRoutes, chip, q), [allRoutes, chip, q]);
   const consumers = useMemo(
     () => filterConsumers(allConsumers, chip, q),
     [allConsumers, chip, q],
@@ -92,11 +90,12 @@ export default function ListScreen() {
             ),
           ]
         : [
-            ["all", "전체"],
-            ["on", "status 1"],
-            ["off", "status 0"],
+            // 건수는 캐시가 돌려준 값이다 — 검색어는 반영하고 chip 은 빼서 계산한다.
+            ["all", `전체 (${routeCounts.all})`],
+            ["on", `status 1 (${routeCounts.on})`],
+            ["off", `status 0 (${routeCounts.off})`],
           ],
-    [isConsumer, allConsumers],
+    [isConsumer, allConsumers, routeCounts],
   );
 
   const adminBase = settings?.[env]?.adminBase ?? "";
@@ -116,6 +115,43 @@ export default function ListScreen() {
           </p>
         </div>
         <div className="page-actions">
+          {!isConsumer && (
+            <>
+              <button
+                className="icon-btn"
+                title="게이트웨이에서 전체 목록을 다시 조회해 로컬 캐시를 갱신합니다"
+                onClick={() => void hardRefresh()}
+                disabled={loading}
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                >
+                  <path d="M20 11a8 8 0 1 0-2.3 5.7" />
+                  <path d="M20 4v7h-7" />
+                </svg>
+              </button>
+              <button className="btn md outline" onClick={openImport}>
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M12 3v12M7 10l5 5 5-5" />
+                  <path d="M4 19h16" />
+                </svg>
+                Import
+              </button>
+            </>
+          )}
           <div className="gnb-search" style={{ width: 240, height: 36 }}>
             <svg
               viewBox="0 0 24 24"
@@ -278,7 +314,7 @@ export default function ListScreen() {
           color: "var(--gray-500)",
         }}
       >
-        <span>총 {rows.length}건</span>
+        <span>총 {isConsumer ? rows.length : routesTotal}건</span>
         <span className="selectable">GET {listApiPath}</span>
       </div>
     </div>

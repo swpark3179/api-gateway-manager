@@ -121,9 +121,22 @@ export function jsonToForm(raw: string, current: FormState): FormState {
   };
 }
 
-/** 디자인의 methods 칩은 선택 순서와 무관하게 항상 표준 순서로 정렬된다. */
+/**
+ * 디자인의 methods 칩은 선택 순서와 무관하게 항상 표준 순서로 정렬된다.
+ *
+ * 표준 목록(METHODS)에 없는 메서드는 **버리지 않고 뒤에 붙인다.** 이 앱 밖에서 등록된
+ * 라우트나 OAS 스펙은 CONNECT · TRACE · PURGE 를 쓸 수 있고, 조용히 떨어뜨리면 칩 하나만
+ * 눌러도 게이트웨이의 methods 가 바뀌어 저장된다.
+ */
 export function sortMethods(list: string[]): string[] {
-  return METHODS.filter((m) => list.includes(m));
+  const known = METHODS.filter((m) => list.includes(m));
+  const extra = [...new Set(list.filter((m) => m && !METHODS.includes(m)))].sort();
+  return [...known, ...extra];
+}
+
+/** 폼에 실제로 들어 있는 값까지 포함한 칩 목록 — 표준 외 메서드가 화면에서 사라지지 않게 한다. */
+export function methodChips(selected: string[]): string[] {
+  return sortMethods([...METHODS, ...selected]);
 }
 
 /** Consumer 목록의 secret 열 표기 — 디자인의 `secret.slice(0,8) + '••••••••'` */

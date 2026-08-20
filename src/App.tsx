@@ -11,6 +11,7 @@ import SidePanel from "./components/SidePanel";
 import TitleBar from "./components/TitleBar";
 import Toast from "./components/Toast";
 import Dashboard from "./screens/Dashboard";
+import ImportScreen from "./screens/ImportScreen";
 import ListScreen from "./screens/ListScreen";
 import LockedScreen from "./screens/LockedScreen";
 import Settings from "./screens/Settings";
@@ -36,8 +37,24 @@ export default function App() {
     })();
   }, [init]);
 
+  // 드롭존 밖에 파일을 떨어뜨리면 WebView2 가 그 파일로 내비게이션해 앱 화면이 사라진다.
+  // (tauri.conf.json 의 dragDropEnabled 가 false 라 웹뷰 기본 동작이 그대로 온다.)
+  // Import 화면의 드롭존은 자기 핸들러에서 stopPropagation 없이 preventDefault 만 하므로
+  // 여기서 문서 전체의 기본 동작만 막아 두면 둘 다 성립한다.
+  useEffect(() => {
+    const block = (e: DragEvent) => e.preventDefault();
+    window.addEventListener("dragover", block);
+    window.addEventListener("drop", block);
+    return () => {
+      window.removeEventListener("dragover", block);
+      window.removeEventListener("drop", block);
+    };
+  }, []);
+
+  const isImport = section === "routes" && view === "import";
   const isList = (section === "routes" || section === "consumers") && view === "list";
-  const isEdit = (section === "routes" || section === "consumers") && view !== "list";
+  const isEdit =
+    (section === "routes" || section === "consumers") && view !== "list" && !isImport;
 
   return (
     <div
@@ -70,6 +87,7 @@ export default function App() {
               {section === "dash" && <Dashboard />}
               {section === "settings" && <Settings />}
               {isList && <ListScreen />}
+              {isImport && <ImportScreen />}
               {isEdit && <EditScreen />}
             </>
           )}

@@ -35,6 +35,16 @@ reqwest = { version = "0.12", default-features = false, features = [
   "http2",
 ] }
 
+# 내장 SQLite — Route 목록 캐시/검색과 OAS 비교 인덱스 (db.rs).
+# bundled: SQLite C 소스를 함께 빌드한다. 배포본에 별도 DLL 을 끌고 다니지 않아도 된다.
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# OAS 3.0 스펙 파싱 (oas.rs).
+# openapiv3 는 3.0.x 타입 모델, serde_norway 는 유지보수되는 serde_yaml 포크다.
+# YAML 은 JSON 의 상위집합이라 .json 스펙도 같은 경로로 읽힌다.
+openapiv3 = "2"
+serde_norway = "0.9"
+
 # 관리 토큰 → Windows 자격 증명 관리자
 keyring = { version = "3", features = ["windows-native"] }
 

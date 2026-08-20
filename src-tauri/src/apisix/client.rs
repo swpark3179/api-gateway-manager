@@ -176,6 +176,66 @@ pub async fn request(
     Ok((json, meta))
 }
 
+/// 임의 URL 에서 텍스트를 받아온다 — OAS 스펙 Import 전용.
+///
+/// Admin API 가 아니므로 `X-API-KEY` 를 붙이지 않고, 응답을 JSON 으로 해석하지도 않는다.
+/// 클라이언트는 이 파일의 [`build`] 를 그대로 쓴다 — 프록시 정책 결정 지점이 하나여야 한다.
+///
+/// # 프록시
+///
+/// 게이트웨이는 반드시 프록시를 우회해야 하지만, 스펙 URL 은 사외 주소라 오히려 사내
+/// 프록시를 타야 할 수 있다. 그래서 우회 여부를 `cfg.no_proxy` 로 호출자가 정하게 두고,
+/// Import 화면이 체크박스로 노출한다. 게이트웨이 호출 경로에는 영향이 없다.
+pub async fn fetch_text(cfg: &EnvConfig, url: &str, max_bytes: usize) -> AppResult<String> {
+    let url = url.trim();
+    // http(s) 만 허용한다. file:// 같은 스킴을 열어 두면 URL 입력란이 임의 파일 읽기가 된다.
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(AppError::config("http:// 또는 https:// 로 시작하는 주소를 입력하세요."));
+    }
+
+    let client = build(cfg)?;
+    let res = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/yaml, text/yaml, application/json, text/plain, */*")
+        .send()
+        .await?;
+
+    let status = res.status().as_u16();
+    if !(200..300).contains(&status) {
+        let text = res.text().await.unwrap_or_default();
+        return Err(AppError::from_status(status, &text));
+    }
+
+    // Content-Length 를 믿을 수 없는 서버가 있으니 선언값과 실제 누적량을 둘 다 본다.
+    if let Some(len) = res.content_length() {
+        if len as usize > max_bytes {
+            return Err(too_large(max_bytes));
+        }
+    }
+
+    let mut res = res;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = res.chunk().await? {
+        if buf.len() + chunk.len() > max_bytes {
+            return Err(too_large(max_bytes));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(buf).map_err(|_| {
+        AppError::new(ErrorKind::BadRequest, "응답이 UTF-8 텍스트가 아닙니다.")
+            .with_hint("OAS 스펙 파일(.yaml · .yml · .json) 주소인지 확인하세요.")
+    })
+}
+
+fn too_large(max_bytes: usize) -> AppError {
+    AppError::new(
+        ErrorKind::BadRequest,
+        format!("응답이 너무 큽니다 (최대 {} MiB).", max_bytes / (1024 * 1024)),
+    )
+    .with_hint("스펙 파일을 내려받아 파일로 선택하세요.")
+}
+
 /// 설정 화면 '연결 테스트' 전용.
 ///
 /// 저장 전 입력값으로 즉석 호출해야 하므로 저장된 설정/토큰을 쓰지 않고

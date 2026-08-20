@@ -1,6 +1,6 @@
 /** Route 폼 탭 — 기본 정보 / methods / allowed_groups / status. */
 
-import { METHODS } from "../../lib/design";
+import { methodChips } from "../../lib/design";
 import { useStore } from "../../store";
 import GroupsCard from "./GroupsCard";
 
@@ -108,7 +108,7 @@ export default function RouteForm() {
           허용할 HTTP 메서드를 선택하세요.
         </p>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {METHODS.map((m) => (
+          {methodChips(form.methods).map((m) => (
             <div
               key={m}
               className={"chip" + (form.methods.includes(m) ? " on" : "")}

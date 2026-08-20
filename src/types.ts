@@ -2,7 +2,8 @@
 
 export type EnvKey = "dev" | "prod";
 export type Section = "dash" | "routes" | "consumers" | "settings";
-export type View = "list" | "detail" | "create";
+/** `import` 는 Route 섹션 전용 — OAS 스펙 비교 화면 (ImportScreen). */
+export type View = "list" | "detail" | "create" | "import";
 export type Tab = "form" | "json" | "jwt";
 export type Kind = "route" | "consumer";
 
@@ -83,6 +84,74 @@ export interface ServiceOption {
   id: string;
   label: string;
   name: string;
+}
+
+// ── Route 목록 캐시 (내장 SQLite) ───────────────────────────
+
+export interface RouteCounts {
+  all: number;
+  on: number;
+  off: number;
+}
+
+/** `routes_sync` · `routes_query` 의 응답. */
+export interface RoutesPage {
+  items: RouteView[];
+  total: number;
+  /** chip 필터를 빼고 검색어만 적용한 건수 — chip 라벨과 사이드 패널이 쓴다. */
+  counts: RouteCounts;
+}
+
+// ── OAS Import ───────────────────────────────────────────────
+
+/** 스펙을 어디서 읽을지. 세 입력 경로가 모두 이 형태로 Rust 에 넘어간다. */
+export interface ImportSource {
+  /** `text` = 드래그&드롭, `path` = 파일 다이얼로그, `url` = 주소 입력 */
+  kind: "text" | "path" | "url";
+  value: string;
+  /** `url` 일 때만 의미 있다. 스펙 주소는 사외라 프록시가 필요할 수 있다. */
+  noProxy?: boolean;
+}
+
+export interface OasOp {
+  path: string;
+  method: string;
+  operationId: string;
+  summary: string;
+  tags: string[];
+}
+
+export interface OasDoc {
+  title: string;
+  version: string;
+  /** `servers[0].url` 의 경로 부분. 비교 접두사의 기본값으로만 쓴다. */
+  serverPrefix: string;
+  ops: OasOp[];
+  /** OAS 스키마 검증이 실패해 관대한 폴백으로 읽었을 때의 안내 */
+  warning?: string;
+}
+
+export type MatchState = "registered" | "methodMismatch" | "unregistered";
+
+/** 스펙 오퍼레이션 한 건의 등록 여부 판정. */
+export interface CompareRow {
+  /** 원본 OAS path (`/pets/{petId}`) */
+  path: string;
+  /** 접두사를 적용해 실제로 게이트웨이와 비교한 경로 */
+  fullPath: string;
+  method: string;
+  operationId: string;
+  summary: string;
+  state: MatchState;
+  /** 매칭된 route 의 id. 미등록이면 빈 문자열 */
+  routeId: string;
+  routeName: string;
+  routeUri: string;
+  routeStatus: number;
+  /** 정확 일치가 아니라 와일드카드(`/a/*`)로 걸렸는가 */
+  wildcard: boolean;
+  /** 미등록 건을 신규 생성할 때 채울 uri 후보 (Rust 가 계산한다) */
+  suggestedUri: string;
 }
 
 // ── 대시보드 ─────────────────────────────────────────────────
@@ -224,6 +293,30 @@ export const routeToForm = (r: RouteView): RouteFormState => ({
   groups: [...r.groups],
   status: r.status,
   groupsLocation: r.groupsLocation,
+});
+
+/** APISIX name 제약에 맞춘 식별자 — 허용 문자만 남기고 길이를 자른다. */
+const slugify = (v: string): string =>
+  v
+    .trim()
+    .replace(/[^A-Za-z0-9_.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 100);
+
+/**
+ * Import 의 미등록 행 → 신규 Route 폼.
+ *
+ * `uri` 는 Rust 가 계산한 `suggestedUri` 를 그대로 쓴다 — 경로 파라미터 변환 규칙이
+ * 두 곳에 있으면 반드시 어긋난다 (oas::to_apisix_uri 에 테스트가 붙어 있다).
+ * `groupsLocation` 은 null 로 둬서 기존 기본 위치 규칙(shi-auth.allowed_groups)에 맡긴다.
+ */
+export const routeFormFromOas = (row: CompareRow, serviceId: string): RouteFormState => ({
+  ...emptyRouteForm(serviceId),
+  name: slugify(row.operationId) || slugify(`${row.method}-${row.fullPath}`),
+  uri: row.suggestedUri,
+  // APISIX 의 desc 는 길이 제한이 있어 요약을 잘라 넣는다.
+  desc: row.summary.trim().slice(0, 255),
+  methods: [row.method],
 });
 
 export const consumerToForm = (c: ConsumerView): ConsumerFormState => ({

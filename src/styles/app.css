@@ -73,3 +73,19 @@ input, textarea, pre, code, .selectable {
 
 /* select 는 kit.css 의 .text-input 을 그대로 쓰되 화살표 여백만 확보 */
 select.text-input { padding-right: 32px; appearance: auto; }
+
+/* 리프레시 버튼처럼 비활성화되는 아이콘 버튼 — kit.css 에는 disabled 표현이 없다 */
+.icon-btn:disabled { opacity: .45; cursor: default; }
+.icon-btn:disabled:hover { background: transparent; color: var(--gray-500); }
+
+/* Import 화면의 드롭존 */
+.drop-zone {
+  border: 1.5px dashed var(--gray-300);
+  border-radius: 10px;
+  padding: 28px 20px;
+  text-align: center;
+  background: var(--gray-50);
+  transition: border-color var(--duration-fast) var(--ease-standard),
+              background var(--duration-fast) var(--ease-standard);
+}
+.drop-zone.over { border-color: var(--purple-500); background: var(--purple-50); }
