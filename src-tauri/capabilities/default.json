@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "메인 창 기본 권한. 게이트웨이 HTTP 는 전부 Rust 커맨드를 타므로 http 권한은 의도적으로 부여하지 않는다.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize",
+    "core:window:allow-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-focus",
+    "core:webview:allow-internal-toggle-devtools",
+    "core:event:default",
+    "store:default",
+    "dialog:default",
+    "clipboard-manager:allow-write-text",
+    "log:default"
+  ]
+}

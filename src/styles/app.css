@@ -1,0 +1,75 @@
+/* 앱 전역 스타일.
+   앞부분은 디자인 원본 `API Gateway 관리자.dc.html` 의 <helmet><style> 블록을
+   그대로 옮긴 것이고, 뒷부분은 데스크톱(네이티브 창) 전용 추가분이다. */
+
+/* ─── 디자인 원본 helmet <style> (무수정) ────────────────── */
+html, body { margin:0; height:100%; overflow:hidden; background:var(--gray-100); }
+a { color: var(--purple-700); text-decoration: none; }
+a:hover { color: var(--purple-800); text-decoration: underline; }
+textarea, input, select { font-family: var(--font-sans); }
+textarea:focus, input:focus, select:focus { outline:0; border-color: var(--purple-500); box-shadow: var(--ring-primary); }
+::-webkit-scrollbar { width:10px; height:10px; }
+::-webkit-scrollbar-thumb { background: var(--gray-300); border-radius:1000px; border:3px solid #fff; }
+::-webkit-scrollbar-track { background:#fff; }
+@keyframes toastIn { from { opacity:0; transform: translateY(8px); } to { opacity:1; transform:none; } }
+
+/* ─── 데스크톱 전용 추가분 ────────────────────────────────── */
+#root { height: 100%; }
+
+/* 데스크톱 앱 관례: 텍스트 드래그 선택을 막되 입력 요소는 예외.
+   (웹페이지가 아니라 애플리케이션 창처럼 느껴지게 한다) */
+body {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+input, textarea, pre, code, .selectable {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 창 컨트롤 3종 (최소화 · 최대화 · 닫기).
+   디자인에는 hover 상태가 정의되어 있지 않아 Windows 관례를 최소한으로만 따른다. */
+.wc {
+  width: 44px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--gray-400);
+  transition: background var(--duration-fast) var(--ease-standard),
+              color var(--duration-fast) var(--ease-standard);
+  -webkit-app-region: no-drag;
+}
+.wc:hover  { background: rgba(255,255,255,.10); color: #fff; }
+.wc:active { background: rgba(255,255,255,.16); }
+.wc.close:hover  { background: #C42B1C; color: #fff; }
+.wc.close:active { background: #B22B1B; }
+/* Snap Layouts 팝업이 떠 있는 동안 Win32 쪽에서 알려주는 호버 상태 */
+.wc.nc-hover { background: rgba(255,255,255,.10); color: #fff; }
+
+/* 창이 비활성(포커스 아웃)일 때 타이틀바 대비를 살짝 낮춘다 */
+.titlebar.inactive .tb-title { color: var(--gray-400); }
+
+/* 리사이즈 보더는 Win32(WM_NCHITTEST)에서 처리하므로 CSS 핸들은 두지 않는다.
+   드래그 영역만 지정한다. */
+[data-tauri-drag-region] { -webkit-app-region: drag; }
+[data-tauri-drag-region] * { -webkit-app-region: no-drag; }
+
+/* 비활성/처리중 버튼 */
+.btn[disabled] { opacity: var(--opacity-disabled); pointer-events: none; }
+
+/* 목록/폼 로딩 · 빈 상태 */
+.state-block {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 56px 24px; text-align: center;
+}
+.state-block .msg { font: 400 13px/20px var(--font-sans); color: var(--gray-500); }
+
+/* 회전 스피너 */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid var(--gray-200); border-top-color: var(--purple-500);
+  animation: spin 700ms linear infinite;
+}
+
+/* select 는 kit.css 의 .text-input 을 그대로 쓰되 화살표 여백만 확보 */
+select.text-input { padding-right: 32px; appearance: auto; }

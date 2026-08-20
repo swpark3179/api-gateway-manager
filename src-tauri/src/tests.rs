@@ -1,0 +1,503 @@
+//! 회귀 테스트.
+//!
+//! 이 앱에서 조용히 틀리면 가장 위험한 세 가지를 고정한다:
+//!   1. **프록시 우회** — 시스템/환경변수 프록시가 걸려 있어도 직접 나가야 한다.
+//!   2. **플러그인 보존** — 저장이 게이트웨이의 다른 플러그인을 지우면 안 된다.
+//!   3. **JWT 형식** — 게이트웨이가 받아들이는 HS256 토큰이어야 한다.
+
+use serde_json::json;
+
+// ── 1. 프록시 우회 ───────────────────────────────────────────
+
+mod proxy {
+    use crate::apisix::client;
+    use crate::config::EnvConfig;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    /// APISIX 흉내를 내는 최소 HTTP 서버. 포트를 돌려준다.
+    fn spawn_stub() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+
+                let body = br#"{"total":0,"list":[]}"#;
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Server: APISIX/3.9.1\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(head.as_bytes());
+                let _ = s.write_all(body);
+                let _ = s.flush();
+            }
+        });
+
+        port
+    }
+
+    fn cfg(port: u16, no_proxy: bool) -> EnvConfig {
+        EnvConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            no_proxy,
+            insecure_tls: false,
+        }
+    }
+
+    /// no_proxy 를 켜면 HTTP_PROXY 환경변수가 죽은 주소를 가리켜도 직접 연결된다.
+    /// 끄면 프록시를 타서 실패한다 — 즉 토글이 실제로 동작한다는 뜻이다.
+    ///
+    /// 두 검증이 같은 프로세스의 환경변수를 공유하므로 한 테스트로 묶었다.
+    #[test]
+    fn no_proxy_bypasses_env_proxy() {
+        let port = spawn_stub();
+
+        // 아무도 듣지 않는 포트를 프록시로 지정한다 → 프록시를 타면 즉시 실패.
+        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:9");
+        std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:9");
+        // NO_PROXY 에 127.0.0.1 이 들어 있으면 음성 케이스가 무의미해지므로 지운다.
+        std::env::remove_var("NO_PROXY");
+        std::env::remove_var("no_proxy");
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // (1) no_proxy = true → 성공해야 한다.
+        let bypassed = client::build(&cfg(port, true)).expect("client");
+        let url = format!("http://127.0.0.1:{port}/apisix/admin/routes");
+        let ok = rt.block_on(async { bypassed.get(&url).send().await });
+        assert!(
+            ok.is_ok(),
+            "no_proxy=true 인데 프록시를 탔다 (프록시 우회 실패): {:?}",
+            ok.err()
+        );
+        assert_eq!(ok.unwrap().status().as_u16(), 200);
+
+        // (2) no_proxy = false → 죽은 프록시로 가서 실패해야 한다.
+        let proxied = client::build(&cfg(port, false)).expect("client");
+        let err = rt.block_on(async { proxied.get(&url).send().await });
+        assert!(
+            err.is_err(),
+            "no_proxy=false 인데 프록시를 타지 않았다 — 토글이 동작하지 않는다"
+        );
+
+        std::env::remove_var("HTTP_PROXY");
+        std::env::remove_var("HTTPS_PROXY");
+    }
+}
+
+// ── 2. 저장 시 플러그인 보존 ─────────────────────────────────
+
+#[test]
+fn route_save_preserves_unknown_plugins() {
+    use crate::apisix::routes::{apply_route_form_for_test, RouteForm};
+
+    // 게이트웨이에 이미 limit-count 가 붙어 있고, proxy-rewrite 에는 headers 설정도 있다.
+    let existing = json!({
+        "id": "42",
+        "name": "order-list-v1",
+        "uri": "/api/v1/orders",
+        "methods": ["GET"],
+        "status": 0,
+        "service_id": "svc-order-core",
+        "create_time": 1700000000,
+        "update_time": 1700000100,
+        "plugins": {
+            "limit-count": { "count": 100, "time_window": 60 },
+            "proxy-rewrite": { "uri": "/orders", "headers": { "X-Src": "gw" } },
+            "shi-auth": { "allowed_groups": ["ops-admin"], "mode": "strict" }
+        }
+    });
+
+    let form = RouteForm {
+        id: Some("42".into()),
+        name: "order-list-v1".into(),
+        uri: "/api/v1/orders".into(),
+        desc: "주문 목록".into(),
+        methods: vec!["GET".into(), "POST".into()],
+        service_id: "svc-order-core".into(),
+        rewrite: "/orders/v2".into(),
+        groups: vec!["ops-admin".into(), "order-dev".into()],
+        status: Some(0),
+        groups_location: None,
+    };
+
+    let body = apply_route_form_for_test(existing, &form, false);
+    let p = body.get("plugins").unwrap();
+
+    // 앱이 모르는 플러그인은 그대로 살아 있어야 한다.
+    assert_eq!(p.pointer("/limit-count/count").unwrap(), 100);
+    // 같은 플러그인 안의 다른 필드도 보존된다.
+    assert_eq!(p.pointer("/proxy-rewrite/headers/X-Src").unwrap(), "gw");
+    assert_eq!(p.pointer("/shi-auth/mode").unwrap(), "strict");
+
+    // 앱이 관리하는 키는 폼 값으로 갱신된다.
+    assert_eq!(p.pointer("/proxy-rewrite/uri").unwrap(), "/orders/v2");
+    assert_eq!(
+        p.pointer("/shi-auth/allowed_groups").unwrap(),
+        &json!(["ops-admin", "order-dev"])
+    );
+
+    // 서버가 관리하는 필드는 요청 본문에서 빠진다.
+    assert!(body.get("create_time").is_none());
+    assert!(body.get("update_time").is_none());
+    assert!(body.get("id").is_none());
+
+    // 기존 라우트는 status 가 유지된다 (신규만 1 고정).
+    assert_eq!(body.get("status").unwrap(), 0);
+}
+
+#[test]
+fn new_route_is_always_active() {
+    use crate::apisix::routes::{apply_route_form_for_test, RouteForm};
+
+    let form = RouteForm {
+        id: None,
+        name: "new-route".into(),
+        uri: "/a, /b".into(),
+        desc: String::new(),
+        methods: vec![],
+        service_id: "svc-1".into(),
+        rewrite: String::new(),
+        groups: vec![],
+        status: None,
+        groups_location: None,
+    };
+
+    let body = apply_route_form_for_test(json!({}), &form, true);
+    assert_eq!(body.get("status").unwrap(), 1);
+    // desc 가 비면 키 자체를 보내지 않는다.
+    assert!(body.get("desc").is_none());
+    // methods 가 비면 키를 빼서 모든 메서드를 허용한다.
+    assert!(body.get("methods").is_none());
+    // 쉼표가 있으면 uris 배열로 저장한다.
+    assert_eq!(body.get("uris").unwrap(), &json!(["/a", "/b"]));
+    assert!(body.get("uri").is_none());
+}
+
+#[test]
+fn consumer_save_preserves_jwt_auth_extras() {
+    use crate::apisix::consumers::{apply_consumer_form_for_test, ConsumerForm};
+
+    let existing = json!({
+        "username": "partner_alpha",
+        "plugins": {
+            "jwt-auth": { "key": "old-key", "secret": "old", "algorithm": "HS256", "exp": 86400 },
+            "limit-count": { "count": 10 }
+        }
+    });
+
+    let form = ConsumerForm {
+        username: "partner_alpha".into(),
+        desc: "제휴사".into(),
+        key: "partner-alpha-key".into(),
+        secret: "a3f1c8d92b7e4056ac1de9f2b8710c44".into(),
+        groups: vec!["partner".into()],
+        is_new: false,
+        groups_location: None,
+    };
+
+    let body = apply_consumer_form_for_test(existing, &form);
+    let p = body.get("plugins").unwrap();
+
+    assert_eq!(p.pointer("/jwt-auth/algorithm").unwrap(), "HS256");
+    assert_eq!(p.pointer("/jwt-auth/exp").unwrap(), 86400);
+    assert_eq!(p.pointer("/limit-count/count").unwrap(), 10);
+    assert_eq!(p.pointer("/jwt-auth/key").unwrap(), "partner-alpha-key");
+    assert_eq!(p.pointer("/jwt-auth/auth-groups").unwrap(), &json!(["partner"]));
+}
+
+// ── 2-b. auth-groups 를 어디에 넣어 뒀든 찾아 읽고, 그 자리에 되쓴다 ──
+//
+// 이 앱 밖에서 등록된 consumer 는 표기가 달라 화면이 공란으로 보이는 사고가 있었다.
+// 읽기는 관대하게, 쓰기는 "읽은 그 자리에" 가 규칙이다.
+
+#[test]
+fn finds_auth_groups_in_nonstandard_places() {
+    use crate::apisix::models::ConsumerView;
+
+    // (1) 표준 위치
+    let c = ConsumerView::from_value(&json!({
+        "username": "a",
+        "plugins": { "jwt-auth": { "key": "k", "auth-groups": ["partner", "ops"] } }
+    }));
+    assert_eq!(c.groups, vec!["partner", "ops"]);
+    assert_eq!(c.groups_location.plugin, "jwt-auth");
+    assert_eq!(c.groups_location.key, "auth-groups");
+
+    // (2) 언더스코어 표기
+    let c = ConsumerView::from_value(&json!({
+        "username": "b",
+        "plugins": { "jwt-auth": { "key": "k", "auth_groups": ["internal"] } }
+    }));
+    assert_eq!(c.groups, vec!["internal"]);
+    assert_eq!(c.groups_location.key, "auth_groups");
+
+    // (3) 다른 플러그인 (사내 shi-auth 등)
+    let c = ConsumerView::from_value(&json!({
+        "username": "c",
+        "plugins": {
+            "jwt-auth": { "key": "k" },
+            "shi-auth": { "allowed_groups": ["billing-ops"] }
+        }
+    }));
+    assert_eq!(c.groups, vec!["billing-ops"]);
+    assert_eq!(c.groups_location.plugin, "shi-auth");
+
+    // (4) 콤마 구분 문자열
+    let c = ConsumerView::from_value(&json!({
+        "username": "d",
+        "plugins": { "jwt-auth": { "key": "k", "auth-groups": "partner, mobile" } }
+    }));
+    assert_eq!(c.groups, vec!["partner", "mobile"]);
+    assert!(c.groups_location.as_csv);
+
+    // (5) 최상위 필드
+    let c = ConsumerView::from_value(&json!({
+        "username": "e",
+        "groups": ["qa"],
+        "plugins": { "jwt-auth": { "key": "k" } }
+    }));
+    assert_eq!(c.groups, vec!["qa"]);
+    assert_eq!(c.groups_location.plugin, "");
+
+    // (6) 어디에도 없으면 빈 목록 + 기본 위치
+    let c = ConsumerView::from_value(&json!({
+        "username": "f",
+        "plugins": { "jwt-auth": { "key": "k" } }
+    }));
+    assert!(c.groups.is_empty());
+    assert_eq!(c.groups_location, Default::default());
+
+    // (7) 표준 위치가 비어 있고 값은 다른 곳에 있으면 값이 있는 쪽을 택한다.
+    let c = ConsumerView::from_value(&json!({
+        "username": "g",
+        "plugins": {
+            "jwt-auth": { "key": "k", "auth-groups": [] },
+            "shi-auth": { "allowed_groups": ["ops-admin"] }
+        }
+    }));
+    assert_eq!(c.groups, vec!["ops-admin"]);
+    assert_eq!(c.groups_location.plugin, "shi-auth");
+}
+
+#[test]
+fn saves_auth_groups_back_to_where_they_were_found() {
+    use crate::apisix::consumers::{apply_consumer_form_for_test, ConsumerForm};
+    use crate::apisix::models::{ConsumerView, GroupsLocation};
+
+    // 다른 도구가 `auth_groups`(언더스코어)로 넣어 둔 consumer
+    let existing = json!({
+        "username": "partner_alpha",
+        "plugins": { "jwt-auth": { "key": "k", "secret": "s", "auth_groups": ["partner"] } }
+    });
+    let view = ConsumerView::from_value(&existing);
+
+    let form = ConsumerForm {
+        username: "partner_alpha".into(),
+        desc: String::new(),
+        key: "k".into(),
+        secret: "s".into(),
+        groups: vec!["partner".into(), "mobile".into()],
+        is_new: false,
+        groups_location: Some(view.groups_location.clone()),
+    };
+
+    let body = apply_consumer_form_for_test(existing, &form);
+    let p = body.get("plugins").unwrap();
+
+    // 원래 표기 그대로 갱신되고
+    assert_eq!(p.pointer("/jwt-auth/auth_groups").unwrap(), &json!(["partner", "mobile"]));
+    // 표준 표기를 새로 만들어 키를 둘로 갈라 놓지 않는다.
+    assert!(p.pointer("/jwt-auth/auth-groups").is_none());
+
+    // CSV 로 저장돼 있던 경우엔 CSV 로 되쓴다.
+    let csv_loc = GroupsLocation {
+        plugin: "jwt-auth".into(),
+        key: "auth-groups".into(),
+        as_csv: true,
+    };
+    let form = ConsumerForm {
+        username: "u".into(),
+        desc: String::new(),
+        key: "k".into(),
+        secret: "s".into(),
+        groups: vec!["a".into(), "b".into()],
+        is_new: false,
+        groups_location: Some(csv_loc),
+    };
+    let body = apply_consumer_form_for_test(json!({}), &form);
+    assert_eq!(body.pointer("/plugins/jwt-auth/auth-groups").unwrap(), "a,b");
+}
+
+// ── 3. 응답 파싱 ─────────────────────────────────────────────
+
+#[test]
+fn extracts_both_v3_and_v2_list_shapes() {
+    use crate::apisix::models::extract_list;
+
+    let v3 = json!({
+        "total": 1,
+        "list": [{ "key": "/apisix/routes/1", "value": { "id": "1", "uri": "/hello" } }]
+    });
+    let got = extract_list(&v3);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].get("uri").unwrap(), "/hello");
+
+    let v2 = json!({
+        "count": "1",
+        "node": { "nodes": [{ "key": "/apisix/routes/1", "value": { "id": "1", "uri": "/hi" } }] }
+    });
+    let got = extract_list(&v2);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].get("uri").unwrap(), "/hi");
+
+    // 목록이 비어 있어도 패닉하지 않는다.
+    assert!(extract_list(&json!({ "total": 0, "list": [] })).is_empty());
+    assert!(extract_list(&json!({})).is_empty());
+}
+
+#[test]
+fn route_view_reads_plugin_fields() {
+    use crate::apisix::models::RouteView;
+
+    let v = json!({
+        "id": 7,
+        "name": "billing-invoice",
+        "uris": ["/api/v1/invoices/*"],
+        "methods": ["GET", "POST"],
+        "status": 0,
+        "service_id": "svc-billing",
+        "update_time": 1_700_000_000,
+        "plugins": {
+            "proxy-rewrite": { "uri": "/invoices/*" },
+            "shi-auth": { "allowed_groups": ["billing-ops"] }
+        }
+    });
+
+    let r = RouteView::from_value(&v);
+    assert_eq!(r.id, "7"); // 숫자 id 도 문자열로 정규화된다
+    assert_eq!(r.uri, "/api/v1/invoices/*"); // uris → uri 표기
+    assert_eq!(r.rewrite, "/invoices/*");
+    assert_eq!(r.groups, vec!["billing-ops"]);
+    assert_eq!(r.status, 0);
+}
+
+// ── 4. JWT ───────────────────────────────────────────────────
+
+#[test]
+fn jwt_is_valid_hs256() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+
+    let r = crate::jwt::sign("partner-alpha-key", "topsecret", None, None).expect("sign");
+
+    let parts: Vec<&str> = r.token.split('.').collect();
+    assert_eq!(parts.len(), 3, "JWT 는 3개 세그먼트여야 한다");
+
+    let header = URL_SAFE_NO_PAD.decode(parts[0]).unwrap();
+    assert_eq!(String::from_utf8(header).unwrap(), r#"{"alg":"HS256","typ":"JWT"}"#);
+
+    let payload: serde_json::Value =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+    assert_eq!(payload["key"], "partner-alpha-key");
+    // nbf 는 발급 시점이 아니라 고정값(로컬 2025-08-01 00:00)이다.
+    assert_eq!(r.nbf, payload["nbf"].as_i64().unwrap());
+    assert_eq!(r.nbf_human, "2025-08-01 00:00");
+    // 만료는 디자인이 고정한 값 (로컬 3000-12-31 17:59)
+    assert_eq!(r.exp, payload["exp"].as_i64().unwrap());
+    assert!(r.exp_human.starts_with("3000-12-31"));
+
+    // base64url 패딩이 없어야 한다.
+    assert!(!r.token.contains('='));
+    assert!(!r.token.contains('+'));
+    assert!(!r.token.contains('/'));
+
+    // key·secret 이 같으면 몇 번을 눌러도 같은 토큰이 나온다 (nbf 고정의 목적).
+    let again = crate::jwt::sign("partner-alpha-key", "topsecret", None, None).expect("sign");
+    assert_eq!(r.token, again.token);
+
+    // secret 이 바뀌면 토큰도 바뀐다.
+    let rotated = crate::jwt::sign("partner-alpha-key", "othersecret", None, None).expect("sign");
+    assert_ne!(r.token, rotated.token);
+
+    // key·secret 이 없으면 서명하지 않는다.
+    assert!(crate::jwt::sign("", "s", None, None).is_err());
+    assert!(crate::jwt::sign("k", "", None, None).is_err());
+}
+
+#[test]
+fn generated_secret_is_32_hex_chars() {
+    let a = crate::jwt::gen_secret();
+    let b = crate::jwt::gen_secret();
+    assert_eq!(a.len(), 32);
+    assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_ne!(a, b, "매번 다른 값이 나와야 한다");
+}
+
+// ── 5. baseUrl 정규화 ────────────────────────────────────────
+
+#[test]
+fn admin_base_normalizes_input() {
+    use crate::config::EnvConfig;
+
+    let mk = |u: &str| EnvConfig {
+        base_url: u.into(),
+        no_proxy: true,
+        insecure_tls: false,
+    };
+
+    assert_eq!(
+        mk("https://gw.internal.sds:9180").admin_base().unwrap(),
+        "https://gw.internal.sds:9180/apisix/admin"
+    );
+    // 끝의 슬래시
+    assert_eq!(
+        mk("https://gw.internal.sds:9180/").admin_base().unwrap(),
+        "https://gw.internal.sds:9180/apisix/admin"
+    );
+    // 스킴 생략 → https 로 보정
+    assert_eq!(
+        mk("gw.internal.sds:9180").admin_base().unwrap(),
+        "https://gw.internal.sds:9180/apisix/admin"
+    );
+    // 사용자가 실수로 경로까지 넣은 경우 중복되지 않는다
+    assert_eq!(
+        mk("https://gw.internal.sds:9180/apisix/admin").admin_base().unwrap(),
+        "https://gw.internal.sds:9180/apisix/admin"
+    );
+    assert!(mk("   ").admin_base().is_err());
+}
+
+// ── 6. 에러 분류 ─────────────────────────────────────────────
+
+#[test]
+fn http_status_maps_to_actionable_error() {
+    use crate::error::{AppError, ErrorKind};
+
+    let e = AppError::from_status(401, "");
+    assert_eq!(e.kind, ErrorKind::Unauthorized);
+    assert!(e.hint.is_some());
+
+    let e = AppError::from_status(404, "");
+    assert_eq!(e.kind, ErrorKind::NotFound);
+
+    // APISIX 의 error_msg 를 그대로 사용자에게 보여준다.
+    let e = AppError::from_status(400, r#"{"error_msg":"invalid configuration: failed to check"}"#);
+    assert_eq!(e.kind, ErrorKind::BadRequest);
+    assert_eq!(e.message, "invalid configuration: failed to check");
+
+    let e = AppError::from_status(503, "upstream down");
+    assert_eq!(e.kind, ErrorKind::Gateway);
+    assert!(e.message.contains("503"));
+}

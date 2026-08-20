@@ -1,0 +1,71 @@
+[package]
+name = "api-gateway-manager"
+version = "1.0.0"
+description = "APISIX Admin API 기반 API Gateway 관리자"
+authors = ["Samsung SDS"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "api_gateway_manager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-store = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-log = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+log = "0.4"
+
+# HTTP — 반드시 no_proxy() 로만 빌드한다 (apisix/client.rs 참조).
+# rustls-tls-native-roots: 사내 CA 가 Windows 인증서 저장소에 설치된 경우를 지원한다.
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls-native-roots",
+  "charset",
+  "http2",
+] }
+
+# 관리 토큰 → Windows 자격 증명 관리자
+keyring = { version = "3", features = ["windows-native"] }
+
+# JWT HS256
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dwm",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_Controls",
+  "Win32_UI_HiDpi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

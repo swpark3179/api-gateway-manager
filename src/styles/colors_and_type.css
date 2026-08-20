@@ -1,0 +1,333 @@
+/* =========================================================
+   OPUS-X Design System — Foundations
+   Color · Type · Spacing · Radius · Shadow · Motion
+   v1.1.3 (Samsung SDS · OPUS-X)
+
+   원본: Claude Design 프로젝트 05e631b1
+         _ds/2-019e2001-8d73-732d-afcb-9133163294d9/colors_and_type.css
+   변경점 (데스크톱 이식) — 아래 1가지 외 토큰 값은 원본과 완전히 동일:
+     · @font-face 선언과 Google Fonts @import 를 모두 제거했다.
+       폰트는 main.tsx 에서 @fontsource 패키지로 번들한다:
+         Noto Sans KR 400/500/600/700, Roboto Mono 400/700
+       패밀리명("Noto Sans KR" / "Roboto Mono")은 원본과 동일하므로
+       아래 --font-sans / --font-mono 토큰은 손대지 않았다.
+       원격 @import 는 사내망 + 프록시 우회 환경에서 렌더 블로킹이 되므로 반드시 제거해야 한다.
+   ========================================================= */
+
+:root {
+  /* =====================================================
+     SEED COLORS — Untitled-UI palette adopted by OPUS-X
+     ===================================================== */
+
+  /* Purple (Primary brand) */
+  --purple-25:   #FAFAFF;
+  --purple-50:   #F4F3FF;
+  --purple-100:  #EBE9FE;
+  --purple-200:  #D9D6FE;
+  --purple-300:  #BDB4FE;
+  --purple-400:  #9B8AFB;
+  --purple-500:  #7F56D9; /* Primary Accent */
+  --purple-600:  #6941C6; /* Primary base */
+  --purple-700:  #53389E; /* Primary Hover */
+  --purple-800:  #42307D;
+  --purple-900:  #2F1C6A;
+
+  /* Yellow (Highlight / Warning) */
+  --yellow-25:   #FEFDF0;
+  --yellow-50:   #FEFBE8;
+  --yellow-100:  #FEF7C3;
+  --yellow-200:  #FEEE95;
+  --yellow-300:  #FDE272;
+  --yellow-400:  #FAC515;
+  --yellow-500:  #EAAA08;
+  --yellow-600:  #A15C07; /* Highlight base */
+  --yellow-700:  #854A0E;
+  --yellow-800:  #713B12;
+  --yellow-900:  #542C0D;
+
+  /* Gray Modern (Neutral) */
+  --gray-25:    #FCFCFD;
+  --gray-50:    #F9FAFB;
+  --gray-100:   #F2F4F7;
+  --gray-200:   #EAECF0;
+  --gray-300:   #D0D5DD;
+  --gray-400:   #98A2B3;
+  --gray-500:   #667085;
+  --gray-600:   #475467; /* Neutral base */
+  --gray-700:   #344054;
+  --gray-800:   #1D2939;
+  --gray-900:   #101828;
+
+  /* Blue (Info) */
+  --blue-25:    #F5FAFF;
+  --blue-50:    #EFF8FF;
+  --blue-100:   #D1E9FF;
+  --blue-200:   #B2DDFF;
+  --blue-300:   #84CAFF;
+  --blue-400:   #53B1FD;
+  --blue-500:   #2E90FA;
+  --blue-600:   #1570EF;
+  --blue-700:   #175CD3;
+  --blue-800:   #1849A9;
+  --blue-900:   #194185;
+
+  /* Green (Success) */
+  --green-25:   #F6FEF9;
+  --green-50:   #ECFDF3;
+  --green-100:  #D1FADF;
+  --green-200:  #A6F4C5;
+  --green-300:  #6CE9A6;
+  --green-400:  #32D583;
+  --green-500:  #12B76A;
+  --green-600:  #039855;
+  --green-700:  #027A48;
+  --green-800:  #05603A;
+  --green-900:  #054F31;
+
+  /* Red (Error / Danger) */
+  --red-25:     #FFFBFA;
+  --red-50:     #FEF3F2;
+  --red-100:    #FEE4E2;
+  --red-200:    #FECDCA;
+  --red-300:    #FDA29B;
+  --red-400:    #F97066;
+  --red-500:    #F04438;
+  --red-600:    #D92D20;
+  --red-700:    #B42318;
+  --red-800:    #912018;
+  --red-900:    #7A271A;
+
+  /* Teal (used for charts / accents) */
+  --teal-500:   #15B79E;
+  --teal-600:   #0E9384;
+
+  /* True */
+  --color-black: #000000;
+  --color-white: #FFFFFF;
+
+  /* =====================================================
+     CONTEXT (semantic) — Foreground
+     ===================================================== */
+  --fg-primary:           var(--purple-600);
+  --fg-primary-hover:     var(--purple-700);
+  --fg-primary-disabled:  var(--purple-300);
+  --fg-primary-invert:    var(--purple-300);
+  --fg-primary-accent:    var(--purple-500);
+
+  --fg-neutral:           var(--gray-600);
+  --fg-neutral-hover:     var(--gray-700);
+  --fg-neutral-disabled:  var(--gray-300);
+  --fg-neutral-invert:    var(--color-white);
+  --fg-neutral-accent:    var(--gray-500);
+
+  --fg-secondary:         var(--gray-500);
+  --fg-tertiary:          var(--gray-400);
+
+  --fg-highlight:         var(--yellow-600);
+  --fg-success:           var(--green-600);
+  --fg-warning:           var(--yellow-700);
+  --fg-error:             var(--red-600);
+  --fg-info:              var(--blue-600);
+
+  --fg-on-primary:        var(--color-white);
+  --fg-on-neutral:        var(--color-white);
+
+  /* =====================================================
+     CONTEXT — Background
+     ===================================================== */
+  --bg-base:              var(--color-white);
+  --bg-subtle:            var(--gray-50);
+  --bg-muted:             var(--gray-100);
+  --bg-canvas:            #F8F9FC;
+  --bg-invert:            var(--gray-900);
+
+  --bg-primary:           var(--purple-600);
+  --bg-primary-hover:     var(--purple-700);
+  --bg-primary-disabled:  var(--purple-300);
+  --bg-primary-accent:    var(--purple-500);
+  --bg-primary-tint:      var(--purple-50);
+  --bg-primary-tint-hover:var(--purple-100);
+
+  --bg-neutral:           var(--gray-600);
+  --bg-neutral-hover:     var(--gray-700);
+  --bg-neutral-disabled:  var(--gray-300);
+  --bg-neutral-tint:      var(--gray-50);
+  --bg-neutral-tint-hover:var(--gray-100);
+
+  --bg-success-tint:      var(--green-50);
+  --bg-warning-tint:      var(--yellow-50);
+  --bg-error-tint:        var(--red-50);
+  --bg-info-tint:         var(--blue-50);
+
+  /* =====================================================
+     CONTEXT — Border
+     ===================================================== */
+  --border-primary:           var(--purple-600);
+  --border-primary-hover:     var(--purple-700);
+  --border-primary-disabled:  var(--purple-300);
+  --border-neutral:           var(--gray-300);
+  --border-neutral-hover:     var(--gray-400);
+  --border-neutral-disabled:  var(--gray-200);
+  --border-subtle:            var(--gray-200);
+
+  /* =====================================================
+     TYPOGRAPHY
+     -----------------------------------------------------
+     Typefaces (OPUS-X uses Pan-CJK Noto family)
+     KOR → Noto Sans KR · ENG → Noto Sans
+     System-font fallback chain matches the foundations doc.
+     ===================================================== */
+  --font-sans:
+    "Noto Sans KR", "Noto Sans", "Malgun Gothic",
+    -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Apple SD Gothic Neo", Arial, sans-serif;
+  --font-mono:
+    "Roboto Mono", "Space Mono", ui-monospace,
+    SFMono-Regular, Menlo, Consolas, monospace;
+  --font-display:
+    "Sora", "Samsung Sharp Sans", "Noto Sans",
+    -apple-system, BlinkMacSystemFont, sans-serif;
+
+  /* Weights */
+  --fw-regular: 400;
+  --fw-medium:  500;
+  --fw-bold:    700;
+
+  /* Font size · Line height — token table */
+  --fs-h1: 38px;  --lh-h1: 48px;
+  --fs-h2: 30px;  --lh-h2: 40px;
+  --fs-h3: 24px;  --lh-h3: 32px;
+  --fs-h4: 20px;  --lh-h4: 24px;
+  --fs-h5: 16px;  --lh-h5: 20px;
+
+  --fs-xl: 20px;  --lh-xl: 32px;  /* body / paragraph */
+  --fs-lg: 16px;  --lh-lg: 24px;
+  --fs-md: 14px;  --lh-md: 20px;  /* default UI label */
+  --fs-sm: 12px;  --lh-sm: 16px;
+  --fs-xs: 10px;  --lh-xs: 16px;
+
+  /* =====================================================
+     SPACING — 4-point grid
+     ===================================================== */
+  --space-0:    0;
+  --space-2xs:  2px;
+  --space-xs:   4px;
+  --space-sm:   8px;
+  --space-md:   12px;
+  --space-lg:   16px;
+  --space-xl:   24px;
+  --space-2xl:  32px;
+  --space-3xl:  40px;
+  --space-4xl:  48px;
+  --space-5xl:  64px;
+  --space-6xl:  80px;
+  --space-7xl:  96px;
+
+  /* =====================================================
+     BORDER RADIUS
+     "Medium = 6 by exception, for visual balance"
+     ===================================================== */
+  --radius-none:  0;
+  --radius-xs:    2px;
+  --radius-sm:    4px;
+  --radius-md:    6px;
+  --radius-lg:    8px;
+  --radius-xl:    12px;
+  --radius-2xl:   16px;
+  --radius-3xl:   20px;
+  --radius-full:  1000px;
+
+  /* =====================================================
+     BORDER WIDTH
+     ===================================================== */
+  --bw-1: 1px;
+  --bw-2: 2px;
+  --bw-4: 4px;
+
+  /* =====================================================
+     SHADOW (Base) — escalating elevation
+     ===================================================== */
+  --shadow-xs: 0 1px 2px 0 rgba(16,24,40,.05);
+  --shadow-sm: 0 1px 3px 0 rgba(16,24,40,.10), 0 1px 2px 0 rgba(16,24,40,.06);
+  --shadow-md: 0 4px 8px -2px rgba(16,24,40,.10), 0 2px 4px -2px rgba(16,24,40,.06);
+  --shadow-lg: 0 12px 16px -4px rgba(16,24,40,.08), 0 4px 6px -2px rgba(16,24,40,.03);
+  --shadow-xl: 0 20px 24px -4px rgba(16,24,40,.08), 0 8px 8px -4px rgba(16,24,40,.03);
+  --shadow-2xl: 0 24px 48px -12px rgba(16,24,40,.18);
+  --shadow-3xl: 0 32px 64px -12px rgba(16,24,40,.14);
+
+  /* Focus rings (4px halo) */
+  --ring-neutral: 0 0 0 4px rgba(152,162,179,.25);
+  --ring-primary: 0 0 0 4px rgba(127,86,217,.24);
+  --ring-error:   0 0 0 4px rgba(240,68,56,.24);
+  --ring-success: 0 0 0 4px rgba(18,183,106,.24);
+  --ring-warning: 0 0 0 4px rgba(247,144,9,.24);
+
+  /* =====================================================
+     OPACITY
+     ===================================================== */
+  --opacity-disabled: 0.4;
+  --opacity-hover:    0.08;
+  --opacity-pressed:  0.16;
+
+  /* =====================================================
+     MOTION
+     ===================================================== */
+  --ease-standard: cubic-bezier(.2,.0,.0,1);
+  --ease-emphasized: cubic-bezier(.2,.0,0,1);
+  --ease-decelerate: cubic-bezier(0,0,0,1);
+  --ease-accelerate: cubic-bezier(.3,0,1,1);
+
+  --duration-fast:    120ms;
+  --duration-medium:  200ms;
+  --duration-slow:    320ms;
+
+  /* =====================================================
+     Z-INDEX
+     ===================================================== */
+  --z-base:     0;
+  --z-raised:   100;
+  --z-dropdown: 1000;
+  --z-overlay:  1100;
+  --z-modal:    1200;
+  --z-toast:    1300;
+  --z-tooltip:  1400;
+}
+
+/* =====================================================
+   Semantic element rules
+   ===================================================== */
+html, body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: var(--lh-md);
+  color: var(--gray-900);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, .h1 { font: var(--fw-bold) var(--fs-h1)/var(--lh-h1) var(--font-sans); color: var(--gray-900); margin: 0; }
+h2, .h2 { font: var(--fw-bold) var(--fs-h2)/var(--lh-h2) var(--font-sans); color: var(--gray-900); margin: 0; }
+h3, .h3 { font: var(--fw-bold) var(--fs-h3)/var(--lh-h3) var(--font-sans); color: var(--gray-900); margin: 0; }
+h4, .h4 { font: var(--fw-bold) var(--fs-h4)/var(--lh-h4) var(--font-sans); color: var(--gray-900); margin: 0; }
+h5, .h5 { font: var(--fw-bold) var(--fs-h5)/var(--lh-h5) var(--font-sans); color: var(--gray-900); margin: 0; }
+
+.text-xl  { font: var(--fw-regular) var(--fs-xl)/var(--lh-xl) var(--font-sans); }
+.text-lg  { font: var(--fw-regular) var(--fs-lg)/var(--lh-lg) var(--font-sans); }
+.text-md  { font: var(--fw-regular) var(--fs-md)/var(--lh-md) var(--font-sans); }
+.text-sm  { font: var(--fw-regular) var(--fs-sm)/var(--lh-sm) var(--font-sans); }
+.text-xs  { font: var(--fw-regular) var(--fs-xs)/var(--lh-xs) var(--font-sans); }
+
+.font-medium { font-weight: var(--fw-medium); }
+.font-bold   { font-weight: var(--fw-bold); }
+
+.font-mono { font-family: var(--font-mono); }
+.font-display { font-family: var(--font-display); }
+
+a { color: var(--fg-primary); text-decoration: underline; text-underline-offset: 2px; }
+a:hover { color: var(--fg-primary-hover); }
+
+code, kbd, samp, pre {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
