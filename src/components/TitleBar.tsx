@@ -82,7 +82,7 @@ export default function TitleBar() {
           API Gateway 관리자
         </span>
         <span style={{ font: "400 11px/16px var(--font-mono)", color: "var(--gray-500)" }}>
-          v1.0.0
+          {`v${__APP_VERSION__}`}
         </span>
       </div>
 
