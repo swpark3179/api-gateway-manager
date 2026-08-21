@@ -9,11 +9,14 @@
 
 use reqwest::Method;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Wry};
 
 use super::client;
-use super::models::{extract_list, extract_one, set_groups_at, GroupsLocation, RouteView};
+use super::models::{
+    extract_list, extract_one, obj, set_groups_at, set_or_remove, strip_server_fields,
+    GroupsLocation, RouteView,
+};
 use crate::config::Env;
 use crate::error::{AppError, AppResult, ErrorKind};
 use crate::history;
@@ -159,21 +162,11 @@ fn join_or_dash(v: &[String]) -> String {
     if v.is_empty() { "—".into() } else { v.join(",") }
 }
 
-fn obj(v: Value) -> Map<String, Value> {
-    match v {
-        Value::Object(m) => m,
-        _ => Map::new(),
-    }
-}
-
 /// 원본 route 객체 위에 폼 값을 얹는다. 앱이 모르는 필드/플러그인은 그대로 보존된다.
 fn apply_route_form(base: Value, f: &RouteForm, is_new: bool) -> Value {
     let mut m = obj(base);
 
-    // 서버가 관리하는 필드는 요청 본문에서 제외한다.
-    m.remove("create_time");
-    m.remove("update_time");
-    m.remove("id");
+    strip_server_fields(&mut m);
 
     set_or_remove(&mut m, "name", f.name.trim());
     set_or_remove(&mut m, "desc", f.desc.trim());
@@ -239,14 +232,6 @@ fn apply_route_form(base: Value, f: &RouteForm, is_new: bool) -> Value {
     Value::Object(m)
 }
 
-
-fn set_or_remove(m: &mut Map<String, Value>, key: &str, val: &str) {
-    if val.is_empty() {
-        m.remove(key);
-    } else {
-        m.insert(key.into(), Value::String(val.to_string()));
-    }
-}
 
 /// 테스트에서 머지 로직만 따로 검증하기 위한 얇은 래퍼.
 #[cfg(test)]

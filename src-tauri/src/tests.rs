@@ -681,6 +681,42 @@ fn suggests_apisix_uri_from_oas_path() {
     assert_eq!(oas::join_path("", "pets"), "/pets");
 }
 
+#[test]
+fn derives_route_name_prefix_from_server_path() {
+    use crate::oas;
+
+    // 규약: 앞 슬래시를 떼고 · 대문자로 바꾸고 · 뒤에 슬래시를 붙인다.
+    assert_eq!(oas::name_prefix("/v1"), "V1/");
+    assert_eq!(oas::name_prefix("/v1/api"), "V1/API/");
+    assert_eq!(oas::name_prefix("v1"), "V1/", "앞 슬래시가 없어도 같다");
+    assert_eq!(oas::name_prefix("/ep/"), "EP/", "뒤 슬래시가 겹치지 않는다");
+
+    // 접두사가 없으면 빈 문자열이다 — "/" 만 남기면 이름이 슬래시로 시작해 버린다.
+    assert_eq!(oas::name_prefix(""), "");
+    assert_eq!(oas::name_prefix("/"), "");
+    assert_eq!(oas::name_prefix("  "), "");
+}
+
+#[test]
+fn suggests_route_name_from_prefix_and_raw_path() {
+    use crate::oas;
+
+    // 이름의 path 표기는 스펙 원본을 유지한다 (uri 와 달리 사람이 읽는 값이다).
+    assert_eq!(
+        oas::suggested_name("/v1", "/orders/{orderId}/items"),
+        "V1/orders/{orderId}/items"
+    );
+    // 접두사가 없으면 슬래시로 시작하지 않는다.
+    assert_eq!(oas::suggested_name("", "/orders"), "orders");
+
+    // APISIX 의 name 은 100자 제한이다. 넘치면 잘라야 하고, 바이트로 자르면 UTF-8
+    // 경계가 깨져 저장이 아니라 직렬화가 먼저 터진다 → char 경계에서 자른다.
+    let long = format!("/{}", "가".repeat(200));
+    let out = oas::suggested_name("/v1", &long);
+    assert_eq!(out.chars().count(), oas::MAX_NAME_LEN);
+    assert!(out.starts_with("V1/가"));
+}
+
 // ── 9. 등록 판정 (내장 SQLite) ───────────────────────────────
 
 mod compare {
@@ -839,6 +875,41 @@ mod compare {
         let rows = db::compare(&c, "dev", "svc", "").unwrap();
         assert_eq!(rows[0].state, db::REGISTERED);
         assert_eq!(rows[1].state, db::REGISTERED);
+    }
+
+    /// 신규 등록 폼의 프리필 세 값은 전부 Rust 가 계산한다 (프런트에서 다시 만들지 않는다).
+    #[test]
+    fn prefills_name_uri_and_rewrite_for_unregistered_rows() {
+        let c = conn();
+        db::load_oas_ops(&c, &[op("GET", "/orders/{orderId}/items")]).unwrap();
+
+        let rows = db::compare(&c, "dev", "svc", "/v1").unwrap();
+        let r = &rows[0];
+        assert_eq!(r.state, db::UNREGISTERED);
+
+        // name — 접두사를 대문자로 바꾼 것 + 접두사를 뗀 원본 path
+        assert_eq!(r.suggested_name, "V1/orders/{orderId}/items");
+        // uri — 게이트웨이가 매칭할 표기 (접두사 포함, 중간 파라미터는 :name)
+        assert_eq!(r.suggested_uri, "/v1/orders/:orderId/items");
+        // proxy-rewrite.uri — upstream 이 아는 경로는 접두사가 없는 원본 path 다
+        assert_eq!(r.suggested_rewrite, "/orders/{orderId}/items");
+    }
+
+    #[test]
+    fn prefill_follows_the_prefix_field() {
+        let c = conn();
+        db::load_oas_ops(&c, &[op("POST", "/orders")]).unwrap();
+
+        // 접두사를 비우면 이름에도 접두사가 없고, rewrite 는 접두사와 무관하게 그대로다.
+        let none = db::compare(&c, "dev", "svc", "").unwrap();
+        assert_eq!(none[0].suggested_name, "orders");
+        assert_eq!(none[0].suggested_uri, "/orders");
+        assert_eq!(none[0].suggested_rewrite, "/orders");
+
+        let ep = db::compare(&c, "dev", "svc", "/ep").unwrap();
+        assert_eq!(ep[0].suggested_name, "EP/orders");
+        assert_eq!(ep[0].suggested_uri, "/ep/orders");
+        assert_eq!(ep[0].suggested_rewrite, "/orders", "접두사가 붙지 않는다");
     }
 }
 
@@ -1353,5 +1424,371 @@ mod access {
 
         let p = db::overview_counts(&c, "prod").unwrap();
         assert_eq!((p.consumers, p.consumers_jwt), (1, 0));
+    }
+}
+
+// ── 13. Service 저장 (labels · 플러그인 보존) ────────────────
+
+mod service_form {
+    use crate::apisix::models::{ServiceView, UpstreamView};
+    use crate::apisix::services::{apply_service_form_for_test as apply, ServiceForm};
+    use serde_json::{json, Value};
+
+    fn form() -> ServiceForm {
+        serde_json::from_value(json!({
+            "id": "svc-order",
+            "name": "order-api",
+            "desc": "주문 API",
+            "upstreamId": "ups-order",
+            "specUrl": "https://git.internal/order/openapi.yaml",
+            "logKey": "ep",
+        }))
+        .expect("폼")
+    }
+
+    #[test]
+    fn writes_jwt_auth_and_shi_log_key() {
+        let out = apply(json!({}), &form());
+
+        // jwt-auth 는 "붙어 있어야 한다"가 요구사항 — 빈 객체로 넣는다.
+        assert_eq!(out.pointer("/plugins/jwt-auth"), Some(&json!({})));
+        assert_eq!(out.pointer("/plugins/shi-log/key"), Some(&json!("ep")));
+        assert_eq!(out.pointer("/upstream_id"), Some(&json!("ups-order")));
+        assert_eq!(out.pointer("/labels/spec_url"), Some(&json!("https://git.internal/order/openapi.yaml")));
+
+        // 서버가 관리하는 필드는 본문에 실리지 않는다.
+        assert!(out.get("id").is_none());
+        assert!(out.get("create_time").is_none());
+    }
+
+    /// jwt-auth 를 `{}` 로 덮으면 게이트웨이에 설정된 옵션이 사라진다 — 있으면 보존한다.
+    #[test]
+    fn preserves_existing_jwt_auth_config_and_other_plugins() {
+        let base = json!({
+            "id": "svc-order",
+            "create_time": 1,
+            "plugins": {
+                "jwt-auth": { "header": "authorization", "hide_credentials": true },
+                "shi-log": { "key": "old", "level": "info" },
+                "limit-count": { "count": 100, "time_window": 60 },
+            },
+        });
+
+        let out = apply(base, &form());
+
+        assert_eq!(out.pointer("/plugins/jwt-auth/header"), Some(&json!("authorization")));
+        assert_eq!(out.pointer("/plugins/jwt-auth/hide_credentials"), Some(&json!(true)));
+        // shi-log 는 key 만 갈아 끼우고 나머지 필드는 남는다.
+        assert_eq!(out.pointer("/plugins/shi-log/key"), Some(&json!("ep")));
+        assert_eq!(out.pointer("/plugins/shi-log/level"), Some(&json!("info")));
+        // 앱이 모르는 플러그인은 손대지 않는다.
+        assert_eq!(out.pointer("/plugins/limit-count/count"), Some(&json!(100)));
+    }
+
+    #[test]
+    fn spec_url_label_does_not_disturb_other_labels() {
+        let base = json!({ "labels": { "name1": "박승우", "dept1": "플랫폼개발팀" } });
+        let out = apply(base, &form());
+
+        assert_eq!(out.pointer("/labels/name1"), Some(&json!("박승우")));
+        assert_eq!(out.pointer("/labels/dept1"), Some(&json!("플랫폼개발팀")));
+        assert_eq!(out.pointer("/labels/spec_url").and_then(Value::as_str).map(|s| s.starts_with("https://")), Some(true));
+    }
+
+    /// `minLength = 1` 이라 빈 값은 `""` 로 쓸 수 없다 — 키를 통째로 지운다.
+    #[test]
+    fn blank_spec_url_removes_only_that_label() {
+        let mut f = form();
+        f.spec_url = String::new();
+
+        let base = json!({ "labels": { "spec_url": "https://old", "name1": "박승우" } });
+        let out = apply(base, &f);
+
+        assert!(out.pointer("/labels/spec_url").is_none());
+        assert_eq!(out.pointer("/labels/name1"), Some(&json!("박승우")));
+
+        // 라벨이 하나도 남지 않으면 labels 키 자체를 없앤다.
+        let bare = apply(json!({ "labels": { "spec_url": "https://old" } }), &f);
+        assert!(bare.get("labels").is_none());
+    }
+
+    #[test]
+    fn view_reads_back_what_the_form_wrote() {
+        // 요청 본문에는 id 가 실리지 않는다(서버가 관리한다). 게이트웨이 **응답**에는
+        // 들어 있으므로 그 모양으로 되돌려 놓고 읽는다 — 실제 save() 경로와 같다.
+        let mut saved = apply(json!({}), &form());
+        assert!(saved.get("id").is_none(), "요청 본문에는 id 가 없다");
+        saved["id"] = json!("svc-order");
+
+        let ups = vec![UpstreamView::from_value(&json!({
+            "id": "ups-order",
+            "nodes": { "10.20.3.11:8080": 1 },
+        }))];
+
+        let view = ServiceView::from_value(&saved, &ups);
+        assert_eq!(view.spec_url, "https://git.internal/order/openapi.yaml");
+        assert_eq!(view.log_key, "ep");
+        assert!(view.has_jwt_auth);
+        assert_eq!(view.upstream_id, "ups-order");
+        assert_eq!(view.upstream_label, "10.20.3.11:8080", "upstream_id 로 노드를 찾아 온다");
+        assert_eq!(view.option_label, "svc-order · order-api (10.20.3.11:8080)");
+    }
+
+    #[test]
+    fn rejects_values_the_gateway_would_reject() {
+        // 게이트웨이의 400 은 어느 값이 왜 틀렸는지 알려 주지 않으므로 저장 전에 막는다.
+        let cases: Vec<(&str, Value)> = vec![
+            ("name 누락", json!({ "name": "", "upstreamId": "u", "logKey": "ep" })),
+            ("upstream 누락", json!({ "name": "n", "upstreamId": "", "logKey": "ep" })),
+            ("log-key 누락", json!({ "name": "n", "upstreamId": "u", "logKey": "" })),
+            ("log-key 공백", json!({ "name": "n", "upstreamId": "u", "logKey": "e p" })),
+            // labels 값 제약: ^\S+$
+            ("spec_url 공백", json!({ "name": "n", "upstreamId": "u", "logKey": "ep",
+                                     "specUrl": "https://a b/x.yaml" })),
+            // URL 박스가 임의 파일 읽기가 되지 않도록 스킴을 제한한다 (client::fetch_text 와 같은 규칙)
+            ("spec_url 스킴", json!({ "name": "n", "upstreamId": "u", "logKey": "ep",
+                                      "specUrl": "file:///etc/passwd" })),
+            // labels 값은 256 바이트가 상한이다
+            ("spec_url 길이", json!({ "name": "n", "upstreamId": "u", "logKey": "ep",
+                                      "specUrl": format!("https://h/{}", "a".repeat(300)) })),
+        ];
+
+        for (label, payload) in cases {
+            let f: ServiceForm = serde_json::from_value(payload).expect("폼");
+            // validate 는 비공개이므로 머지 앞단을 타는 공개 경로로 확인한다.
+            assert!(super::service_validate_fails(&f), "{label} 은 거부돼야 한다");
+        }
+    }
+}
+
+/// `ServiceForm::validate` 는 비공개다. 테스트에서 검증만 떼어 부르기 위한 통로.
+fn service_validate_fails(f: &crate::apisix::services::ServiceForm) -> bool {
+    crate::apisix::services::validate_for_test(f).is_err()
+}
+
+// ── 14. Upstream 저장 (nodes · timeout · 미지 필드 보존) ─────
+
+mod upstream_form {
+    use crate::apisix::models::UpstreamView;
+    use crate::apisix::upstreams::{apply_upstream_form_for_test as apply, UpstreamForm};
+    use serde_json::json;
+
+    fn form() -> UpstreamForm {
+        serde_json::from_value(json!({
+            "id": "ups-order",
+            "name": "order-upstream",
+            "desc": "주문 서비스",
+            "nodes": [
+                { "host": "10.20.3.11", "port": 8080 },
+                { "host": "10.20.3.12", "port": 8080, "weight": 3 },
+            ],
+            "timeout": { "connect": 10.0, "send": 10.0, "read": 60.0 },
+        }))
+        .expect("폼")
+    }
+
+    #[test]
+    fn writes_nodes_as_array_with_default_weight() {
+        let out = apply(json!({}), &form());
+
+        // 쓰기는 배열 표기로 고정한다 — 맵 키에 host:port 를 조립하면 IPv6·포트 없는
+        // 노드에서 표기가 애매해진다.
+        let nodes = out.get("nodes").and_then(|n| n.as_array()).expect("배열");
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0], json!({ "host": "10.20.3.11", "port": 8080, "weight": 1 }));
+        assert_eq!(nodes[1]["weight"], json!(3), "읽은 weight 는 그대로 되쓴다");
+
+        assert_eq!(out.pointer("/timeout/connect"), Some(&json!(10.0)));
+        assert_eq!(out.pointer("/timeout/read"), Some(&json!(60.0)));
+        assert_eq!(out.get("type"), Some(&json!("roundrobin")), "없으면 기본값을 넣는다");
+    }
+
+    /// 폼에 없는 설정을 저장 한 번으로 날려 버리면 안 된다.
+    #[test]
+    fn preserves_fields_the_form_does_not_show() {
+        let base = json!({
+            "id": "ups-order",
+            "update_time": 123,
+            "type": "chash",
+            "hash_on": "header",
+            "key": "x-user",
+            "retries": 2,
+            "scheme": "https",
+            "checks": { "active": { "http_path": "/healthz" } },
+        });
+
+        let out = apply(base, &form());
+
+        assert_eq!(out.get("type"), Some(&json!("chash")), "이미 있으면 덮지 않는다");
+        assert_eq!(out.get("hash_on"), Some(&json!("header")));
+        assert_eq!(out.get("retries"), Some(&json!(2)));
+        assert_eq!(out.get("scheme"), Some(&json!("https")));
+        assert_eq!(out.pointer("/checks/active/http_path"), Some(&json!("/healthz")));
+        assert!(out.get("update_time").is_none(), "서버 관리 필드는 제외한다");
+    }
+
+    /// 게이트웨이는 두 표기를 모두 준다. 읽기는 둘 다 받아야 화면이 비지 않는다.
+    #[test]
+    fn reads_both_node_shapes() {
+        let map = UpstreamView::from_value(&json!({
+            "id": "u1",
+            "nodes": { "10.0.0.1:8080": 1, "example.com": 2 },
+        }));
+        let hosts: Vec<&str> = map.nodes.iter().map(|n| n.host.as_str()).collect();
+        assert!(hosts.contains(&"10.0.0.1"));
+        // 포트가 없는 키는 host 로만 남는다 (콜론이 없으면 나누지 않는다).
+        assert!(hosts.contains(&"example.com"));
+        let with_port = map.nodes.iter().find(|n| n.host == "10.0.0.1").unwrap();
+        assert_eq!(with_port.port, Some(8080));
+
+        let arr = UpstreamView::from_value(&json!({
+            "id": "u2",
+            "nodes": [{ "host": "10.0.0.9", "port": 9000, "weight": 5 }],
+        }));
+        assert_eq!(arr.nodes.len(), 1);
+        assert_eq!(arr.nodes[0].port, Some(9000));
+        assert_eq!(arr.nodes[0].weight, Some(5));
+        assert_eq!(arr.node_label, "10.0.0.9:9000");
+    }
+
+    #[test]
+    fn defaults_timeout_when_gateway_has_none() {
+        // 요구된 기본값 — connect 10 · send 10 · read 60
+        let v = UpstreamView::from_value(&json!({ "id": "u", "nodes": [] }));
+        assert_eq!(v.timeout.connect, 10.0);
+        assert_eq!(v.timeout.send, 10.0);
+        assert_eq!(v.timeout.read, 60.0);
+        assert_eq!(v.r#type, "roundrobin");
+    }
+
+    #[test]
+    fn round_trips_through_apply_and_view() {
+        let saved = apply(json!({}), &form());
+        let v = UpstreamView::from_value(&saved);
+        assert_eq!(v.nodes.len(), 2);
+        assert_eq!(v.node_label, "10.20.3.11:8080 외 1");
+        assert_eq!(v.timeout.read, 60.0);
+    }
+
+    #[test]
+    fn rejects_nodes_the_gateway_would_reject() {
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            ("노드 없음", json!({ "name": "n", "nodes": [] })),
+            ("host 공란", json!({ "name": "n", "nodes": [{ "host": " ", "port": 80 }] })),
+            ("host 공백", json!({ "name": "n", "nodes": [{ "host": "a b", "port": 80 }] })),
+            ("port 0", json!({ "name": "n", "nodes": [{ "host": "h", "port": 0 }] })),
+            ("port 초과", json!({ "name": "n", "nodes": [{ "host": "h", "port": 70000 }] })),
+            ("name 누락", json!({ "name": "", "nodes": [{ "host": "h", "port": 80 }] })),
+            (
+                "timeout 0",
+                json!({ "name": "n", "nodes": [{ "host": "h", "port": 80 }],
+                        "timeout": { "connect": 0.0, "send": 1.0, "read": 1.0 } }),
+            ),
+        ];
+
+        for (label, payload) in cases {
+            let f: UpstreamForm = serde_json::from_value(payload).expect("폼");
+            assert!(super::upstream_validate_fails(&f), "{label} 은 거부돼야 한다");
+        }
+    }
+}
+
+/// `UpstreamForm::validate` 는 비공개다. 테스트에서 검증만 떼어 부르기 위한 통로.
+fn upstream_validate_fails(f: &crate::apisix::upstreams::UpstreamForm) -> bool {
+    crate::apisix::upstreams::validate_for_test(f).is_err()
+}
+
+// ── 15. Upstream · Service 캐시 ──────────────────────────────
+
+mod meta_cache {
+    use crate::apisix::models::{ServiceView, UpstreamView};
+    use crate::db;
+    use rusqlite::Connection;
+    use serde_json::json;
+
+    fn conn() -> Connection {
+        let c = Connection::open_in_memory().expect("메모리 DB");
+        db::init(&c).expect("스키마");
+        c
+    }
+
+    fn upstream(id: &str, host: &str) -> UpstreamView {
+        UpstreamView::from_value(&json!({
+            "id": id,
+            "name": format!("{id}-name"),
+            "nodes": [{ "host": host, "port": 8080, "weight": 1 }],
+        }))
+    }
+
+    fn service(id: &str, upstream_id: &str, spec: &str, ups: &[UpstreamView]) -> ServiceView {
+        ServiceView::from_value(
+            &json!({
+                "id": id,
+                "name": format!("{id}-name"),
+                "upstream_id": upstream_id,
+                "labels": { "spec_url": spec },
+                "plugins": { "jwt-auth": {}, "shi-log": { "key": "ep" } },
+            }),
+            ups,
+        )
+    }
+
+    #[test]
+    fn cache_round_trips_both_views() {
+        let c = conn();
+        let ups = vec![upstream("u1", "10.0.0.1")];
+        db::sync_upstreams(&c, "dev", &ups).unwrap();
+        db::sync_services(&c, "dev", &[service("s1", "u1", "https://spec/a.yaml", &ups)]).unwrap();
+
+        let back = db::upstreams_cached(&c, "dev").unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].nodes[0].host, "10.0.0.1");
+        assert_eq!(back[0].timeout.read, 60.0);
+        assert_eq!(back[0].node_label, "10.0.0.1:8080");
+
+        let svcs = db::services_cached(&c, "dev").unwrap();
+        assert_eq!(svcs.len(), 1);
+        assert_eq!(svcs[0].spec_url, "https://spec/a.yaml");
+        assert_eq!(svcs[0].log_key, "ep");
+        assert!(svcs[0].has_jwt_auth);
+        assert_eq!(svcs[0].option_label, "s1 · s1-name (10.0.0.1:8080)");
+    }
+
+    /// 부분 upsert 를 하면 게이트웨이에서 지워진 항목이 콤보에 유령으로 남는다.
+    #[test]
+    fn sync_replaces_and_is_env_scoped() {
+        let c = conn();
+        let ups = vec![upstream("u1", "10.0.0.1"), upstream("u2", "10.0.0.2")];
+        db::sync_upstreams(&c, "dev", &ups).unwrap();
+        db::sync_upstreams(&c, "prod", &[upstream("u9", "10.9.9.9")]).unwrap();
+
+        // 게이트웨이에서 u2 가 사라졌다 → 캐시에도 남지 않아야 한다.
+        db::sync_upstreams(&c, "dev", &ups[..1]).unwrap();
+
+        let dev = db::upstreams_cached(&c, "dev").unwrap();
+        assert_eq!(dev.len(), 1);
+        assert_eq!(dev[0].id, "u1");
+
+        // 다른 환경은 건드리지 않는다.
+        let prod = db::upstreams_cached(&c, "prod").unwrap();
+        assert_eq!(prod.len(), 1);
+        assert_eq!(prod[0].id, "u9");
+
+        db::sync_services(&c, "dev", &[service("s1", "u1", "https://a", &ups)]).unwrap();
+        assert_eq!(db::services_cached(&c, "prod").unwrap().len(), 0);
+        db::sync_services(&c, "dev", &[]).unwrap();
+        assert_eq!(db::services_cached(&c, "dev").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn keeps_gateway_order() {
+        let c = conn();
+        let ups: Vec<UpstreamView> =
+            ["b", "a", "c"].iter().map(|id| upstream(id, "10.0.0.1")).collect();
+        db::sync_upstreams(&c, "dev", &ups).unwrap();
+
+        let ids: Vec<String> =
+            db::upstreams_cached(&c, "dev").unwrap().into_iter().map(|u| u.id).collect();
+        assert_eq!(ids, vec!["b", "a", "c"], "seq 로 게이트웨이 순서를 유지한다");
     }
 }

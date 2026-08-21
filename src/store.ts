@@ -30,8 +30,12 @@ import {
   consumerToForm,
   emptyConsumerForm,
   emptyRouteForm,
+  emptyServiceForm,
+  emptyUpstreamForm,
   routeFormFromOas,
   routeToForm,
+  serviceToForm,
+  upstreamToForm,
   type AccessCounts,
   type AppError,
   type CompareRow,
@@ -49,10 +53,13 @@ import {
   type RouteCounts,
   type RouteView,
   type Section,
-  type ServiceOption,
+  type ServiceView,
   type SettingsView,
   type Tab,
   type TestResult,
+  type UpstreamFormState,
+  type UpstreamNodeInput,
+  type UpstreamView,
   type View,
 } from "./types";
 
@@ -98,7 +105,10 @@ interface AppState {
   /** 좌측 패널용 고정 집계. 필터를 아무것도 반영하지 않는다. */
   access: AccessCounts | null;
   consumers: ConsumerView[];
-  services: ServiceOption[];
+  /** 캐시(SQLite)에서 읽은 Service 전체 목록. service_id 셀렉트와 Import 의 spec_url 원천 */
+  services: ServiceView[];
+  /** 캐시에서 읽은 Upstream 전체 목록. Service 폼의 upstream 콤보 원천 */
+  upstreams: UpstreamView[];
   dash: DashboardPayload | null;
 
   // ── OAS Import ──
@@ -106,12 +116,19 @@ interface AppState {
   importRows: CompareRow[];
   importService: string;
   importPrefix: string;
-  /** 스펙 URL 은 사외 주소일 수 있어 게이트웨이와 별도로 정한다 */
+  /** service 의 spec_url 은 사외 주소일 수 있어 게이트웨이와 별도로 정한다 */
   importNoProxy: boolean;
   importBusy: boolean;
   importError: AppError | null;
   importChip: MatchState | "all";
   importQ: string;
+  /**
+   * 첨부한 스펙 파일 이름. **빈 문자열이면 "파일 미첨부" 모드**다.
+   *
+   * 로컬 useState 가 아니라 스토어에 있는 이유: `×` 초기화와 service 변경 로직이 같은 값을
+   * 봐야 "첨부됐으면 그 파일로, 아니면 service 의 spec_url 로" 라는 분기가 성립한다.
+   */
+  importFileName: string;
   /** 상세·신규 화면에서 '목록' 으로 돌아갈 때 비교 결과로 복귀할지 */
   importReturn: boolean;
 
@@ -149,6 +166,14 @@ interface AppState {
   queryRoutes: () => Promise<void>;
   /** Consumer 목록을 캐시에서 읽는다 (게이트웨이 호출 없음) */
   loadConsumers: () => Promise<void>;
+  /** Upstream 목록을 캐시에서 읽는다 (게이트웨이 호출 없음) */
+  loadUpstreams: () => Promise<void>;
+  /** Service 목록을 캐시에서 읽는다 (게이트웨이 호출 없음) */
+  loadServices: () => Promise<void>;
+  /** Upstream 화면의 동기화 버튼 — 게이트웨이 전체 조회 → 캐시 갱신 */
+  syncUpstreams: () => Promise<void>;
+  /** Service 화면의 동기화 버튼 — 게이트웨이 전체 조회 → 캐시 갱신 */
+  syncServices: () => Promise<void>;
   /** 좌측 패널 집계만 다시 센다 (게이트웨이 호출 없음) */
   refreshAccess: () => Promise<void>;
   /** 상단 리프레시 버튼 — `bootstrap("bar")` */
@@ -167,13 +192,23 @@ interface AppState {
 
   // ── Import ──
   openImport: () => void;
-  loadOas: (source: ImportSource) => Promise<void>;
+  /**
+   * 스펙을 읽어 파싱·적재하고 비교까지 돌린다.
+   *
+   * `fileName` 은 첨부 칩에 표시할 이름이다. **넘기면 "파일 첨부 모드"가 되고**, 넘기지
+   * 않으면(= service 의 spec_url 로 읽는 경로) 미첨부 상태가 유지된다.
+   */
+  loadOas: (source: ImportSource, fileName?: string) => Promise<void>;
   runCompare: () => Promise<void>;
   setImportService: (id: string) => void;
   setImportPrefix: (prefix: string) => void;
   setImportNoProxy: (v: boolean) => void;
   setImportChip: (chip: MatchState | "all") => void;
   setImportQ: (q: string) => void;
+  /** 첨부 파일 초기화(`×`). 선택된 service 가 있으면 그 spec_url 로 되돌아간다 */
+  clearImportFile: () => Promise<void>;
+  /** 선택한 service 의 `labels.spec_url` 을 읽어 비교한다 (파일 미첨부 모드) */
+  loadSpecForService: (id: string) => Promise<void>;
   /** 비교 결과의 미등록 행 → 정보가 채워진 신규 Route 폼 */
   createRouteFromOas: (row: CompareRow) => void;
 
@@ -188,6 +223,11 @@ interface AppState {
   addContact: () => void;
   patchContact: (i: number, patch: Partial<Contact>) => void;
   removeContact: (i: number) => void;
+
+  addNode: () => void;
+  patchNode: (i: number, patch: Partial<UpstreamNodeInput>) => void;
+  removeNode: (i: number) => void;
+  patchTimeout: (patch: Partial<UpstreamFormState["timeout"]>) => void;
 
   setJsonDraft: (v: string) => void;
   applyJson: () => void;
@@ -227,9 +267,21 @@ let bootToken = 0;
 /** 검색어 입력의 디바운스 — 한 글자마다 IPC 를 왕복하지 않게 한다. */
 const SEARCH_DEBOUNCE_MS = 150;
 
-/** 현재 섹션이 다루는 리소스 종류 — 디자인의 kind() */
-export const kindOf = (section: Section): Kind =>
-  section === "consumers" ? "consumer" : "route";
+/**
+ * 현재 섹션이 다루는 리소스 종류.
+ *
+ * 예전에는 `consumers` 가 아니면 전부 `"route"` 였다. 섹션이 넷으로 늘어난 지금 그 폴백은
+ * Upstream 화면에서 Route 를 저장하려 드는 조용한 버그가 되므로, 매핑에 없는 섹션은
+ * `null` 을 준다. 저장·삭제는 이것 대신 `form.kind`(판별 유니온)로 분기한다.
+ */
+const SECTION_KIND: Partial<Record<Section, Kind>> = {
+  routes: "route",
+  consumers: "consumer",
+  services: "service",
+  upstreams: "upstream",
+};
+
+export const kindOf = (section: Section): Kind | null => SECTION_KIND[section] ?? null;
 
 /** Import 화면과 목록/편집 화면 사이를 오갈 때 초기화되는 상태 */
 const IMPORT_RESET = {
@@ -239,6 +291,7 @@ const IMPORT_RESET = {
   importBusy: false,
   importChip: "all" as MatchState | "all",
   importQ: "",
+  importFileName: "",
   importReturn: false,
 };
 
@@ -300,6 +353,7 @@ export const useStore = create<AppState>((set, get) => ({
   access: null,
   consumers: [],
   services: [],
+  upstreams: [],
   dash: null,
 
   importDoc: null,
@@ -307,6 +361,7 @@ export const useStore = create<AppState>((set, get) => ({
   importService: "",
   importPrefix: "",
   importNoProxy: true,
+  importFileName: "",
   importBusy: false,
   importError: null,
   importChip: "all",
@@ -368,10 +423,18 @@ export const useStore = create<AppState>((set, get) => ({
           consumersOk = true;
         },
       ],
+      // Upstream 이 Service 보다 먼저다 — service 라벨의 (host:port) 를 캐시된 upstream 에서
+      // 찾아 오므로 순서가 뒤바뀌면 라벨의 그 조각이 빈다 (commands::services_sync 주석).
+      [
+        "Upstream 목록 조회",
+        async () => {
+          set({ upstreams: await api.upstreamsSync(env) });
+        },
+      ],
       [
         "Service 목록 조회",
         async () => {
-          set({ services: await api.servicesList(env) });
+          set({ services: await api.servicesSync(env) });
         },
       ],
       [
@@ -441,6 +504,7 @@ export const useStore = create<AppState>((set, get) => ({
       access: null,
       consumers: [],
       services: [],
+      upstreams: [],
       dash: null,
       importService: "",
       importPrefix: "",
@@ -458,6 +522,10 @@ export const useStore = create<AppState>((set, get) => ({
       void get().queryRoutes();
     } else if (section === "consumers") {
       void get().loadConsumers();
+    } else if (section === "upstreams") {
+      void get().loadUpstreams();
+    } else if (section === "services") {
+      void get().loadServices();
     } else {
       void get().refresh();
     }
@@ -543,6 +611,65 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  async loadUpstreams() {
+    const { env, settings } = get();
+    if (!settings?.[env]?.hasToken) return;
+    try {
+      set({ upstreams: await api.upstreamsCached(env), error: null });
+    } catch (e) {
+      set({ error: api.toAppError(e) });
+    }
+  },
+
+  async loadServices() {
+    const { env, settings } = get();
+    if (!settings?.[env]?.hasToken) return;
+    try {
+      set({ services: await api.servicesCached(env), error: null });
+    } catch (e) {
+      set({ error: api.toAppError(e) });
+    }
+  },
+
+  /**
+   * Upstream 화면의 동기화 버튼.
+   *
+   * Service 목록까지 같이 다시 받는 이유: service 셀렉트 라벨의 `(host:port)` 는 upstream
+   * 노드에서 온다. 노드를 고치고 Upstream 만 갱신하면 Service 화면의 라벨이 낡은 채로 남는다.
+   */
+  async syncUpstreams() {
+    const { env, settings } = get();
+    if (!settings?.[env]?.hasToken) return;
+
+    set({ loading: true, error: null });
+    try {
+      set({ upstreams: await api.upstreamsSync(env) });
+      set({ services: await api.servicesSync(env) });
+    } catch (e) {
+      const err = api.toAppError(e);
+      set({ error: err });
+      get().flash(err.message);
+    } finally {
+      set({ loading: false });
+    }
+  },
+
+  async syncServices() {
+    const { env, settings } = get();
+    if (!settings?.[env]?.hasToken) return;
+
+    set({ loading: true, error: null });
+    try {
+      set({ services: await api.servicesSync(env) });
+    } catch (e) {
+      const err = api.toAppError(e);
+      set({ error: err });
+      get().flash(err.message);
+    } finally {
+      set({ loading: false });
+    }
+  },
+
   /**
    * Route 를 고쳐도 패널 숫자가 바뀌므로 저장·삭제 양쪽에서 부른다.
    *
@@ -578,8 +705,9 @@ export const useStore = create<AppState>((set, get) => ({
   // ── 목록 → 상세 ───────────────────────────────────────────
   openItem(id) {
     const { section, routes, consumers } = get();
+    const kind = kindOf(section);
 
-    if (kindOf(section) === "consumer") {
+    if (kind === "consumer") {
       const c: ConsumerView | undefined = consumers.find((x) => x.username === id);
       if (!c) return;
       const form = consumerToForm(c);
@@ -596,6 +724,26 @@ export const useStore = create<AppState>((set, get) => ({
         jwt: null,
       });
       void get().signJwt();
+      return;
+    }
+
+    // Service · Upstream 은 목록 전체가 캐시에서 배열로 와 있다 (Route 처럼 서버측
+    // 필터링을 하지 않으므로 배열에 없으면 정말 없는 것이다).
+    if (kind === "service" || kind === "upstream") {
+      const { services, upstreams } = get();
+      const found =
+        kind === "service"
+          ? services.find((x) => x.id === id)
+          : upstreams.find((x) => x.id === id);
+      if (!found) {
+        get().flash("캐시에 없는 항목입니다. 동기화 후 다시 시도하세요.");
+        return;
+      }
+      const form: FormState =
+        kind === "service"
+          ? serviceToForm(found as ServiceView)
+          : upstreamToForm(found as UpstreamView);
+      showMeta(set, id, form, found.raw);
       return;
     }
 
@@ -631,11 +779,16 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   newItem() {
-    const { section, services } = get();
+    const { section, services, upstreams } = get();
+    const kind = kindOf(section);
     const form: FormState =
-      kindOf(section) === "consumer"
+      kind === "consumer"
         ? emptyConsumerForm()
-        : emptyRouteForm(services[0]?.id ?? "");
+        : kind === "service"
+          ? emptyServiceForm(upstreams[0]?.id ?? "")
+          : kind === "upstream"
+            ? emptyUpstreamForm()
+            : emptyRouteForm(services[0]?.id ?? "");
 
     set({
       view: "create",
@@ -657,7 +810,7 @@ export const useStore = create<AppState>((set, get) => ({
     // 부트스트랩이 이미 채웠으면 다시 부르지 않는다 (실패했을 때만 한 번 더 시도한다).
     if (get().services.length === 0) {
       const { env } = get();
-      set({ services: await api.servicesList(env).catch(() => [] as ServiceOption[]) });
+      set({ services: await api.servicesCached(env).catch(() => [] as ServiceView[]) });
     }
     void get().queryRoutes();
     get().newItem();
@@ -705,11 +858,23 @@ export const useStore = create<AppState>((set, get) => ({
       // 게이트웨이 설정을 기본값으로 주되, 스펙 주소는 사외일 수 있어 화면에서 바꿀 수 있다.
       importNoProxy: settings?.[env]?.noProxy ?? true,
     });
+
+    // 파일 첨부 없이 들어온 상태다 — 고른 service 에 spec_url 이 있으면 바로 읽어 준다.
+    const id = get().importService;
+    if (id) void get().loadSpecForService(id);
   },
 
-  async loadOas(source) {
+  async loadOas(source, fileName) {
     const { env } = get();
-    set({ importBusy: true, importError: null, importDoc: null, importRows: [] });
+    set({
+      importBusy: true,
+      importError: null,
+      importDoc: null,
+      importRows: [],
+      // 파일에서 읽은 경우에만 칩을 세운다. spec_url 경로는 미첨부 상태를 유지해야
+      // service 를 바꿀 때 다시 spec_url 을 타고 들어간다 (setImportService 참조).
+      ...(fileName !== undefined ? { importFileName: fileName } : {}),
+    });
     try {
       // 스펙을 먼저 읽는다 — 파일이 잘못됐으면 게이트웨이를 부를 이유가 없다.
       const doc = await api.oasLoad(env, source);
@@ -754,9 +919,56 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  /**
+   * service 선택 — 첨부 파일이 있으면 그 스펙으로, 없으면 service 의 spec_url 로 비교한다.
+   *
+   * 이 갈림길이 Import 화면의 두 모드다. 첨부된 스펙은 이미 캐시(`oas_ops`)에 적재돼 있으니
+   * 비교만 다시 돌리면 되고, 미첨부면 읽을 스펙 자체를 service 에서 찾아야 한다.
+   */
   setImportService(id) {
     set({ importService: id });
-    void get().runCompare();
+    if (get().importFileName) {
+      void get().runCompare();
+    } else {
+      void get().loadSpecForService(id);
+    }
+  },
+
+  async loadSpecForService(id) {
+    if (!id) {
+      set({ importDoc: null, importRows: [], importError: null });
+      return;
+    }
+
+    const svc = get().services.find((x) => x.id === id);
+    const url = svc?.specUrl?.trim() ?? "";
+    if (!url) {
+      // 파일도 없고 주소도 없으면 비교할 근거가 없다. 어디서 채우면 되는지 알려 준다.
+      set({
+        importDoc: null,
+        importRows: [],
+        importError: {
+          kind: "config",
+          message: "이 service 에는 spec_url 이 없습니다.",
+          hint: "Service 화면에서 spec_url 을 등록하거나, 위에 스펙 파일을 첨부하세요.",
+        },
+      });
+      return;
+    }
+
+    await get().loadOas({ kind: "url", value: url, noProxy: get().importNoProxy });
+  },
+
+  /**
+   * 첨부 초기화(`×`).
+   *
+   * 그냥 비우고 끝내지 않고 service 의 spec_url 로 되돌아간다 — 파일을 떼어 낸 사용자가
+   * 보고 싶은 것은 빈 화면이 아니라 "게이트웨이에 등록된 스펙" 쪽 비교 결과다.
+   */
+  async clearImportFile() {
+    set({ importFileName: "", importDoc: null, importRows: [], importError: null });
+    const id = get().importService;
+    if (id) await get().loadSpecForService(id);
   },
 
   setImportPrefix(prefix) {
@@ -820,7 +1032,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   addGroup(value) {
     const { form, groupDraft } = get();
-    if (!form) return;
+    // allowed_groups 는 route·consumer 에만 있다 (Service·Upstream 폼에는 이 카드가 없다).
+    if (!form || (form.kind !== "route" && form.kind !== "consumer")) return;
     // 콤보박스에서 마우스로 고른 값은 입력칸을 거치지 않으므로 인자로 받는다.
     const v = (value ?? groupDraft).trim();
     if (!v) return;
@@ -834,7 +1047,7 @@ export const useStore = create<AppState>((set, get) => ({
 
   removeGroup(i) {
     const { form } = get();
-    if (!form) return;
+    if (!form || (form.kind !== "route" && form.kind !== "consumer")) return;
     get().patchForm({ groups: form.groups.filter((_, j) => j !== i) });
   },
 
@@ -872,6 +1085,40 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   // ── JSON 탭 ───────────────────────────────────────────────
+  /**
+   * 노드 편집 3형제. `addContact`/`patchContact`/`removeContact` 와 같은 모양이고,
+   * 같은 이유로 전부 `patchForm` 을 경유한다 (JSON 탭 draft 동기화를 한 곳에 둔다).
+   */
+  addNode() {
+    const { form } = get();
+    if (!form || form.kind !== "upstream") return;
+    get().patchForm({ nodes: [...form.nodes, { host: "", port: "", weight: "1" }] });
+  },
+
+  patchNode(i, patch) {
+    const { form } = get();
+    if (!form || form.kind !== "upstream") return;
+    const nodes = form.nodes.map((n, k) => (k === i ? { ...n, ...patch } : n));
+    get().patchForm({ nodes });
+  },
+
+  removeNode(i) {
+    const { form } = get();
+    if (!form || form.kind !== "upstream") return;
+    // 노드가 하나도 없는 upstream 은 게이트웨이가 거부한다 — 마지막 행은 남긴다.
+    if (form.nodes.length <= 1) {
+      get().flash("노드는 하나 이상 있어야 합니다.");
+      return;
+    }
+    get().patchForm({ nodes: form.nodes.filter((_, k) => k !== i) });
+  },
+
+  patchTimeout(patch) {
+    const { form } = get();
+    if (!form || form.kind !== "upstream") return;
+    get().patchForm({ timeout: { ...form.timeout, ...patch } });
+  },
+
   setJsonDraft(v) {
     set({ jsonDraft: v, jsonErr: "", jsonOk: "" });
   },
@@ -903,11 +1150,23 @@ export const useStore = create<AppState>((set, get) => ({
     const { form, env } = get();
     if (!form) return;
 
-    // 디자인과 동일한 필수값 검사 (서버 왕복 전에 즉시 알려준다)
-    const missing =
-      form.kind === "consumer"
-        ? !form.username.trim() || !form.key.trim() || !form.secret.trim()
-        : !form.name.trim() || !form.uri.trim() || !form.serviceId.trim();
+    // 서버 왕복 전에 즉시 알려주는 필수값 검사. 형태별 규칙은 Rust 의 validate 와 짝이다.
+    const missing = (() => {
+      switch (form.kind) {
+        case "consumer":
+          return !form.username.trim() || !form.key.trim() || !form.secret.trim();
+        case "service":
+          return !form.name.trim() || !form.upstreamId.trim() || !form.logKey.trim();
+        case "upstream":
+          return (
+            !form.name.trim() ||
+            form.nodes.length === 0 ||
+            form.nodes.some((n) => !n.host.trim() || !n.port.trim())
+          );
+        default:
+          return !form.name.trim() || !form.uri.trim() || !form.serviceId.trim();
+      }
+    })();
     if (missing) {
       get().flash("필수 항목을 입력하세요.");
       return;
@@ -915,9 +1174,16 @@ export const useStore = create<AppState>((set, get) => ({
 
     set({ saving: true, error: null });
     try {
+      // 섹션(kindOf)이 아니라 폼의 판별 유니온으로 분기한다 — 화면과 폼이 어긋날 여지를 없앤다.
       if (form.kind === "consumer") {
         await api.consumerSave(env, form);
         get().flash("Consumer가 저장되었습니다.");
+      } else if (form.kind === "service") {
+        await api.serviceSave(env, form);
+        get().flash("Service가 저장되었습니다. (jwt-auth · shi-log 포함)");
+      } else if (form.kind === "upstream") {
+        await api.upstreamSave(env, form);
+        get().flash("Upstream이 저장되었습니다.");
       } else {
         const isNew = !form.id;
         await api.routeSave(env, form);
@@ -955,6 +1221,10 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       if (form.kind === "consumer") {
         await api.consumerDelete(env, form.username);
+      } else if (form.kind === "service") {
+        await api.serviceDelete(env, form.id ?? "", form.name);
+      } else if (form.kind === "upstream") {
+        await api.upstreamDelete(env, form.id ?? "", form.name);
       } else {
         await api.routeDelete(env, form.id ?? "", form.name);
       }
@@ -989,11 +1259,20 @@ export const useStore = create<AppState>((set, get) => ({
     try {
       if (kind === "consumer") {
         set({ consumers: await api.consumersSync(env) });
+      } else if (kind === "service") {
+        set({ services: await api.servicesSync(env) });
+      } else if (kind === "upstream") {
+        // 노드가 바뀌면 service 셀렉트 라벨의 (host:port) 도 바뀐다 — 둘 다 다시 받는다.
+        set({ upstreams: await api.upstreamsSync(env) });
+        set({ services: await api.servicesSync(env) });
       } else {
         await api.routesSync(env);
       }
-      await get().queryRoutes();
-      await get().refreshAccess();
+      // Route 목록·접근 집계는 route/consumer 를 건드렸을 때만 의미가 있다.
+      if (kind === "route" || kind === "consumer") {
+        await get().queryRoutes();
+        await get().refreshAccess();
+      }
     } catch (e) {
       set({ error: api.toAppError(e) });
     } finally {
@@ -1084,6 +1363,27 @@ function showRoute(set: (partial: Partial<AppState>) => void, r: RouteView): voi
     jsonOk: "",
     groupDraft: "",
     rawJson: r.raw ? JSON.stringify(r.raw, null, 2) : null,
+    jwt: null,
+  });
+}
+
+/** Service · Upstream 상세를 여는 공통 부분. `showRoute` 와 같은 자리를 채운다. */
+function showMeta(
+  set: (partial: Partial<AppState>) => void,
+  id: string,
+  form: FormState,
+  raw: unknown,
+): void {
+  set({
+    view: "detail",
+    selId: id,
+    form,
+    tab: "form",
+    jsonDraft: jsonText(form),
+    jsonErr: "",
+    jsonOk: "",
+    groupDraft: "",
+    rawJson: raw ? JSON.stringify(raw, null, 2) : null,
     jwt: null,
   });
 }

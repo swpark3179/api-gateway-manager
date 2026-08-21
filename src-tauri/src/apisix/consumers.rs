@@ -6,13 +6,13 @@
 
 use reqwest::Method;
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use tauri::{AppHandle, Wry};
 
 use super::client;
 use super::models::{
-    check_label_value, extract_list, extract_one, set_contacts_at, set_groups_at, Contact,
-    ConsumerView, GroupsLocation,
+    check_label_value, extract_list, extract_one, obj, set_contacts_at, set_groups_at,
+    strip_server_fields, Contact, ConsumerView, GroupsLocation,
 };
 use crate::config::Env;
 use crate::error::{AppError, AppResult, ErrorKind};
@@ -167,18 +167,9 @@ pub async fn delete(app: &AppHandle<Wry>, env: Env, username: &str) -> AppResult
 
 // ── 폼 → 요청 본문 (머지) ────────────────────────────────────
 
-fn obj(v: Value) -> Map<String, Value> {
-    match v {
-        Value::Object(m) => m,
-        _ => Map::new(),
-    }
-}
-
 fn apply_consumer_form(base: Value, f: &ConsumerForm) -> Value {
     let mut m = obj(base);
-    m.remove("create_time");
-    m.remove("update_time");
-    m.remove("id");
+    strip_server_fields(&mut m);
 
     m.insert("username".into(), Value::String(f.username.trim().to_string()));
 

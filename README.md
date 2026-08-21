@@ -69,16 +69,16 @@ src/                        프런트엔드 (React 19 + TS + zustand)
 ├─ api.ts                   Rust 커맨드 래퍼 — 게이트웨이 HTTP 의 유일한 통로
 ├─ lib/design.ts            디자인 원본의 순수 헬퍼 (JSON 모양 · 아이콘 · 스타일)
 ├─ styles/                  OPUS-X 토큰 CSS (디자인 원본을 그대로 복사)
-├─ components/              TitleBar · IconRail · SidePanel · Toast · BootProgress · GroupCombo
-└─ screens/                 Locked · Dashboard · List · Import · Settings · edit/*
+├─ components/              TitleBar · IconRail · SidePanel · Toast · BootProgress · GroupCombo · MetaList · ErrorBanner
+└─ screens/                 Locked · Dashboard · List · Upstreams · Services · Import · Settings · edit/*
 
 src-tauri/src/
 ├─ lib.rs                   플러그인/커맨드 등록, 창 셋업
 ├─ commands.rs              IPC 커맨드 전부
 ├─ config.rs                환경 설정 + Windows 자격 증명 관리자(토큰)
 ├─ apisix/client.rs         ★ no_proxy HTTP 클라이언트 (단일 진입점)
-├─ apisix/{routes,consumers,meta,models}.rs
-├─ db.rs                    Route·Consumer 목록 · 접근 권한 조인 · Import 비교용 메모리 SQLite
+├─ apisix/{routes,consumers,services,upstreams,meta,models}.rs
+├─ db.rs                    Route·Consumer·Upstream·Service 목록 · 접근 권한 조인 · Import 비교용 메모리 SQLite
 ├─ oas.rs                   OAS 3.0 파싱 + uri 정규화 (순수 함수)
 ├─ jwt.rs                   HS256 서명
 ├─ history.rs               대시보드 "최근 관리 API 호출" 이력
@@ -119,7 +119,11 @@ src-tauri/src/
 | Consumer 목록 | `GET /consumers` |
 | Consumer 저장 (신규·수정 공통) | `PUT /consumers` (본문에 username) |
 | Consumer 삭제 | `DELETE /consumers/{username}` |
-| service_id 셀렉트 · KPI | `GET /services`, `GET /upstreams` (읽기 전용) |
+| Upstream 목록 · 동기화 | `GET /upstreams` (→ 내장 SQLite 갱신) |
+| Upstream 신규 · 수정 · 삭제 | `POST /upstreams`, `PUT /upstreams/{id}`, `DELETE /upstreams/{id}` |
+| Service 목록 · 동기화 | `GET /services` (→ 내장 SQLite 갱신) |
+| Service 신규 · 수정 · 삭제 | `POST /services`, `PUT /services/{id}`, `DELETE /services/{id}` |
+| 대시보드 KPI | `GET /services`, `GET /upstreams` (건수만 — 라이브 실측) |
 
 ### 플러그인 보존
 
@@ -130,6 +134,8 @@ src-tauri/src/
 
 - Route → `proxy-rewrite.uri`, 그룹 필드(기본 `shi-auth.allowed_groups`)
 - Consumer → `jwt-auth.key`, `jwt-auth.secret`, 그룹 필드(기본 `jwt-auth.auth-groups`)
+- Service → `shi-log.key`, `jwt-auth`(**없을 때만** `{}` 추가), `labels.spec_url`
+- Upstream → `name`, `desc`, `nodes`, `timeout` (`checks`·`retries`·`scheme`·`type` 은 보존)
 
 그룹 필드의 실제 위치는 조회 때 찾아낸 자리를 그대로 쓴다 — 아래 절 참조.
 
@@ -189,6 +195,10 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 | `consumers_cached` | X | 캐시의 Consumer 전체 목록 |
 | `route_cached` | X | 캐시에서 단건 (Import 결과 → 상세 이동) |
 | `consumer_access_counts` | X | 컨슈머별 접근 가능 Route 수 (좌측 패널) |
+| `upstreams_sync` | O | Upstream 전체 재조회 → 캐시 전면 교체 → 목록 반환 |
+| `upstreams_cached` | X | 캐시의 Upstream 전체 목록 |
+| `services_sync` | O | Service 전체 재조회 → 캐시 전면 교체 → 목록 반환 |
+| `services_cached` | X | 캐시의 Service 전체 목록 (`service_id` 셀렉트 · Import 의 spec_url) |
 
 sync 가 조회 결과를 돌려주지 않는 이유: 조회 축이 셋(chip · 검색어 · 컨슈머)이라 채우기에
 필터를 실어 보내면 호출부마다 세 인자를 끌고 다녀야 한다. 메모리 SQLite 라 왕복 비용이 없으니
@@ -197,10 +207,16 @@ sync 가 조회 결과를 돌려주지 않는 이유: 조회 축이 셋(chip · 
 캐시를 채우는 경로는 두 가지다.
 
 - **부트스트랩** (`store.bootstrap`) — 기동, 환경 전환, 상단 새로고침 버튼.
-  Route → Consumer → Service → 접근 권한 집계 네 단계를 순차로 돌며 진행률을 보여준다
-  (`components/BootProgress.tsx`). Tauri 이벤트를 새로 깔지 않고 프런트가 커맨드를 하나씩
-  부르며 단계를 갱신한다.
+  Route → Consumer → **Upstream → Service** → 접근 권한 집계 다섯 단계를 순차로 돌며
+  진행률을 보여준다 (`components/BootProgress.tsx`). Tauri 이벤트를 새로 깔지 않고 프런트가
+  커맨드를 하나씩 부르며 단계를 갱신한다.
+  Upstream 이 Service 보다 먼저인 이유: service 셀렉트 라벨의 `(host:port)` 를 **캐시된**
+  upstream 에서 찾아 온다 (`GET /upstreams` 를 두 번 부르지 않기 위해). 순서가 뒤바뀌면
+  라벨의 그 조각만 빈다 — 조회 자체는 성립한다.
 - **저장·삭제 직후** (`store.syncTouched`) — 건드린 리소스만 전체 재조회한다.
+  단 Upstream 을 고치면 Service 까지 다시 받는다 — 노드가 바뀌면 service 라벨이 바뀐다.
+- **화면별 동기화 버튼** (`store.syncUpstreams` · `syncServices`) — Upstream·Service 목록
+  헤더의 아이콘 버튼. 전체 부트스트랩을 돌리지 않고 그 목록만 갱신한다.
 
 부분 갱신(upsert)을 하지 않는 이유는 게이트웨이에서 삭제된 항목이 캐시에 남으면 Import 가
 "등록됨"으로 잘못 판정하고, 좌측 패널에 유령 컨슈머가 뜨기 때문이다.
@@ -313,13 +329,29 @@ JSON 탭의 요청 본문에 `labels` 를 넣지 않는 것도 같은 이유다 
 
 Route 목록 상단의 `Import` 버튼 → OAS 3.0 스펙을 읽어 선택한 service 안의 라우트와 대조한다.
 
-### 입력 세 경로
+### 스펙을 어디서 읽는가 — 두 모드
 
-| 방식 | 구현 | 왜 이렇게 |
+주소를 손으로 붙여 넣는 입력란은 **없다**. 스펙 주소는 service 의 속성이므로
+(`labels.spec_url`) service 를 고르면 따라와야 한다. 매번 같은 URL 을 붙여 넣는 것은
+그 정보를 아무 데도 저장하지 않는다는 뜻이었다.
+
+| 상태 | 무엇으로 비교하나 | service 를 바꾸면 |
+|---|---|---|
+| **파일 첨부함** | 첨부한 스펙 | 비교(`oas_compare`)만 다시 돌린다 — 스펙은 이미 캐시에 적재돼 있다 |
+| **파일 미첨부** | 고른 service 의 `labels.spec_url` | 그 service 의 주소를 읽어 다시 파싱·비교한다 |
+
+갈림길은 `store.setImportService` 에 있고, 판단 기준은 `importFileName` 이 비었는지다.
+첨부한 파일은 파일명 칩으로 보여 주고 `×` 로 해제할 수 있다 — 해제하면 빈 화면이 되는 대신
+그 service 의 `spec_url` 쪽 결과로 되돌아간다. 파일을 떼어 낸 사용자가 보고 싶은 것은
+빈 화면이 아니다.
+
+`spec_url` 이 없는 service 를 고르면 어디서 채우면 되는지 알려 준다 (Service 화면 또는 첨부).
+
+| 읽기 경로 | 구현 | 왜 이렇게 |
 |---|---|---|
 | 드래그&드롭 | 웹뷰에서 `file.text()` → `oas_load({kind:"text"})` | `tauri.conf.json` 의 `dragDropEnabled: false` 가 HTML5 DnD 를 쓰기 위한 조건이다 (Tauri 가 OS 드롭을 가로채지 않는다) |
 | 파일 다이얼로그 | `@tauri-apps/plugin-dialog` `open()` → 경로 → Rust 가 `read_to_string` | 웹뷰에 `fs:` 권한을 주지 않기 위해 읽기는 Rust 가 한다 (`capabilities/default.json` 무변경) |
-| URL | `oas_load({kind:"url"})` → `client::fetch_text` | CSP 가 웹뷰의 외부 통신을 막고 있어 프런트에서 fetch 할 수 없다 |
+| service 의 `spec_url` | `oas_load({kind:"url"})` → `client::fetch_text` | CSP 가 웹뷰의 외부 통신을 막고 있어 프런트에서 fetch 할 수 없다 |
 
 드롭존 **밖**에 파일을 떨어뜨리면 WebView2 가 그 파일로 내비게이션해 앱 화면이 사라진다.
 그래서 `App.tsx` 가 창 전체의 `dragover`·`drop` 기본 동작을 막는다.
@@ -364,14 +396,42 @@ YAML 파서(`serde_norway`)가 JSON 의 상위집합이라 `.json` 스펙도 같
 화면에서 편집할 수 있다. 게이트웨이 uri 가 `/v1/pets` 인데 스펙 path 는 `/pets` 인 경우를 위한 것이다.
 `{basePath}` 처럼 템플릿이 남아 있으면 게이트웨이 uri 와 맞을 수 없으므로 쓰지 않는다.
 
+이 접두사는 **route 명 접두사**도 만든다 — 앞 슬래시를 떼고 · 대문자로 바꾸고 · 뒤에 슬래시를
+붙인다 (`oas::name_prefix`).
+
+| 경로 접두사 | route 명 접두사 |
+|---|---|
+| `/v1` | `V1/` |
+| `/v1/api` | `V1/API/` |
+| `/ep/` | `EP/` |
+| 없음 · `/` | *(없음)* — `/` 만 남기면 이름이 슬래시로 시작해 버린다 |
+
+접두사를 입력하는 중에 파생 결과를 화면에 같이 보여 준다 — 행을 눌러 보기 전에 어떤 이름이
+채워질지 알 수 있어야 한다.
+
 ### 신규 등록 화면 프리필
 
-미등록 행을 누르면 `name`·`uri`·`methods`·`service_id`·`desc` 가 채워진 신규 폼이 열린다.
-저장은 **기존 `route_save` 경로를 그대로 탄다** — Import 전용 저장 경로를 만들지 않았으므로
-플러그인 보존 머지가 그대로 적용된다. 저장하면 비교 결과로 돌아오고, 방금 만든 API 가
-`등록` 으로 바뀐다 (캐시를 갱신한 뒤 비교를 다시 돌린다).
+미등록 행을 누르면 `name`·`uri`·`proxy-rewrite.uri`·`methods`·`service_id`·`desc` 가 채워진
+신규 폼이 열린다. 저장은 **기존 `route_save` 경로를 그대로 탄다** — Import 전용 저장 경로를
+만들지 않았으므로 플러그인 보존 머지가 그대로 적용된다. 저장하면 비교 결과로 돌아오고, 방금
+만든 API 가 `등록` 으로 바뀐다 (캐시를 갱신한 뒤 비교를 다시 돌린다).
 
-`uri` 변환 규칙은 `oas::to_apisix_uri` 한 곳에만 있다 (프런트에서 다시 만들지 않는다):
+이미 등록된 행을 눌러 들어가는 **편집 모드에는 접두사가 개입하지 않는다.** 게이트웨이에 있는
+값을 그대로 읽어 오는 경로(`routeToForm`)라 프리필 규칙이 낄 자리가 없다.
+
+`servers: https://host/v1` · path `/orders/{orderId}/items` 인 경우 세 값은 이렇게 갈린다:
+
+| 필드 | 값 | 무엇인가 |
+|---|---|---|
+| `name` | `V1/orders/{orderId}/items` | route 명 접두사 + **접두사를 뗀 원본 path**. 사람이 읽는 값이라 스펙과 같은 표기를 유지한다 |
+| `uri` | `/v1/orders/:orderId/items` | 게이트웨이가 매칭하는 표기 (접두사 포함, 변환 규칙은 아래 표) |
+| `plugins.proxy-rewrite.uri` | `/orders/{orderId}/items` | upstream 이 아는 경로 — **접두사가 붙지 않는다** |
+
+세 값은 모두 Rust 가 계산해 `CompareRow` 로 내려준다 (`oas::suggested_name` ·
+`oas::to_apisix_uri`). 프런트에서 다시 만들지 않는다 — 규칙이 두 곳에 있으면 반드시 어긋나고,
+Rust 쪽에는 테스트가 붙어 있다. `name` 은 APISIX 제한(100자)에 맞춰 char 경계에서 자른다.
+
+`uri` 변환 규칙은 `oas::to_apisix_uri` 한 곳에만 있다:
 
 | OAS path | 프리필 uri | 왜 |
 |---|---|---|
@@ -381,12 +441,85 @@ YAML 파서(`serde_norway`)가 JSON 의 상위집합이라 `.json` 스펙도 같
 
 어차피 사용자가 저장 전에 검토·수정하는 값이라 "가장 그럴듯한 출발점"을 준다.
 
-### 스펙 URL 과 프록시
+### spec_url 과 프록시
 
-게이트웨이는 반드시 프록시를 우회해야 하지만, 스펙 URL 은 사외 주소라 오히려 사내 프록시를
+게이트웨이는 반드시 프록시를 우회해야 하지만, 스펙 주소는 사외일 수 있어 오히려 사내 프록시를
 타야 할 수 있다. 그래서 Import 화면에 `프록시 우회` 체크박스를 두고 기본값을 현재 환경의
 설정으로 준다. 이 선택은 스펙 조회에만 적용되고 게이트웨이 호출 경로는 건드리지 않는다.
-`http` / `https` 스킴만 허용하고(URL 입력란이 임의 파일 읽기가 되지 않도록) 응답은 8 MiB 로 제한한다.
+`http` / `https` 스킴만 허용하고(주소가 임의 파일 읽기가 되지 않도록) 응답은 8 MiB 로 제한한다.
+Service 폼도 저장 시점에 같은 스킴 제한을 걸어, 나중에 `fetch_text` 가 거부할 값이 애초에
+저장되지 않게 한다.
+
+---
+
+## Upstream · Service 관리
+
+아이콘 레일에 `Upstream` · `Service` 두 화면이 있다. 각각 목록(검색 + 동기화 버튼) 과
+편집 화면을 갖고, 편집 화면은 Route·Consumer 와 같은 `EditScreen` 껍데기를 공유한다 —
+저장·취소·삭제 헤더를 네 번 복붙하지 않기 위해서다. 두 형태는 **폼 탭만** 있다
+(JSON 탭은 `labels`·`nodes` 표기 규칙을 TS 에 다시 구현해야 해서 두지 않았다).
+
+### 왜 필요했나
+
+Import 화면이 파일 첨부 없이도 동작하려면 "이 service 의 스펙은 여기"라는 정보를 어딘가
+저장해야 한다. 그 자리를 만들려면 Service 를 앱에서 편집할 수 있어야 하고, Service 는
+`upstream_id` 를 요구하므로 Upstream 도 함께 필요해진다.
+
+### spec_url 을 labels 에 두는 이유
+
+APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에 임의 필드를 넣을 수
+없다.** `labels` 는 값 제약만 지키면 무엇이든 담을 수 있고, URL 은 공백이 없어 그 제약을
+자연히 통과한다.
+
+| 제약 | 값 |
+|---|---|
+| 값 패턴 | `^\S+$` — 공백이 하나라도 있으면 400 |
+| 길이 | 1 ~ 256 **바이트** (`minLength = 1` 이라 빈 값은 `""` 가 아니라 **키 생략**) |
+| 스킴 | `http` / `https` 만 (저장 시점에 막는다 — `client::fetch_text` 와 같은 규칙) |
+
+폼에서 세 가지를 저장 전에 인라인 경고로 짚어 준다. 게이트웨이의 400 은 어느 값이 왜 틀렸는지
+알려 주지 않으므로, 담당자 `labels` 를 검사하는 것과 같은 이유다.
+
+`spec_url` 을 비우면 그 **키만** 지운다 — 담당자(`name{n}`/`dept{n}`) 같은 다른 라벨은
+그대로 남고, 라벨이 하나도 남지 않으면 `labels` 키 자체를 없앤다.
+
+### Service 폼
+
+| 필드 | 저장 위치 |
+|---|---|
+| `name` (필수) | `name` |
+| `upstream_id` (필수) | `upstream_id` — 캐시된 Upstream 목록에서 고르는 셀렉트 |
+| `desc` | `desc` |
+| `spec_url` | `labels.spec_url` |
+| `log-key` (필수, placeholder `ep`) | `plugins.shi-log.key` |
+
+`plugins.jwt-auth` 는 저장할 때 **없을 때만** `{}` 로 넣는다. 이미 붙어 있으면 그 설정
+(`header`·`hide_credentials` 등)을 보존한다 — `{}` 로 덮으면 게이트웨이에 설정된 옵션이
+조용히 사라진다. `shi-log` 도 `key` 만 갈아 끼우고 나머지 필드는 남긴다.
+
+### Upstream 폼
+
+노드를 여러 개 등록할 수 있고 각 행은 `host` · `port` 다. `timeout` 은 요구된 기본값
+`connect 10` · `send 10` · `read 60` (초) 으로 채워져 열린다.
+
+`weight` 는 **화면에 두지 않지만 조회한 값을 그대로 되쓴다.** 보이지 않는 값을 저장 한 번으로
+1 로 덮으면 게이트웨이에 설정된 가중치가 사라진다. 새 노드는 1 이다.
+
+`nodes` 는 게이트웨이가 두 표기를 모두 주므로 **읽기는 둘 다** 받는다:
+
+```
+{"10.0.0.1:8080": 1}            맵 표기 — 키가 host:port, 값이 weight
+[{host, port, weight}]          배열 표기
+```
+
+**쓰기는 배열로 고정한다.** 맵 키에 `host:port` 를 조립해 넣으면 포트가 없는 노드
+(`example.com`)나 IPv6 주소(`[::1]:8080`)에서 표기가 애매해지고, weight 를 값 자리에
+숨겨야 한다. 맵 표기를 읽을 때는 **마지막 콜론 뒤가 숫자일 때만** 나눈다 — 그러지 않으면
+`::1` 이 host `:` + port `1` 로 갈린다.
+
+`type`(로드밸런싱 방식)은 폼에 없다. 없을 때만 `roundrobin` 을 넣고, 이미 있으면 손대지
+않는다 — `chash` 로 운영 중인 upstream 을 저장 한 번으로 바꿔 버리면 안 된다.
+`checks`(헬스체크)·`retries`·`scheme`·`pass_host` 도 같은 이유로 보존한다.
 
 ---
 
@@ -424,9 +557,9 @@ YAML 파서(`serde_norway`)가 JSON 의 상위집합이라 `.json` 스펙도 같
 | Route 검색 | 배열 전문 검색 | 내장 SQLite 조회 | 위 'Route 목록 — 내장 SQLite 캐시' 절 |
 | methods 칩 | `METHODS` 7개 고정 | + 폼에 실제로 들어 있는 비표준 메서드 | `CONNECT`·`TRACE`·`PURGE` 를 쓰는 라우트가 칩 하나 눌렀다고 조용히 그 값을 잃으면 안 된다 (`sortMethods` 가 버리지 않고 뒤에 붙인다) |
 | `API 스펙 Import` 화면 | 없음 | 신규 | 요청 기능 |
+| 아이콘 레일 | 대시보드 / Route / Consumer / 설정 | + `Upstream` · `Service` | service 에 `spec_url` 을 붙여야 Import 가 파일 없이도 동작한다. 그러려면 두 리소스를 앱에서 편집할 수 있어야 한다 |
 
-Service / Upstream 은 **읽기 전용**이다. 레일에 화면이 없고 주 용도가 Route·Consumer 관리라,
-`service_id` 셀렉트와 KPI 를 채우기 위한 조회만 구현했다.
+Service / Upstream 은 각각 레일 메뉴와 편집 화면을 갖는다 (아래 'Upstream · Service 관리' 절).
 
 디자인의 프리뷰 전용 props(`density` 기본/컴팩트, `showActivity`)는 목업 노브로 보고
 기본 밀도만 구현했다. 필요하면 설정 화면에 옵션으로 추가하면 된다.

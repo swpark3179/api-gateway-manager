@@ -34,6 +34,8 @@ export default function SidePanel() {
   // '전체' 행이 그 컨슈머의 건수를 표시하게 되어 순환한다 (store.ts 모듈 주석 참조).
   const access = useStore((s) => s.access);
   const consumers = useStore((s) => s.consumers);
+  const services = useStore((s) => s.services);
+  const upstreams = useStore((s) => s.upstreams);
   const dash = useStore((s) => s.dash);
   const settings = useStore((s) => s.settings);
   const setChip = useStore((s) => s.setChip);
@@ -85,6 +87,29 @@ export default function SidePanel() {
             })),
           ],
         };
+      case "upstreams": {
+        // 노드가 하나도 없는 upstream 은 게이트웨이가 트래픽을 흘릴 데가 없다는 뜻이라
+        // 따로 세어 준다 — 목록에서는 눈에 잘 띄지 않는다.
+        const empty = upstreams.filter((u) => u.nodes.length === 0).length;
+        return {
+          title: "UPSTREAM",
+          rows: [
+            { label: "전체", count: upstreams.length, chip: null },
+            { label: "노드 미등록", count: empty, chip: null, dim: empty === 0 },
+          ],
+        };
+      }
+      case "services": {
+        // spec_url 이 빈 service 는 Import 화면에서 파일을 첨부해야만 비교할 수 있다.
+        const noSpec = services.filter((x) => !x.specUrl.trim()).length;
+        return {
+          title: "SERVICE",
+          rows: [
+            { label: "전체", count: services.length, chip: null },
+            { label: "spec_url 미등록", count: noSpec, chip: null, dim: noSpec === 0 },
+          ],
+        };
+      }
       case "settings":
         return {
           title: "ENVIRONMENT",
@@ -105,7 +130,7 @@ export default function SidePanel() {
           ],
         };
     }
-  }, [section, access, consumers, settings, dash, needle]);
+  }, [section, access, consumers, services, upstreams, settings, dash, needle]);
 
   const cfg = settings?.[env];
   const hasToken = !!cfg?.hasToken;

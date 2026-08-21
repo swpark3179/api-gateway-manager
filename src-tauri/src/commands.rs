@@ -8,8 +8,10 @@ use tauri::{AppHandle, Manager, Wry};
 
 use crate::apisix::consumers::{self, ConsumerForm};
 use crate::apisix::meta::{self, Overview};
-use crate::apisix::models::{ConsumerView, RouteView, ServiceOption};
+use crate::apisix::models::{ConsumerView, RouteView, ServiceView, UpstreamView};
 use crate::apisix::routes::{self, RouteForm};
+use crate::apisix::services::{self, ServiceForm};
+use crate::apisix::upstreams::{self, UpstreamForm};
 use crate::apisix::client;
 use crate::config::{self, Env, EnvConfig, SettingsView};
 use crate::db::{self, AccessCounts, Cache, CompareRow, RoutesPage};
@@ -278,11 +280,88 @@ pub async fn consumer_delete(app: AppHandle<Wry>, env: Env, username: String) ->
     consumers::delete(&app, env, &username).await
 }
 
-// ── Service (읽기 전용) ──────────────────────────────────────
+// ── Upstream ─────────────────────────────────────────────────
+
+/// 게이트웨이에서 Upstream 전체 목록을 다시 받아 캐시를 갱신하고, 그 목록을 돌려준다.
+///
+/// `routes_sync` 와 달리 목록을 그대로 돌려주는 이유는 `consumers_sync` 와 같다 — 건수가
+/// 적고, Service 폼의 upstream 콤보가 이 배열에서 곧바로 파생한다.
+#[tauri::command]
+pub async fn upstreams_sync(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<UpstreamView>> {
+    let items = upstreams::list(&app, env).await?;
+    cache(&app)?.with(|conn| db::sync_upstreams(conn, env.as_str(), &items))?;
+    Ok(items)
+}
+
+/// 캐시의 Upstream 전체 목록 (게이트웨이 호출 없음).
+#[tauri::command]
+pub fn upstreams_cached(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<UpstreamView>> {
+    cache(&app)?.with(|conn| db::upstreams_cached(conn, env.as_str()))
+}
 
 #[tauri::command]
-pub async fn services_list(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<ServiceOption>> {
-    meta::services(&app, env).await
+pub async fn upstream_save(
+    app: AppHandle<Wry>,
+    env: Env,
+    form: UpstreamForm,
+) -> AppResult<UpstreamView> {
+    upstreams::save(&app, env, form).await
+}
+
+#[tauri::command]
+pub async fn upstream_delete(
+    app: AppHandle<Wry>,
+    env: Env,
+    id: String,
+    name: Option<String>,
+) -> AppResult<()> {
+    upstreams::delete(&app, env, &id, name.as_deref().unwrap_or("")).await
+}
+
+// ── Service ──────────────────────────────────────────────────
+
+/// 게이트웨이에서 Service 전체 목록을 다시 받아 캐시를 갱신하고, 그 목록을 돌려준다.
+///
+/// upstream 라벨(`10.20.3.11:8080`)은 **캐시**에서 읽는다. `GET /upstreams` 를 한 번 더
+/// 부르지 않기 위한 것이고, 부트스트랩이 upstream 을 먼저 돌리므로 정상 흐름에서는 항상
+/// 채워져 있다. 비어 있어도 라벨의 `(host:port)` 조각만 빠질 뿐 조회는 성립한다.
+#[tauri::command]
+pub async fn services_sync(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<ServiceView>> {
+    let ups = cached_upstreams(&app, env)?;
+    let items = services::list(&app, env, &ups).await?;
+    cache(&app)?.with(|conn| db::sync_services(conn, env.as_str(), &items))?;
+    Ok(items)
+}
+
+/// 캐시의 Service 전체 목록 (게이트웨이 호출 없음).
+#[tauri::command]
+pub fn services_cached(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<ServiceView>> {
+    cache(&app)?.with(|conn| db::services_cached(conn, env.as_str()))
+}
+
+#[tauri::command]
+pub async fn service_save(
+    app: AppHandle<Wry>,
+    env: Env,
+    form: ServiceForm,
+) -> AppResult<ServiceView> {
+    let ups = cached_upstreams(&app, env)?;
+    services::save(&app, env, form, &ups).await
+}
+
+#[tauri::command]
+pub async fn service_delete(
+    app: AppHandle<Wry>,
+    env: Env,
+    id: String,
+    name: Option<String>,
+) -> AppResult<()> {
+    services::delete(&app, env, &id, name.as_deref().unwrap_or("")).await
+}
+
+/// 잠금을 `.await` 너머로 들고 가지 않으려고 따로 뽑아 둔 헬퍼 (위 `routes_sync` 주석 참조).
+fn cached_upstreams(app: &AppHandle<Wry>, env: Env) -> AppResult<Vec<UpstreamView>> {
+    cache(app)?.with(|conn| db::upstreams_cached(conn, env.as_str()))
 }
 
 // ── 대시보드 ─────────────────────────────────────────────────

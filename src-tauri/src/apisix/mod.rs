@@ -8,3 +8,5 @@ pub mod consumers;
 pub mod meta;
 pub mod models;
 pub mod routes;
+pub mod services;
+pub mod upstreams;

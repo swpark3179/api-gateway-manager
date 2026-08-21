@@ -52,7 +52,7 @@ export default function RouteForm() {
               {!form.serviceId && <option value="">— 선택 —</option>}
               {services.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.label}
+                  {s.optionLabel}
                 </option>
               ))}
             </select>

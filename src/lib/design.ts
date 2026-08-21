@@ -22,6 +22,10 @@ export const RAIL_ICONS: Record<Section, string> = {
   dash: "M4 5h6v6H4zM14 5h6v6h-6zM4 15h6v4H4zM14 13h6v6h-6z",
   routes: "M6 4v6a4 4 0 0 0 4 4h8M18 10l3 4-3 4",
   consumers: "M4 20a5 5 0 0 1 10 0M9 4a3.2 3.2 0 1 1 0 6.4A3.2 3.2 0 0 1 9 4M16 20a5 5 0 0 0-2-4",
+  // 서버 스택 — upstream 의 노드 묶음
+  upstreams: "M4 6h16v4H4zM4 14h16v4H4M7 8h.01M7 16h.01",
+  // 분기 — service 가 여러 route 를 묶는 모양
+  services: "M5 4v4a3 3 0 0 0 3 3h11M5 20v-4a3 3 0 0 1 3-3h11M16 8l3 3-3 3M16 10l3 3-3 3",
   settings:
     "M12 15.2A3.2 3.2 0 1 0 12 8.8a3.2 3.2 0 0 0 0 6.4M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.4-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 4a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.4l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 21 11a2 2 0 1 1 0 4Z",
 };
@@ -30,6 +34,8 @@ export const RAIL: Array<{ key: Section; label: string }> = [
   { key: "dash", label: "대시보드" },
   { key: "routes", label: "Route" },
   { key: "consumers", label: "Consumer" },
+  { key: "upstreams", label: "Upstream" },
+  { key: "services", label: "Service" },
   { key: "settings", label: "설정" },
 ];
 
@@ -107,6 +113,19 @@ function pickGroups(
   return [];
 }
 
+/**
+ * 경로 접두사 → route 명 접두사. `/v1` → `V1/`
+ *
+ * **표시 전용이다.** 실제로 폼에 채워지는 값은 Rust 가 계산한 `CompareRow.suggestedName`
+ * 이고(`oas::name_prefix` · `oas::suggested_name`, 테스트가 붙어 있다), 이 함수는 접두사를
+ * 입력하는 중에 "그래서 이름이 어떻게 되는가"를 미리 보여 주기 위한 것뿐이다.
+ * 규칙이 바뀌면 Rust 쪽이 진실이다.
+ */
+export function nameFromPrefix(prefix: string): string {
+  const core = prefix.trim().replace(/^\/+|\/+$/g, "");
+  return core ? `${core.toUpperCase()}/` : "";
+}
+
 // ── JSON 탭 본문 ─────────────────────────────────────────────
 
 export function routeJson(f: RouteFormState): Record<string, unknown> {
@@ -144,8 +163,19 @@ export function consumerJson(f: ConsumerFormState): Record<string, unknown> {
   return o;
 }
 
+/**
+ * JSON 탭이 다루는 것은 route · consumer 뿐이다.
+ *
+ * Service · Upstream 은 폼 탭만 두었다 (EditScreen 의 탭 목록 참조). 두 리소스의 JSON 을
+ * 내보내려면 `labels.spec_url` 과 nodes 표기 규칙을 TS 에도 구현해야 하고, 그 규칙이 두 곳에
+ * 있으면 반드시 어긋난다 — `consumerJson` 이 labels 를 내보내지 않는 것과 같은 판단이다.
+ * 그래서 그 두 형태는 폼을 그대로 직렬화해 미리보기만 성립하게 한다.
+ */
 export function formJson(f: FormState): Record<string, unknown> {
-  return f.kind === "consumer" ? consumerJson(f) : routeJson(f);
+  if (f.kind === "consumer") return consumerJson(f);
+  if (f.kind === "route") return routeJson(f);
+  const { kind: _kind, ...rest } = f;
+  return rest;
 }
 
 export function jsonText(f: FormState): string {
@@ -155,6 +185,9 @@ export function jsonText(f: FormState): string {
 /** JSON 탭의 '폼에 적용' — 디자인의 applyJson() */
 export function jsonToForm(raw: string, current: FormState): FormState {
   const o = JSON.parse(raw) as Record<string, any>;
+
+  // JSON 탭이 없는 형태는 그대로 돌려준다 (formJson 주석 참조).
+  if (current.kind === "service" || current.kind === "upstream") return current;
 
   if (current.kind === "consumer") {
     const j = (o.plugins && o.plugins["jwt-auth"]) || {};

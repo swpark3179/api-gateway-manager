@@ -2,16 +2,27 @@
  * OAS 3.0 스펙 Import — 스펙의 API 목록을 선택한 service 의 라우트와 대조한다.
  *
  * 두 단계가 한 화면에 있다:
- *   1. 소스 입력 — URL · 드래그&드롭 · 파일 다이얼로그 중 하나 + service · 경로 접두사
+ *   1. 스펙 불러오기 — 드래그&드롭 또는 파일 선택 + service · 경로 접두사
  *   2. 비교 결과 — 등록 / 메서드 불일치 / 미등록. 행을 누르면 상세 또는 신규 폼으로 간다.
  *
- * 세 입력 경로 모두 Rust 의 `oas_load` 로 모인다. 특히 URL 은 CSP 가 웹뷰의 외부 통신을
+ * # 스펙을 어디서 읽는가 — 두 모드
+ *
+ * 주소를 손으로 붙여 넣는 입력란은 없다. 스펙 주소는 service 의 속성이므로
+ * (`labels.spec_url`) service 를 고르면 따라와야 한다.
+ *
+ *   파일 첨부함   → 첨부한 스펙으로 비교. service 를 바꾸면 비교만 다시 돌린다.
+ *   파일 미첨부   → 고른 service 의 `spec_url` 을 읽어 비교한다.
+ *
+ * 갈림길은 `store.setImportService` 에 있고, 판단 기준은 `importFileName` 이 비었는지다.
+ * 파일 읽기는 Rust 가 한다 — 웹뷰에 `fs:` 권한이 없고, URL 은 CSP 가 웹뷰의 외부 통신을
  * 막고 있어 프런트에서 fetch 할 수 없다 (api.ts · client.rs 주석 참조).
  */
 
 import { useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
+import ErrorBanner from "../components/ErrorBanner";
+import { nameFromPrefix } from "../lib/design";
 import { filterCompareRows, useStore } from "../store";
 import type { CompareRow, MatchState } from "../types";
 
@@ -47,7 +58,10 @@ export default function ImportScreen() {
   const chip = useStore((s) => s.importChip);
   const q = useStore((s) => s.importQ);
 
+  const fileName = useStore((s) => s.importFileName);
+
   const loadOas = useStore((s) => s.loadOas);
+  const clearFile = useStore((s) => s.clearImportFile);
   const setService = useStore((s) => s.setImportService);
   const setPrefix = useStore((s) => s.setImportPrefix);
   const setNoProxy = useStore((s) => s.setImportNoProxy);
@@ -58,10 +72,7 @@ export default function ImportScreen() {
   const backToList = useStore((s) => s.backToList);
   const flash = useStore((s) => s.flash);
 
-  const [url, setUrl] = useState("");
   const [over, setOver] = useState(false);
-  /** 무엇을 읽었는지 사용자에게 되짚어 준다 (파일명 또는 주소) */
-  const [origin, setOrigin] = useState("");
 
   const counts = useMemo(() => {
     const c: Record<MatchState, number> = {
@@ -82,8 +93,7 @@ export default function ImportScreen() {
       flash(`파일이 너무 큽니다 (최대 ${MAX_SPEC_BYTES / (1024 * 1024)}MiB).`);
       return;
     }
-    setOrigin(file.name);
-    await loadOas({ kind: "text", value: await file.text() });
+    await loadOas({ kind: "text", value: await file.text() }, file.name);
   }
 
   async function pickFile() {
@@ -93,22 +103,16 @@ export default function ImportScreen() {
       filters: [{ name: "OpenAPI 스펙", extensions: ["yaml", "yml", "json"] }],
     });
     if (typeof picked !== "string") return;
-    setOrigin(picked);
-    await loadOas({ kind: "path", value: picked });
-  }
-
-  async function fetchUrl() {
-    const v = url.trim();
-    if (!v) {
-      flash("스펙 주소를 입력하세요.");
-      return;
-    }
-    setOrigin(v);
-    await loadOas({ kind: "url", value: v, noProxy });
+    // 파일 다이얼로그는 전체 경로를 준다 — 칩에는 파일명만 보여 준다.
+    const base = picked.split(/[\\/]/).pop() || picked;
+    await loadOas({ kind: "path", value: picked }, base);
   }
 
   const envLabel = env === "dev" ? "개발" : "운영";
   const serviceMissing = services.length === 0;
+  const selected = services.find((s) => s.id === service);
+  /** 접두사에서 파생되는 route 명 접두사 — 눌러 보기 전에 무엇이 채워질지 보여 준다. */
+  const namePrefix = nameFromPrefix(prefix);
 
   return (
     <div data-screen-label="Import" style={{ padding: "20px 28px 56px", maxWidth: 1120 }}>
@@ -126,8 +130,10 @@ export default function ImportScreen() {
             API 스펙 Import
           </h2>
           <p className="page-sub">
-            OAS 3.0 스펙의 API 목록을 {envLabel} 서버의 선택한 service 와 대조합니다. 등록된
-            API 는 상세로, 미등록 API 는 값이 채워진 신규 등록 화면으로 이어집니다.
+            OAS 3.0 스펙의 API 목록을 {envLabel} 서버의 선택한 service 와 대조합니다. 파일을
+            첨부하지 않으면 고른 service 의 <span className="font-mono">spec_url</span> 을
+            읽습니다. 등록된 API 는 상세로, 미등록 API 는 값이 채워진 신규 등록 화면으로
+            이어집니다.
           </p>
         </div>
         <div className="page-actions">
@@ -173,23 +179,41 @@ export default function ImportScreen() {
           </button>
         </div>
 
-        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 18 }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <label className="field-label">스펙 URL</label>
-            <input
-              className="text-input font-mono"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void fetchUrl();
-              }}
-              placeholder="https://api.internal.sds/openapi.yaml"
-            />
+        {/* 첨부한 파일 — 무엇으로 비교하고 있는지 밝히고, x 로 되돌릴 수 있게 한다. */}
+        {fileName ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 14 }}>
+            <div className="chip on" style={{ cursor: "default", maxWidth: "100%" }}>
+              <svg
+                viewBox="0 0 24 24"
+                width="13"
+                height="13"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{ flex: "none" }}
+              >
+                <path d="M14 3v5h5" />
+                <path d="M6 3h8l5 5v13H6z" />
+              </svg>
+              <span
+                className="font-mono selectable"
+                style={{ fontSize: 12, wordBreak: "break-all" }}
+              >
+                {fileName}
+              </span>
+              <span className="x" title="첨부 해제" onClick={() => void clearFile()}>
+                ×
+              </span>
+            </div>
           </div>
-          <button className="btn md outline" onClick={() => void fetchUrl()} disabled={busy}>
-            가져오기
-          </button>
-        </div>
+        ) : (
+          <div className="text-xs muted" style={{ marginTop: 14 }}>
+            파일을 첨부하지 않으면 아래에서 고른 service 의{" "}
+            <span className="font-mono">spec_url</span> 을 읽어 비교합니다.
+          </div>
+        )}
 
         <label
           style={{
@@ -207,7 +231,7 @@ export default function ImportScreen() {
             checked={noProxy}
             onChange={(e) => setNoProxy(e.target.checked)}
           />
-          스펙 주소도 시스템 프록시를 우회해 직접 호출 (기본값은 {envLabel} 서버 설정)
+          service 의 spec_url 도 시스템 프록시를 우회해 직접 호출 (기본값은 {envLabel} 서버 설정)
         </label>
         <div className="text-xs muted" style={{ marginTop: 4 }}>
           스펙이 사외 주소에 있고 사내에서 프록시를 거쳐야 한다면 이 체크를 해제하세요. 게이트웨이
@@ -231,15 +255,27 @@ export default function ImportScreen() {
               {!service && <option value="">— 선택 —</option>}
               {services.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.label}
+                  {s.optionLabel}
                 </option>
               ))}
             </select>
             <div className="text-xs muted" style={{ marginTop: 6 }}>
               {serviceMissing
-                ? "등록된 Service 가 없습니다. Upstream/Service 화면에서 먼저 생성하세요."
-                : "이 service 에 속한 라우트만 비교 대상입니다. 스펙을 읽을 때 게이트웨이 목록을 다시 조회합니다."}
+                ? "등록된 Service 가 없습니다. Upstream · Service 화면에서 먼저 생성하세요."
+                : fileName
+                  ? "이 service 에 속한 라우트만 비교 대상입니다. 첨부한 스펙으로 비교합니다."
+                  : selected?.specUrl
+                    ? "이 service 의 spec_url 을 읽어 비교합니다."
+                    : "이 service 에는 spec_url 이 없습니다. Service 화면에서 등록하거나 위에 파일을 첨부하세요."}
             </div>
+            {!fileName && selected?.specUrl && (
+              <div
+                className="text-xs muted font-mono selectable"
+                style={{ marginTop: 4, wordBreak: "break-all" }}
+              >
+                {selected.specUrl}
+              </div>
+            )}
           </div>
 
           <div>
@@ -254,33 +290,19 @@ export default function ImportScreen() {
               스펙의 <span className="font-mono">servers</span> 경로로 채워집니다. 게이트웨이
               uri 가 <span className="font-mono">/v1/pets</span> 처럼 접두사를 포함할 때 씁니다.
             </div>
+            <div className="text-xs" style={{ marginTop: 6, color: "var(--gray-700)" }}>
+              route 명 접두사{" "}
+              <span className="font-mono" style={{ color: "var(--purple-700)" }}>
+                {namePrefix || "(없음)"}
+              </span>
+              {" — 미등록 건을 신규 등록할 때 "}
+              <span className="font-mono">name</span> 앞에 붙습니다.
+            </div>
           </div>
         </div>
       </div>
 
-      {error && (
-        <div
-          className="card-surface"
-          style={{
-            padding: "16px 20px",
-            marginBottom: 16,
-            background: "var(--red-50)",
-            borderColor: "var(--red-200)",
-          }}
-        >
-          <div style={{ font: "500 13px/20px var(--font-sans)", color: "var(--red-700)" }}>
-            {error.message}
-          </div>
-          {error.hint && (
-            <div
-              className="text-sm"
-              style={{ color: "var(--red-700)", opacity: 0.85, marginTop: 4 }}
-            >
-              {error.hint}
-            </div>
-          )}
-        </div>
-      )}
+      <ErrorBanner error={error} />
 
       {/* ── 2단계 · 비교 결과 ───────────────────────────────── */}
       {doc && (
@@ -304,7 +326,7 @@ export default function ImportScreen() {
                   className="text-xs muted font-mono selectable"
                   style={{ marginTop: 4, wordBreak: "break-all" }}
                 >
-                  {origin || "—"}
+                  {fileName || selected?.specUrl || "—"}
                 </div>
                 <div className="text-sm muted" style={{ marginTop: 6 }}>
                   스펙 API {doc.ops.length}건
@@ -453,7 +475,8 @@ export default function ImportScreen() {
         <div className="card-surface">
           <div className="state-block">
             <div className="msg">
-              스펙을 불러오면 선택한 service 와 대조한 결과가 여기에 표시됩니다.
+              스펙 파일을 첨부하거나, spec_url 이 등록된 service 를 고르면 대조 결과가 여기에
+              표시됩니다.
             </div>
           </div>
         </div>
@@ -527,7 +550,14 @@ function Row({ row, onOpen, onCreate }: RowProps) {
             </div>
           </>
         ) : (
-          <div className="mono text-xs muted">신규 등록 → {row.suggestedUri}</div>
+          <>
+            <div className="name mono">{row.suggestedName}</div>
+            <div className="mono text-xs muted">
+              신규 등록 → {row.suggestedUri}
+              <br />
+              rewrite {row.suggestedRewrite}
+            </div>
+          </>
         )}
       </td>
     </tr>

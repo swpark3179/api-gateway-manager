@@ -1,11 +1,11 @@
 /** Rust DTO(`src-tauri/src/**`)와 1:1 대응하는 타입. serde 가 camelCase 로 직렬화한다. */
 
 export type EnvKey = "dev" | "prod";
-export type Section = "dash" | "routes" | "consumers" | "settings";
+export type Section = "dash" | "routes" | "consumers" | "upstreams" | "services" | "settings";
 /** `import` 는 Route 섹션 전용 — OAS 스펙 비교 화면 (ImportScreen). */
 export type View = "list" | "detail" | "create" | "import";
 export type Tab = "form" | "json" | "jwt";
-export type Kind = "route" | "consumer";
+export type Kind = "route" | "consumer" | "service" | "upstream";
 
 // ── 설정 ─────────────────────────────────────────────────────
 
@@ -92,10 +92,60 @@ export interface ConsumerView {
   raw: unknown;
 }
 
-export interface ServiceOption {
+// ── Upstream / Service ───────────────────────────────────────
+
+/**
+ * upstream 노드 하나.
+ *
+ * `weight` 는 폼에 노출하지 않지만 조회한 값을 그대로 되쓴다 — 화면에 없는 값을 조용히
+ * 1 로 덮으면 게이트웨이에 설정된 가중치가 사라진다.
+ */
+export interface UpstreamNode {
+  host: string;
+  port: number | null;
+  weight: number | null;
+}
+
+/** 초 단위. 폼 기본값은 connect 10 · send 10 · read 60. */
+export interface UpstreamTimeout {
+  connect: number;
+  send: number;
+  read: number;
+}
+
+export interface UpstreamView {
   id: string;
-  label: string;
   name: string;
+  desc: string;
+  /** 로드밸런싱 방식. 게이트웨이에 없으면 `roundrobin` 으로 채워 온다 */
+  type: string;
+  nodes: UpstreamNode[];
+  timeout: UpstreamTimeout;
+  /** `10.20.3.11:8080 외 2` — 목록·셀렉트 라벨 */
+  nodeLabel: string;
+  updateTime: number | null;
+  updated: string;
+  raw: unknown;
+}
+
+export interface ServiceView {
+  id: string;
+  name: string;
+  desc: string;
+  upstreamId: string;
+  /** 게이트웨이 `labels.spec_url`. Import 가 파일 첨부 없이 비교할 때 읽는 주소 */
+  specUrl: string;
+  /** `plugins["shi-log"].key` */
+  logKey: string;
+  /** `plugins["jwt-auth"]` 가 붙어 있는가 */
+  hasJwtAuth: boolean;
+  /** 참조 upstream 의 대표 노드. 못 찾으면 빈 문자열 */
+  upstreamLabel: string;
+  /** `svc-order · order-api (10.20.3.11:8080)` — Rust 가 조립한 셀렉트 라벨 */
+  optionLabel: string;
+  updateTime: number | null;
+  updated: string;
+  raw: unknown;
 }
 
 // ── Route 목록 캐시 (내장 SQLite) ───────────────────────────
@@ -140,7 +190,11 @@ export interface AccessCounts {
 
 /** 스펙을 어디서 읽을지. 세 입력 경로가 모두 이 형태로 Rust 에 넘어간다. */
 export interface ImportSource {
-  /** `text` = 드래그&드롭, `path` = 파일 다이얼로그, `url` = 주소 입력 */
+  /**
+   * `text` = 드래그&드롭, `path` = 파일 다이얼로그,
+   * `url` = **service 의 `spec_url`** (화면에 주소 입력란은 없다 — 파일을 첨부하지 않았을 때
+   * 선택한 service 의 라벨에서 읽어 온다)
+   */
   kind: "text" | "path" | "url";
   value: string;
   /** `url` 일 때만 의미 있다. 스펙 주소는 사외라 프록시가 필요할 수 있다. */
@@ -186,6 +240,10 @@ export interface CompareRow {
   wildcard: boolean;
   /** 미등록 건을 신규 생성할 때 채울 uri 후보 (Rust 가 계산한다) */
   suggestedUri: string;
+  /** 신규 폼의 `name` 후보 — `V1/` 같은 접두사 + 접두사를 뗀 원본 path */
+  suggestedName: string;
+  /** 신규 폼의 `proxy-rewrite.uri` 후보 — 접두사를 붙이지 않은 OAS 원본 path */
+  suggestedRewrite: string;
 }
 
 // ── 대시보드 ─────────────────────────────────────────────────
@@ -288,7 +346,46 @@ export interface ConsumerFormState {
   groupsLocation: GroupsLocation | null;
 }
 
-export type FormState = RouteFormState | ConsumerFormState;
+/**
+ * upstream 노드 입력 한 줄. 숫자를 **문자열로** 들고 있는 이유는 편집 중 빈 칸이
+ * 가능해야 하기 때문이다 (`port: number` 면 지우는 순간 NaN 이 된다).
+ * 숫자 변환은 `api.upstreamSave` 한 곳에서 한다.
+ */
+export interface UpstreamNodeInput {
+  host: string;
+  port: string;
+  /** 화면에 없지만 조회값을 실어 보낸다 (UpstreamNode.weight 주석 참조) */
+  weight: string;
+}
+
+export interface UpstreamFormState {
+  kind: "upstream";
+  /** null = 신규 (POST /upstreams 로 APISIX 가 id 자동 생성) */
+  id: string | null;
+  name: string;
+  desc: string;
+  nodes: UpstreamNodeInput[];
+  timeout: { connect: string; send: string; read: string };
+}
+
+export interface ServiceFormState {
+  kind: "service";
+  /** null = 신규 (POST /services 로 APISIX 가 id 자동 생성) */
+  id: string | null;
+  name: string;
+  desc: string;
+  upstreamId: string;
+  /** `labels.spec_url` 로 저장된다 */
+  specUrl: string;
+  /** `plugins["shi-log"].key` */
+  logKey: string;
+}
+
+export type FormState =
+  | RouteFormState
+  | ConsumerFormState
+  | ServiceFormState
+  | UpstreamFormState;
 
 export const emptyRouteForm = (serviceId: string): RouteFormState => ({
   kind: "route",
@@ -331,28 +428,83 @@ export const routeToForm = (r: RouteView): RouteFormState => ({
   groupsLocation: r.groupsLocation,
 });
 
-/** APISIX name 제약에 맞춘 식별자 — 허용 문자만 남기고 길이를 자른다. */
-const slugify = (v: string): string =>
-  v
-    .trim()
-    .replace(/[^A-Za-z0-9_.-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 100);
-
 /**
  * Import 의 미등록 행 → 신규 Route 폼.
  *
- * `uri` 는 Rust 가 계산한 `suggestedUri` 를 그대로 쓴다 — 경로 파라미터 변환 규칙이
- * 두 곳에 있으면 반드시 어긋난다 (oas::to_apisix_uri 에 테스트가 붙어 있다).
+ * `name` · `uri` · `rewrite` 세 값은 **모두 Rust 가 계산한 것을 그대로 쓴다**
+ * (`oas::suggested_name` · `oas::to_apisix_uri`). 규칙이 두 곳에 있으면 반드시 어긋나고,
+ * Rust 쪽에는 테스트가 붙어 있다.
+ *
+ *   name    `V1/orders/{orderId}/items`  접두사를 대문자로 + 접두사를 뗀 원본 path
+ *   uri     `/v1/orders/:orderId/items`  게이트웨이가 매칭하는 표기 (접두사 포함)
+ *   rewrite `/orders/{orderId}/items`    upstream 이 아는 경로 (접두사 없음)
+ *
  * `groupsLocation` 은 null 로 둬서 기존 기본 위치 규칙(shi-auth.allowed_groups)에 맡긴다.
  */
 export const routeFormFromOas = (row: CompareRow, serviceId: string): RouteFormState => ({
   ...emptyRouteForm(serviceId),
-  name: slugify(row.operationId) || slugify(`${row.method}-${row.fullPath}`),
+  name: row.suggestedName,
   uri: row.suggestedUri,
+  rewrite: row.suggestedRewrite,
   // APISIX 의 desc 는 길이 제한이 있어 요약을 잘라 넣는다.
   desc: row.summary.trim().slice(0, 255),
   methods: [row.method],
+});
+
+/** 요구된 기본 timeout — connect 10 · send 10 · read 60 (초). */
+export const DEFAULT_TIMEOUT = { connect: "10", send: "10", read: "60" };
+
+export const emptyUpstreamForm = (): UpstreamFormState => ({
+  kind: "upstream",
+  id: null,
+  name: "",
+  desc: "",
+  nodes: [{ host: "", port: "", weight: "1" }],
+  timeout: { ...DEFAULT_TIMEOUT },
+});
+
+export const emptyServiceForm = (upstreamId: string): ServiceFormState => ({
+  kind: "service",
+  id: null,
+  name: "",
+  desc: "",
+  upstreamId,
+  specUrl: "",
+  logKey: "",
+});
+
+const numText = (v: number | null, fallback = ""): string =>
+  v === null || v === undefined ? fallback : String(v);
+
+export const upstreamToForm = (u: UpstreamView): UpstreamFormState => ({
+  kind: "upstream",
+  id: u.id || null,
+  name: u.name,
+  desc: u.desc,
+  // 노드가 없는 upstream 도 편집할 수 있어야 하므로 빈 행 하나를 준다.
+  nodes:
+    u.nodes.length > 0
+      ? u.nodes.map((n) => ({
+          host: n.host,
+          port: numText(n.port),
+          weight: numText(n.weight, "1"),
+        }))
+      : [{ host: "", port: "", weight: "1" }],
+  timeout: {
+    connect: String(u.timeout.connect),
+    send: String(u.timeout.send),
+    read: String(u.timeout.read),
+  },
+});
+
+export const serviceToForm = (s: ServiceView): ServiceFormState => ({
+  kind: "service",
+  id: s.id || null,
+  name: s.name,
+  desc: s.desc,
+  upstreamId: s.upstreamId,
+  specUrl: s.specUrl,
+  logKey: s.logKey,
 });
 
 export const consumerToForm = (c: ConsumerView): ConsumerFormState => ({
