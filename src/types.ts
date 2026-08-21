@@ -68,8 +68,10 @@ export interface RouteView {
 /**
  * 게이트웨이 `labels` 의 `name{n}` / `dept{n}` 쌍에서 읽은 관련 담당자.
  *
- * 번호 규칙(재번호 · 앞자리 0 배제 · 빈 값은 키 생략)은 Rust 한 곳에만 있다
- * (`models::contacts_of` · `set_contacts_at`). 여기서 다시 구현하지 않는다.
+ * 번호 규칙(재번호 · 앞자리 0 배제 · 빈 값은 키 생략)의 **진실은 Rust** 다
+ * (`models::contacts_of` · `set_contacts_at`) — 저장 때 실제로 적용되는 것이 그쪽이다.
+ * JSON 탭이 담당자를 같이 보여 주기 위해 `lib/design.ts` 에 표시 전용 사본이 있다
+ * (`contactLabels` · `contactsFromLabels`). 규칙을 고칠 때 두 곳을 함께 봐야 한다.
  */
 export interface Contact {
   name: string;
@@ -170,6 +172,37 @@ export interface ConsumerAccess {
   username: string;
   count: number;
 }
+
+/**
+ * Route 목록의 조회 범위 — 좌측 패널이 고르는 축.
+ *
+ * 세 값이 **한 축**이라 판별 유니온으로 둔다. `string | null` 로는 '그룹 제한 없음' 을 담을
+ * 자리가 없고, `consumer` + `ungrouped` 두 필드로 나누면 둘 다 켜진 상태를 표현할 수 있게
+ * 되어 SQL 쪽에서 무슨 뜻인지 정할 수밖에 없다. Rust 의 `db::RouteScope` 와 같은 모양이다
+ * (serde 내부 태그 `kind`).
+ *
+ * `chip`(status 축)과는 여전히 별개 필드다 — 그 둘은 AND 로 동시에 걸린다.
+ */
+export type RouteScope =
+  | { kind: "all" }
+  | { kind: "consumer"; username: string }
+  | { kind: "ungrouped" };
+
+/** 조회 범위 전체. */
+export const ALL_ROUTES: RouteScope = { kind: "all" };
+
+/**
+ * 비교·행 식별용 문자열.
+ *
+ * 객체를 `===` 로 비교하면 매 렌더마다 새로 만든 `{kind:"consumer"}` 가 절대 같아지지 않아
+ * 좌측 패널의 선택 표시가 영영 켜지지 않는다.
+ */
+export const scopeKey = (s: RouteScope): string =>
+  s.kind === "consumer" ? `c:${s.username}` : s.kind;
+
+/** 화면에 표시할 범위 이름. 전체 범위는 표시할 것이 없다. */
+export const scopeLabel = (s: RouteScope): string | null =>
+  s.kind === "consumer" ? s.username : s.kind === "ungrouped" ? "그룹 제한 없음" : null;
 
 /**
  * Route 화면 좌측 패널이 쓰는 집계.

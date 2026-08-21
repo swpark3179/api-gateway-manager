@@ -85,7 +85,9 @@ input, textarea, pre, code, .selectable {
   transition: width var(--duration-medium) var(--ease-standard);
 }
 
-/* 권한그룹 콤보박스 팝업 (components/GroupCombo.tsx) */
+/* 권한그룹 콤보박스 팝업 (components/GroupCombo.tsx)
+   여기 값은 여유가 넉넉할 때의 기본이다. 창 하단에서 열면 컴포넌트가 top/bottom 과
+   max-height 를 인라인으로 덮어 위로 뒤집고 남은 공간에 맞춰 조인다 (GroupCombo 의 주석 참조). */
 .combo-pop {
   position: absolute;
   top: calc(100% + 4px);

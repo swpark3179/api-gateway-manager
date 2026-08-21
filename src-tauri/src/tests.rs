@@ -921,6 +921,8 @@ fn sqlite_search_and_counts_replace_the_old_array_filter() {
     use crate::db;
     use rusqlite::Connection;
 
+    const ALL: db::RouteScope = db::RouteScope::All;
+
     let c = Connection::open_in_memory().unwrap();
     db::init(&c).unwrap();
 
@@ -942,27 +944,27 @@ fn sqlite_search_and_counts_replace_the_old_array_filter() {
     .unwrap();
 
     // 검색어 없음 → 전체, 원래 순서 유지.
-    let page = db::query_routes(&c, "dev", "all", "", None).unwrap();
+    let page = db::query_routes(&c, "dev", "all", "", &ALL).unwrap();
     assert_eq!(page.total, 3);
     assert_eq!(page.items.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);
 
     // 예전 필터가 JSON 전체를 훑었으므로 name·uri 어느 쪽으로도 잡혀야 한다.
-    assert_eq!(db::query_routes(&c, "dev", "all", "pet", None).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "/orders", None).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "API", None).unwrap().total, 3, "대소문자 무시");
+    assert_eq!(db::query_routes(&c, "dev", "all", "pet", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "/orders", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "API", &ALL).unwrap().total, 3, "대소문자 무시");
 
     // '_' 가 LIKE 의 단일문자 와일드카드로 해석되면 안 된다.
-    assert_eq!(db::query_routes(&c, "dev", "all", "legacy_v1", None).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "legacyXv1", None).unwrap().total, 0);
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacy_v1", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacyXv1", &ALL).unwrap().total, 0);
 
     // chip 은 status 로 나눈다.
-    assert_eq!(db::query_routes(&c, "dev", "on", "", None).unwrap().total, 2);
-    assert_eq!(db::query_routes(&c, "dev", "off", "", None).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "on", "", &ALL).unwrap().total, 2);
+    assert_eq!(db::query_routes(&c, "dev", "off", "", &ALL).unwrap().total, 1);
 
     // counts 는 chip 을 빼고 검색어만 반영한다 — chip 을 눌러도 라벨 숫자가 흔들리지 않아야 한다.
-    let page = db::query_routes(&c, "dev", "off", "", None).unwrap();
+    let page = db::query_routes(&c, "dev", "off", "", &ALL).unwrap();
     assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
-    let page = db::query_routes(&c, "dev", "all", "api", None).unwrap();
+    let page = db::query_routes(&c, "dev", "all", "api", &ALL).unwrap();
     assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
 
     // 단건 조회 (Import 결과 → 상세 이동 경로).
@@ -971,7 +973,7 @@ fn sqlite_search_and_counts_replace_the_old_array_filter() {
 
     // 재동기화는 전체 교체다 — 게이트웨이에서 사라진 라우트가 남으면 Import 가 잘못 판정한다.
     db::sync_routes(&c, "dev", &[mk("1", "order-api", "/orders", 1)]).unwrap();
-    assert_eq!(db::query_routes(&c, "dev", "all", "", None).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "", &ALL).unwrap().total, 1);
     assert!(db::route_view(&c, "dev", "2").unwrap().is_none());
 }
 
@@ -1175,6 +1177,13 @@ mod access {
         }))
     }
 
+    /// 조회 범위 — 전체 / 컨슈머 한 명 / 그룹 제한 없음.
+    const ALL: db::RouteScope = db::RouteScope::All;
+    const UNGROUPED: db::RouteScope = db::RouteScope::Ungrouped;
+    fn user(username: &str) -> db::RouteScope {
+        db::RouteScope::Consumer { username: username.into() }
+    }
+
     /// 3 라우트 · 3 컨슈머로 교집합 판정 전체를 확인한다.
     #[test]
     fn routes_filtered_by_consumer_access() {
@@ -1200,16 +1209,17 @@ mod access {
         )
         .unwrap();
 
-        let total = |user: Option<&str>| db::query_routes(&c, "dev", "all", "", user).unwrap().total;
+        let total =
+            |scope: &db::RouteScope| db::query_routes(&c, "dev", "all", "", scope).unwrap().total;
 
-        assert_eq!(total(None), 3, "필터 없으면 전체");
-        assert_eq!(total(Some("alpha")), 1);
-        assert_eq!(total(Some("beta")), 2);
-        assert_eq!(total(Some("gamma")), 0, "그룹이 없는 컨슈머는 아무것도 못 본다");
+        assert_eq!(total(&ALL), 3, "필터 없으면 전체");
+        assert_eq!(total(&user("alpha")), 1);
+        assert_eq!(total(&user("beta")), 2);
+        assert_eq!(total(&user("gamma")), 0, "그룹이 없는 컨슈머는 아무것도 못 본다");
 
         // allowed_groups 가 빈 라우트는 어떤 컨슈머로도 걸리지 않는다.
         // (그래서 좌측 패널이 '그룹 제한 없음' 건수를 따로 보여 준다)
-        let names: Vec<String> = db::query_routes(&c, "dev", "all", "", Some("beta"))
+        let names: Vec<String> = db::query_routes(&c, "dev", "all", "", &user("beta"))
             .unwrap()
             .items
             .iter()
@@ -1226,7 +1236,7 @@ mod access {
         db::sync_routes(&c, "dev", &[route("1", "both", 1, json!(["a", "b"]))]).unwrap();
         db::sync_consumers(&c, "dev", &[consumer("u", json!(["a", "b"]))]).unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", Some("u")).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", &user("u")).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.counts.all, 1);
@@ -1251,14 +1261,14 @@ mod access {
 
         // chip 을 눌러도 라벨 숫자는 그대로다.
         for chip in ["all", "on", "off"] {
-            let counts = db::query_routes(&c, "dev", chip, "", Some("alpha")).unwrap().counts;
+            let counts = db::query_routes(&c, "dev", chip, "", &user("alpha")).unwrap().counts;
             assert_eq!((counts.all, counts.on, counts.off), (2, 1, 1), "chip={chip}");
         }
         // 반면 total 은 chip 을 반영한다.
-        assert_eq!(db::query_routes(&c, "dev", "on", "", Some("alpha")).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "on", "", &user("alpha")).unwrap().total, 1);
 
         // 검색어도 반영한다.
-        let counts = db::query_routes(&c, "dev", "all", "partner-on", Some("alpha")).unwrap().counts;
+        let counts = db::query_routes(&c, "dev", "all", "partner-on", &user("alpha")).unwrap().counts;
         assert_eq!((counts.all, counts.on, counts.off), (1, 1, 0));
     }
 
@@ -1307,7 +1317,7 @@ mod access {
         db::sync_routes(&c, "dev", &[route("1", "r", 1, json!(["Partner"]))]).unwrap();
         db::sync_consumers(&c, "dev", &[consumer("u", json!(["partner"]))]).unwrap();
 
-        assert_eq!(db::query_routes(&c, "dev", "all", "", Some("u")).unwrap().total, 0);
+        assert_eq!(db::query_routes(&c, "dev", "all", "", &user("u")).unwrap().total, 0);
         assert_eq!(db::consumer_access_counts(&c, "dev").unwrap().items[0].count, 0);
     }
 
@@ -1320,7 +1330,7 @@ mod access {
         // CSV 표기도 같은 경로를 탄다.
         db::sync_consumers(&c, "dev", &[consumer("u", json!("ops, ops"))]).unwrap();
 
-        assert_eq!(db::query_routes(&c, "dev", "all", "", Some("u")).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "", &user("u")).unwrap().total, 1);
         assert_eq!(db::consumer_access_counts(&c, "dev").unwrap().items[0].count, 1);
     }
 
@@ -1388,11 +1398,98 @@ mod access {
         db::sync_routes(&c, "prod", &[route("9", "prod-r", 1, json!(["shared"]))]).unwrap();
         db::sync_consumers(&c, "dev", &[consumer("u", json!(["shared"]))]).unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", Some("u")).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", &user("u")).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].name, "dev-r");
         // prod 에는 그 username 의 컨슈머가 없으니 아무것도 안 걸린다.
-        assert_eq!(db::query_routes(&c, "prod", "all", "", Some("u")).unwrap().total, 0);
+        assert_eq!(db::query_routes(&c, "prod", "all", "", &user("u")).unwrap().total, 0);
+    }
+
+    /// '그룹 제한 없음' 범위 — allowed_groups 가 빈 라우트만 남는다.
+    ///
+    /// 이 라우트들은 어떤 컨슈머로도 걸리지 않아서(위 `routes_filtered_by_consumer_access`)
+    /// 예전에는 좌측 패널의 건수로만 존재를 알 수 있고 목록으로 볼 방법이 없었다.
+    #[test]
+    fn ungrouped_scope_shows_only_routes_without_groups() {
+        let c = conn();
+        db::sync_routes(
+            &c,
+            "dev",
+            &[
+                route("1", "partner-on", 1, json!(["partner"])),
+                route("2", "free-on", 1, json!([])),
+                route("3", "free-off", 0, json!([])),
+            ],
+        )
+        .unwrap();
+        db::sync_consumers(&c, "dev", &[consumer("alpha", json!(["partner"]))]).unwrap();
+
+        let page = db::query_routes(&c, "dev", "all", "", &UNGROUPED).unwrap();
+        assert_eq!(
+            page.items.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["free-on", "free-off"]
+        );
+        // 좌측 패널의 건수와 같은 것을 세고 있어야 한다.
+        assert_eq!(page.total, db::consumer_access_counts(&c, "dev").unwrap().ungrouped);
+
+        // chip · 검색어와 AND 로 겹친다.
+        assert_eq!(db::query_routes(&c, "dev", "on", "", &UNGROUPED).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "free-off", &UNGROUPED).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "partner", &UNGROUPED).unwrap().total, 0);
+
+        // chip 라벨의 숫자도 범위를 따라간다 — 컨슈머를 골랐을 때와 같은 이유다
+        // (`counts_follow_the_selected_consumer_but_not_the_chip`). 여기서 `?4` 가
+        // route_counts 에도 실제로 바인딩됐는지 드러난다.
+        for chip in ["all", "on", "off"] {
+            let counts = db::query_routes(&c, "dev", chip, "", &UNGROUPED).unwrap().counts;
+            assert_eq!((counts.all, counts.on, counts.off), (2, 1, 1), "chip={chip}");
+        }
+
+        // 범위는 배타적이다 — 컨슈머를 고르면 그룹 없는 라우트는 안 보인다.
+        assert_eq!(db::query_routes(&c, "dev", "all", "", &user("alpha")).unwrap().total, 1);
+    }
+
+    /// 새 절도 환경별로 격리돼야 한다 (`access_join_is_env_scoped` 와 같은 이유).
+    #[test]
+    fn ungrouped_scope_is_env_scoped() {
+        let c = conn();
+        db::sync_routes(&c, "dev", &[route("1", "dev-free", 1, json!([]))]).unwrap();
+        db::sync_routes(
+            &c,
+            "prod",
+            &[route("9", "prod-free", 1, json!([])), route("8", "prod-p", 1, json!(["p"]))],
+        )
+        .unwrap();
+
+        let page = db::query_routes(&c, "dev", "all", "", &UNGROUPED).unwrap();
+        assert_eq!(page.items.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["dev-free"]);
+
+        let page = db::query_routes(&c, "prod", "all", "", &UNGROUPED).unwrap();
+        assert_eq!(page.items.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["prod-free"]);
+    }
+
+    /// 프런트가 보내는 모양 그대로 역직렬화되는지 — IPC 계약에 걸 수 있는 유일한 자동 검사다.
+    /// (`src/types.ts` 의 `RouteScope`. 태그 이름이나 필드 이름이 어긋나면 여기서 깨진다.)
+    #[test]
+    fn route_scope_deserializes_from_the_wire_shape() {
+        let parse = |v: serde_json::Value| {
+            serde_json::from_value::<db::RouteScope>(v).expect("범위").binds_for_test()
+        };
+
+        assert_eq!(parse(json!({ "kind": "all" })), ("".to_string(), 0));
+        assert_eq!(parse(json!({ "kind": "ungrouped" })), ("".to_string(), 1));
+        assert_eq!(
+            parse(json!({ "kind": "consumer", "username": "alpha" })),
+            ("alpha".to_string(), 0)
+        );
+        // 공백은 다듬어 넘긴다 — 앞뒤 공백 때문에 조용히 0건이 되면 안 된다.
+        assert_eq!(
+            parse(json!({ "kind": "consumer", "username": " alpha " })),
+            ("alpha".to_string(), 0)
+        );
+        // 태그가 없거나 모르는 값이면 실패해야 한다 (조용히 전체가 되면 안 된다).
+        assert!(serde_json::from_value::<db::RouteScope>(json!({ "username": "a" })).is_err());
+        assert!(serde_json::from_value::<db::RouteScope>(json!({ "kind": "nope" })).is_err());
     }
 
     #[test]

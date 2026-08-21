@@ -62,20 +62,15 @@ export default function EditScreen() {
       ? `PUT /apisix/admin/${meta.resource}/${form.id}`
       : `POST /apisix/admin/${meta.resource}`;
 
-  // JSON · JWT 탭은 route·consumer 전용이다 (design.formJson 주석 참조).
-  const tabs: Array<[typeof tab, string]> =
-    kind === "service" || kind === "upstream"
-      ? [["form", "폼 편집"]]
-      : isConsumer && view === "detail"
-        ? [
-            ["form", "폼 편집"],
-            ["json", "JSON"],
-            ["jwt", "JWT 토큰"],
-          ]
-        : [
-            ["form", "폼 편집"],
-            ["json", "JSON"],
-          ];
+  // 네 형태 모두 폼과 JSON 을 함께 쓴다 (design.formJson 참조). JWT 탭만 consumer 상세 전용
+  // 이다 — 토큰은 저장된 key·secret 이 있어야 의미가 있다.
+  const tabs: Array<[typeof tab, string]> = [
+    ["form", "폼 편집"],
+    ["json", "JSON"],
+    ...(isConsumer && view === "detail"
+      ? ([["jwt", "JWT 토큰"]] as Array<[typeof tab, string]>)
+      : []),
+  ];
 
   return (
     <div data-screen-label="상세" style={{ padding: "20px 28px 56px", maxWidth: 1080 }}>

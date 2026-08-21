@@ -14,7 +14,7 @@ use crate::apisix::services::{self, ServiceForm};
 use crate::apisix::upstreams::{self, UpstreamForm};
 use crate::apisix::client;
 use crate::config::{self, Env, EnvConfig, SettingsView};
-use crate::db::{self, AccessCounts, Cache, CompareRow, RoutesPage};
+use crate::db::{self, AccessCounts, Cache, CompareRow, RouteScope, RoutesPage};
 use crate::error::{AppError, AppResult};
 use crate::history::{self, EntryView};
 use crate::jwt::{self, JwtResult};
@@ -164,10 +164,9 @@ pub fn routes_query(
     env: Env,
     chip: String,
     q: String,
-    consumer: Option<String>,
+    scope: RouteScope,
 ) -> AppResult<RoutesPage> {
-    cache(&app)?
-        .with(|conn| db::query_routes(conn, env.as_str(), &chip, &q, consumer.as_deref()))
+    cache(&app)?.with(|conn| db::query_routes(conn, env.as_str(), &chip, &q, &scope))
 }
 
 /// 게이트웨이에서 Consumer 전체 목록을 다시 받아 캐시를 갱신하고, 그 목록을 돌려준다.

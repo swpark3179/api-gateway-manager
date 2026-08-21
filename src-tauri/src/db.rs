@@ -29,7 +29,7 @@
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::apisix::models::{ConsumerView, RouteView, ServiceView, UpstreamView};
@@ -326,11 +326,51 @@ pub struct RoutesPage {
     pub counts: RouteCounts,
 }
 
-/// 컨슈머 필터를 SQL 조건으로 바꾼다.
+/// Route 목록의 조회 범위 — 좌측 패널이 고르는 축.
+///
+/// 세 값이 한 축이라 열거형으로 둔다. `Option<String>` + `bool` 두 인자로 나누면
+/// "컨슈머도 고르고 그룹 제한 없음도 고른" 상태를 표현할 수 있게 되고, 그러면 그게 무슨
+/// 뜻인지 SQL 이 정해야 한다. 프런트의 `RouteScope`(types.ts)와 같은 모양이다.
+///
+/// `rename_all` 은 열거형에서 **variant 이름만** 바꾼다. 구조체 variant 의 필드 이름까지
+/// camelCase 로 받으려면 `rename_all_fields` 가 따로 필요하다 — 지금은 `username` 이 한
+/// 단어라 우연히 맞지만, 두 단어 필드가 붙는 순간 조용히 snake_case 로 남는다.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum RouteScope {
+    #[default]
+    All,
+    Consumer {
+        username: String,
+    },
+    Ungrouped,
+}
+
+impl RouteScope {
+    /// SQL 바인딩 두 개로 편다. "빈 문자열 = 조건 없음" 관례가 여기 한 곳에만 있다.
+    fn binds(&self) -> (&str, i64) {
+        match self {
+            RouteScope::All => ("", 0),
+            RouteScope::Consumer { username } => (username.trim(), 0),
+            RouteScope::Ungrouped => ("", 1),
+        }
+    }
+}
+
+/// 와이어 모양 테스트가 `binds` 결과를 보기 위한 통로 (`binds` 는 비공개다).
+#[cfg(test)]
+impl RouteScope {
+    pub fn binds_for_test(&self) -> (String, i64) {
+        let (u, g) = self.binds();
+        (u.to_string(), g)
+    }
+}
+
+/// 조회 범위를 SQL 조건으로 바꾼다.
 ///
 /// 조건 조각을 붙였다 뗐다 하는 대신 `?3 = '' OR …` 형태를 쓴다. 조각을 빼면 SQL 에서 `?3` 이
 /// 사라져 `params!` 길이가 안 맞고 rusqlite 가 런타임에 `InvalidParameterCount` 를 던진다.
-/// (검색어의 `?2` 가 이미 같은 관례를 쓴다.)
+/// (검색어의 `?2` 가 이미 같은 관례를 쓴다.) `?4` 도 마찬가지로 항상 바인딩한다.
 ///
 /// `EXISTS` 는 첫 일치에서 멈추는 세미조인이라 **`DISTINCT` 가 필요 없다** — 넣으면 정렬이
 /// 강제돼 `ORDER BY seq` 가 `routes_env_seq` 인덱스를 못 탄다.
@@ -339,7 +379,10 @@ pub struct RoutesPage {
 const ACCESS_CLAUSE: &str = " AND (?3 = '' OR EXISTS (
           SELECT 1 FROM route_groups rg
             JOIN consumer_groups cg ON cg.env = rg.env AND cg.grp = rg.grp
-           WHERE rg.env = ?1 AND rg.route_id = routes.id AND cg.username = ?3))";
+           WHERE rg.env = ?1 AND rg.route_id = routes.id AND cg.username = ?3))
+        AND (?4 = 0 OR NOT EXISTS (
+          SELECT 1 FROM route_groups rg
+           WHERE rg.env = ?1 AND rg.route_id = routes.id))";
 
 /// chip 값(`all` / `on` / `off`)을 status 조건으로 바꾼다.
 fn status_clause(chip: &str) -> &'static str {
@@ -355,20 +398,20 @@ fn needle(q: &str) -> String {
     q.trim().to_lowercase()
 }
 
-/// 세 축(상태 chip · 검색어 · 컨슈머)을 적용해 라우트를 조회한다.
+/// 세 축(상태 chip · 검색어 · 조회 범위)을 적용해 라우트를 조회한다.
 ///
-/// `consumer` 가 `Some` 이면 그 컨슈머의 auth-groups 와 라우트의 allowed_groups 교집합이
+/// `scope` 가 `Consumer` 면 그 컨슈머의 auth-groups 와 라우트의 allowed_groups 교집합이
 /// 비어 있지 않은 라우트만 남는다. allowed_groups 가 아예 없는 라우트는 어떤 컨슈머로도
-/// 걸리지 않는다 — 화면에서 사라지지 않도록 좌측 패널이 '그룹 제한 없음' 건수를 따로 보여 준다.
+/// 걸리지 않으므로, 그것만 보는 `Ungrouped` 를 따로 둔다.
 pub fn query_routes(
     conn: &Connection,
     env: &str,
     chip: &str,
     q: &str,
-    consumer: Option<&str>,
+    scope: &RouteScope,
 ) -> AppResult<RoutesPage> {
     let n = needle(q);
-    let user = consumer.map(str::trim).unwrap_or("");
+    let (user, ungrouped) = scope.binds();
 
     // instr() 은 LIKE 와 달리 % · _ 를 메타문자로 취급하지 않는다.
     // uri 에 밑줄이 흔하므로 검색어를 이스케이프해야 하는 부담을 아예 없앤다.
@@ -382,7 +425,7 @@ pub fn query_routes(
 
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
     let rows = stmt
-        .query_map(params![env, &n, user], |row| row.get::<_, String>(0))
+        .query_map(params![env, &n, user, ungrouped], |row| row.get::<_, String>(0))
         .map_err(sql_err)?;
 
     let mut items = Vec::new();
@@ -391,23 +434,25 @@ pub fn query_routes(
         items.push(serde_json::from_str::<RouteView>(&json)?);
     }
 
-    let counts = route_counts(conn, env, q, consumer)?;
+    let counts = route_counts(conn, env, q, scope)?;
     Ok(RoutesPage { total: items.len() as i64, items, counts })
 }
 
-/// 검색어와 컨슈머만 적용한 상태별 건수.
+/// 검색어와 조회 범위만 적용한 상태별 건수.
 ///
 /// chip 을 빼는 이유는 chip 을 눌러도 라벨의 숫자가 흔들리지 않게 하기 위해서고,
-/// 컨슈머를 **넣는** 이유는 컨슈머가 chip 과 나란한 필터가 아니라 조회 범위이기 때문이다.
+/// 범위를 **넣는** 이유는 그게 chip 과 나란한 필터가 아니라 조회 범위이기 때문이다.
 /// 컨슈머로 8건이 남았는데 chip 이 `status 1 (312)` 라고 말하면 안 된다.
+/// ('그룹 제한 없음' 도 같은 이유로 반영해야 한다 — 안 하면 `?4` 가 여기서 바인딩되지 않아
+/// rusqlite 가 아예 `InvalidParameterCount` 를 던진다.)
 pub fn route_counts(
     conn: &Connection,
     env: &str,
     q: &str,
-    consumer: Option<&str>,
+    scope: &RouteScope,
 ) -> AppResult<RouteCounts> {
     let n = needle(q);
-    let user = consumer.map(str::trim).unwrap_or("");
+    let (user, ungrouped) = scope.binds();
     conn.query_row(
         &format!(
             "SELECT COUNT(*),
@@ -416,7 +461,7 @@ pub fn route_counts(
                FROM routes
               WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){ACCESS_CLAUSE}"
         ),
-        params![env, &n, user],
+        params![env, &n, user, ungrouped],
         |row| Ok(RouteCounts { all: row.get(0)?, on: row.get(1)?, off: row.get(2)? }),
     )
     .map_err(sql_err)

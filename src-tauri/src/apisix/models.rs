@@ -332,6 +332,13 @@ pub fn contacts_of(v: &Value) -> Vec<Contact> {
 /// 인식된 `name{n}`/`dept{n}` 키만 지우고 1..N 으로 **조밀하게 재번호**한다.
 /// (중간 행을 지우면 뒤가 당겨진다 — 구멍을 남기면 이 규약을 읽는 다른 시스템이 곤란해진다.)
 /// 그 외의 라벨은 손대지 않는다. `set_groups_at` 이 다른 플러그인을 보존하는 것과 같은 규칙이다.
+///
+/// # 프런트에 표시 전용 사본이 있다
+///
+/// JSON 탭이 담당자를 같이 보여 주기 위해 `src/lib/design.ts` 의 `contactLabels` ·
+/// `contactsFromLabels` 가 이 함수와 `contacts_of` 를 흉내낸다. **저장에 쓰이는 것은 여기고**
+/// 그쪽은 미리보기지만, 규칙을 고치면 화면이 저장 결과와 다른 말을 하게 되므로 함께 고쳐야
+/// 한다. 특히 "빈 행을 걸러낸 뒤 번호를 붙인다" 와 앞자리 0 판정이 어긋나기 쉽다.
 pub fn set_contacts_at(m: &mut Map<String, Value>, contacts: &[Contact]) {
     let mut labels = match m.remove("labels") {
         Some(Value::Object(o)) => o,
