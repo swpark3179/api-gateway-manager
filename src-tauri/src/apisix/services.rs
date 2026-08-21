@@ -176,6 +176,10 @@ pub async fn delete(app: &AppHandle<Wry>, env: Env, id: &str, name: &str) -> App
 // ── 폼 → 요청 본문 (머지) ────────────────────────────────────
 
 /// 원본 service 위에 폼 값을 얹는다. 앱이 모르는 필드·플러그인·라벨은 그대로 보존된다.
+///
+/// JSON 탭의 미리보기(`src/lib/design.ts` 의 `serviceJson`)가 이 함수가 만드는 모양을
+/// 흉내낸다. 미리보기는 `jwt-auth` 를 `{}` 로, `labels` 를 `spec_url` 하나로 보여 주지만
+/// 실제로는 아래처럼 기존 값을 보존한다 — 그 차이는 화면에 문구로 적어 두었다.
 fn apply_service_form(base: Value, f: &ServiceForm) -> Value {
     let mut m = obj(base);
     strip_server_fields(&mut m);

@@ -27,6 +27,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as api from "./api";
 import { jsonText, jsonToForm, sortMethods } from "./lib/design";
 import {
+  ALL_ROUTES,
   consumerToForm,
   emptyConsumerForm,
   emptyRouteForm,
@@ -34,6 +35,7 @@ import {
   emptyUpstreamForm,
   routeFormFromOas,
   routeToForm,
+  scopeKey,
   serviceToForm,
   upstreamToForm,
   type AccessCounts,
@@ -51,6 +53,7 @@ import {
   type MatchState,
   type OasDoc,
   type RouteCounts,
+  type RouteScope,
   type RouteView,
   type Section,
   type ServiceView,
@@ -74,14 +77,14 @@ interface AppState {
   view: View;
   selId: string | null;
   tab: Tab;
-  /** 상단 status chip 축 (all / on / off). 좌측 패널의 컨슈머 축과 독립이다. */
+  /** 상단 status chip 축 (all / on / off). 좌측 패널의 조회 범위 축과 독립이다. */
   chip: string;
   /**
-   * 좌측 패널의 컨슈머 축. null = 필터 없음.
+   * 좌측 패널이 고르는 조회 범위 (전체 · 컨슈머 한 명 · 그룹 제한 없음).
    *
    * `chip` 과 한 슬롯을 공유할 수 없다 — 두 조건은 AND 로 **동시에** 켜져야 한다.
    */
-  routeConsumer: string | null;
+  routeScope: RouteScope;
   q: string;
 
   // ── 편집 ──
@@ -158,7 +161,8 @@ interface AppState {
   setEnv: (env: EnvKey) => void;
   go: (section: Section) => void;
   setChip: (chip: string) => void;
-  setRouteConsumer: (username: string | null) => void;
+  /** 좌측 패널 클릭. 같은 범위를 다시 고르면 전체로 되돌린다. */
+  setRouteScope: (scope: RouteScope) => void;
   setQ: (q: string) => void;
   /** 대시보드·설정 화면만 게이트웨이를 다시 본다 (목록은 캐시가 진실의 사본이다) */
   refresh: () => Promise<void>;
@@ -306,7 +310,7 @@ const LIST_RESET = {
   selId: null,
   tab: "form" as Tab,
   chip: "all",
-  routeConsumer: null as string | null,
+  routeScope: ALL_ROUTES,
   q: "",
   jsonErr: "",
   jsonOk: "",
@@ -316,6 +320,12 @@ const LIST_RESET = {
   ...IMPORT_RESET,
 };
 
+/** 정수 문자열인가 — Upstream 폼의 숫자 칸은 문자열로 들고 있다 (types.ts 주석 참조). */
+function intText(v: string): boolean {
+  const t = v.trim();
+  return t !== "" && Number.isInteger(Number(t));
+}
+
 /**
  * 라우트 조회의 세 축을 한 곳에서 만든다.
  *
@@ -324,8 +334,8 @@ const LIST_RESET = {
  * username 이면 SQL 이 0건으로 답하므로, "필터가 조용히 풀려 전체가 보이는" 쪽보다
  * 안전한 방향으로 실패한다.
  */
-function routeFilter(s: AppState): { chip: string; q: string; consumer: string | null } {
-  return { chip: s.chip, q: s.q, consumer: s.routeConsumer };
+function routeFilter(s: AppState): { chip: string; q: string; scope: RouteScope } {
+  return { chip: s.chip, q: s.q, scope: s.routeScope };
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -335,7 +345,7 @@ export const useStore = create<AppState>((set, get) => ({
   selId: null,
   tab: "form",
   chip: "all",
-  routeConsumer: null,
+  routeScope: ALL_ROUTES,
   q: "",
 
   form: null,
@@ -474,11 +484,19 @@ export const useStore = create<AppState>((set, get) => ({
           : {}),
       });
 
-      // 게이트웨이에서 사라진 컨슈머로 필터가 걸려 있으면 풀어 준다.
-      const { routeConsumer, consumers } = get();
-      if (routeConsumer && !consumers.some((c) => c.username === routeConsumer)) {
-        set({ routeConsumer: null });
-      }
+      // 좌측 패널에서 사라진 범위가 걸려 있으면 풀어 준다. 안 풀면 고를 수 있는 행이
+      // 하나도 없는데 목록은 0건인 상태에 갇힌다.
+      //  · 게이트웨이에서 지워진 컨슈머
+      //  · '그룹 제한 없음' 인데 그런 라우트가 더는 없는 경우 (그 행은 건수가 0이면
+      //    아예 렌더되지 않는다 — SidePanel 참조)
+      const { routeScope, consumers, access } = get();
+      const gone =
+        routeScope.kind === "consumer"
+          ? !consumers.some((c) => c.username === routeScope.username)
+          : routeScope.kind === "ungrouped"
+            ? (access?.ungrouped ?? 0) === 0
+            : false;
+      if (gone) set({ routeScope: ALL_ROUTES });
       // 서비스 기본값 — 아직 고르지 않았다면 첫 항목.
       set({ importService: get().importService || get().services[0]?.id || "" });
 
@@ -494,7 +512,7 @@ export const useStore = create<AppState>((set, get) => ({
   setEnv(env) {
     if (get().env === env) return;
     // 환경이 바뀌면 다른 게이트웨이다 — 캐시에서 읽어 온 것을 모두 버린다.
-    // username 은 환경 스코프라 routeConsumer 도 같이 지운다.
+    // username 은 환경 스코프라 routeScope 도 같이 지운다 (LIST_RESET 이 처리한다).
     set({
       env,
       ...LIST_RESET,
@@ -537,10 +555,11 @@ export const useStore = create<AppState>((set, get) => ({
     if (get().section === "routes") void get().queryRoutes();
   },
 
-  setRouteConsumer(username) {
+  setRouteScope(scope) {
     // 같은 행을 다시 누르면 해제 — 패널에 별도 '해제' 버튼을 두지 않기 위해서다.
-    const next = get().routeConsumer === username ? null : username;
-    set({ routeConsumer: next, view: "list", selId: null });
+    // 객체가 아니라 scopeKey 로 비교한다 (types.ts 의 scopeKey 주석 참조).
+    const next = scopeKey(get().routeScope) === scopeKey(scope) ? ALL_ROUTES : scope;
+    set({ routeScope: next, view: "list", selId: null });
     void get().queryRoutes();
   },
 
@@ -587,11 +606,11 @@ export const useStore = create<AppState>((set, get) => ({
   async queryRoutes() {
     const { env, settings } = get();
     if (!settings?.[env]?.hasToken) return;
-    const { chip, q, consumer } = routeFilter(get());
+    const { chip, q, scope } = routeFilter(get());
 
     const token = ++queryToken;
     try {
-      const page = await api.routesQuery(env, chip, q, consumer);
+      const page = await api.routesQuery(env, chip, q, scope);
       // 더 최신 요청이 이미 나갔으면 이 응답은 버린다.
       if (token !== queryToken) return;
       set({ routes: page.items, routesTotal: page.total, routeCounts: page.counts, error: null });
@@ -1161,7 +1180,16 @@ export const useStore = create<AppState>((set, get) => ({
           return (
             !form.name.trim() ||
             form.nodes.length === 0 ||
-            form.nodes.some((n) => !n.host.trim() || !n.port.trim())
+            // 정수까지 여기서 본다. Rust 의 port·weight 는 i64 라 소수점이 들어오면
+            // 역직렬화 단계에서 죽고, 그 에러는 어느 값이 틀렸는지 알려 주지 않는다.
+            // JSON 탭으로 노드를 편집할 수 있게 되면서 들어올 경로가 늘었다.
+            // weight 는 빈 칸이 허용된다 — api.ts 가 null 로 보내고 Rust 가 1 을 넣는다.
+            form.nodes.some(
+              (n) =>
+                !n.host.trim() ||
+                !intText(n.port) ||
+                (n.weight.trim() !== "" && !intText(n.weight)),
+            )
           );
         default:
           return !form.name.trim() || !form.uri.trim() || !form.serviceId.trim();
@@ -1230,9 +1258,14 @@ export const useStore = create<AppState>((set, get) => ({
       }
       get().flash("삭제되었습니다.");
       set({ view: "list", selId: null, form: null, jwt: null, importReturn: false });
-      // 필터로 걸어 둔 컨슈머를 지웠으면 유령 조건이 남지 않게 풀어 준다.
-      if (form.kind === "consumer" && get().routeConsumer === form.username) {
-        set({ routeConsumer: null });
+      // 조회 범위로 걸어 둔 컨슈머를 지웠으면 유령 조건이 남지 않게 풀어 준다.
+      const scope = get().routeScope;
+      if (
+        form.kind === "consumer" &&
+        scope.kind === "consumer" &&
+        scope.username === form.username
+      ) {
+        set({ routeScope: ALL_ROUTES });
       }
       await get().syncTouched(form.kind);
     } catch (e) {

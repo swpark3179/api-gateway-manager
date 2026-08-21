@@ -9,10 +9,13 @@
 
 import type {
   ConsumerFormState,
+  Contact,
   FormState,
   GroupsLocation,
   RouteFormState,
   Section,
+  ServiceFormState,
+  UpstreamFormState,
 } from "../types";
 
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -146,75 +149,261 @@ export function routeJson(f: RouteFormState): Record<string, unknown> {
   return o;
 }
 
+// ── 담당자 (labels · name{n} / dept{n}) ──────────────────────
+//
+// 아래 두 함수는 Rust `models::set_contacts_at` · `contacts_of` 의 **표시 전용 사본**이다
+// (`nameFromPrefix` 와 같은 위치 — 규칙이 바뀌면 Rust 쪽이 진실이다). 폼에서 담당자를
+// 입력했는데 JSON 탭 텍스트가 한 글자도 바뀌지 않는 편이 더 나쁘다고 판단해서 두었다.
+//
+// 사본이니만큼 원본과 어긋나기 쉬운 두 지점을 그대로 옮겨 놓았다. 고칠 때 함께 보라:
+//  · 번호는 **빈 행을 걸러낸 뒤** 붙인다. 배열 인덱스로 매기면 미리보기는 name1/name3,
+//    저장 결과는 name1/name2 가 되어 화면이 거짓말을 한다.
+//  · 앞자리 0(`name01`)·`name0`·맨 `name` 은 우리 키가 아니다. 인식하면 재번호 과정에서
+//    `name1` 과 충돌해 한쪽이 조용히 사라진다.
+// 게이트웨이의 다른 라벨(`spec_url` 등)은 여기 보이지 않지만 저장 때 보존된다 — JSON 탭이
+// "앱이 관리하는 키만" 보여 준다는 계약 그대로다. 그래서 여기에 남의 라벨을 적어도 무시된다.
+
+/** 담당자 목록 → `labels`. 빈 행을 걸러 1..N 으로 조밀하게 번호를 매긴다. */
+export function contactLabels(contacts: Contact[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  let n = 0;
+  for (const c of contacts) {
+    const name = c.name.trim();
+    const dept = c.dept.trim();
+    if (!name && !dept) continue;
+    n += 1;
+    // APISIX 의 label 값은 minLength = 1 이라 빈 값은 "" 가 아니라 키를 생략한다.
+    if (name) out[`name${n}`] = name;
+    if (dept) out[`dept${n}`] = dept;
+  }
+  return out;
+}
+
+/** `labels` → 담당자 목록. 숫자 순으로 모은다 (문자열 순이면 name10 이 name2 앞에 온다). */
+export function contactsFromLabels(labels: unknown): Contact[] {
+  if (!labels || typeof labels !== "object") return [];
+  const acc = new Map<number, Contact>();
+
+  for (const [k, v] of Object.entries(labels as Record<string, unknown>)) {
+    if (typeof v !== "string") continue;
+    const s = v.trim();
+    if (!s) continue;
+    const field = k.startsWith("name") ? "name" : k.startsWith("dept") ? "dept" : null;
+    if (!field) continue;
+    const rest = k.slice(4);
+    const n = Number(rest);
+    // `String(n) === rest` 가 앞자리 0 과 빈 문자열을 걸러 낸다 (Rust 의 label_index).
+    if (!Number.isInteger(n) || n < 1 || String(n) !== rest) continue;
+    const row = acc.get(n) ?? { name: "", dept: "" };
+    row[field] = s;
+    acc.set(n, row);
+  }
+
+  return [...acc.keys()].sort((a, b) => a - b).map((n) => acc.get(n)!);
+}
+
 /**
- * `labels`(담당자)는 여기 넣지 않는다.
+ * `labels` 는 담당자가 없어도 **항상** 내보낸다.
  *
- * 넣으면 `name{n}` 번호 규칙(재번호 · 앞자리 0 배제 · 빈 값 생략)을 TS 에도 구현해야 하고,
- * 그 규칙이 두 곳에 있으면 반드시 어긋난다 (types.ts 의 suggestedUri 주석과 같은 이유).
- * `jsonToForm` 이 `...current` 를 펼치므로 `contacts` 는 JSON 탭을 왕복해도 그대로 살아남는다.
+ * 조건부로 생략하면 "이 컨슈머는 담당자가 없다" 와 "이 초안은 담당자를 언급하지 않는다" 를
+ * 구별할 수 없어진다. `jsonToForm` 이 그 구별에 기대어 담당자를 지킨다 (그쪽 주석 참조).
  */
 export function consumerJson(f: ConsumerFormState): Record<string, unknown> {
   const o: Record<string, any> = {
     username: f.username,
     desc: f.desc,
     plugins: { "jwt-auth": { key: f.key, secret: f.secret } },
+    labels: contactLabels(f.contacts),
   };
   putGroups(o, f.groupsLocation, CONSUMER_LOC, f.groups);
   return o;
 }
 
+// ── 숫자 필드 (Upstream) ─────────────────────────────────────
+//
+// 폼은 port · weight · timeout 을 **문자열로** 들고 있다 (편집 중 빈 칸이 가능해야 한다 —
+// types.ts 의 UpstreamNodeInput 주석). 그 문자열을 JSON 본문의 숫자로 옮기는 규칙이다.
+//
+// `api.ts::upstreamSave` 의 `Number()` 와 **일부러 다르다.** 저쪽은 와이어라서 Rust 의
+// `NodeInput.port: i64` · `UpstreamTimeout: f64` (둘 다 non-Option) 에 맞춰야 하고, 빈 값은
+// `store.save` 의 필수값 검사가 이미 막는다. 이쪽은 미리보기라서 편집 중인 빈 칸을 `0` 으로
+// 보여 주면 거짓말이 된다.
+
+/** 파싱되면 숫자, 아니면 `null` — "아직 값이 없다" 를 그대로 보여 준다. */
+function numOut(v: string): number | null {
+  const t = v.trim();
+  if (t === "") return null;
+  const n = Number(t);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** 되돌리기. 유한한 숫자만 받고 그 밖은 빈 칸으로 둔다 (폼이 경고를 띄운다). */
+function numIn(v: unknown): string {
+  return typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+}
+
 /**
- * JSON 탭이 다루는 것은 route · consumer 뿐이다.
+ * Upstream 의 앱 관리 키.
  *
- * Service · Upstream 은 폼 탭만 두었다 (EditScreen 의 탭 목록 참조). 두 리소스의 JSON 을
- * 내보내려면 `labels.spec_url` 과 nodes 표기 규칙을 TS 에도 구현해야 하고, 그 규칙이 두 곳에
- * 있으면 반드시 어긋난다 — `consumerJson` 이 labels 를 내보내지 않는 것과 같은 판단이다.
- * 그래서 그 두 형태는 폼을 그대로 직렬화해 미리보기만 성립하게 한다.
+ * `type` 은 넣지 않는다 — Rust 는 원본에 **없을 때만** 기본값을 채우고 이미 있으면 손대지
+ * 않는다 (`apply_upstream_form`). 앱이 관리하는 값이 아니므로 여기서 보여 주면 편집할 수 있는
+ * 것처럼 보이고, 실제로는 저장 때 무시된다. `checks` · `retries` 등도 같은 이유로 없다.
+ *
+ * `weight` 는 **넣는다.** 폼에는 없지만 요청 본문에는 항상 들어가는 값이라, 빼 두면 JSON 탭을
+ * 한 번 왕복하는 것만으로 게이트웨이의 가중치가 1 로 덮인다 (types.ts 의 UpstreamNode 주석).
  */
+export function upstreamJson(f: UpstreamFormState): Record<string, unknown> {
+  return {
+    name: f.name,
+    desc: f.desc,
+    nodes: f.nodes.map((n) => ({
+      host: n.host,
+      port: numOut(n.port),
+      weight: numOut(n.weight),
+    })),
+    timeout: {
+      connect: numOut(f.timeout.connect),
+      send: numOut(f.timeout.send),
+      read: numOut(f.timeout.read),
+    },
+  };
+}
+
+/**
+ * Service 의 앱 관리 키.
+ *
+ * 두 군데가 실제 저장과 다르지만, `routeJson` 이 `plugins` 를 통째로 보여 주는 것과 같은
+ * 종류의 근사다 (JSON 탭 자체가 "앱이 관리하는 키만" 이라고 밝히고 있다):
+ *  · `plugins."jwt-auth": {}` — 게이트웨이에 이미 설정이 있으면 그 값이 **유지**된다.
+ *  · `labels` — `spec_url` 만 보이지만 나머지 라벨(담당자 등)은 그대로 보존된다.
+ */
+export function serviceJson(f: ServiceFormState): Record<string, unknown> {
+  const o: Record<string, any> = {
+    name: f.name,
+    desc: f.desc,
+    upstream_id: f.upstreamId,
+    plugins: { "jwt-auth": {}, "shi-log": { key: f.logKey } },
+  };
+  // 빈 값이면 라벨을 지우는 쪽이라(Rust 의 set_label) 키를 만들지 않는다.
+  if (f.specUrl.trim()) o.labels = { spec_url: f.specUrl };
+  return o;
+}
+
+/** 형태별 요청 본문. 네 형태 모두 JSON 탭을 쓴다. */
 export function formJson(f: FormState): Record<string, unknown> {
-  if (f.kind === "consumer") return consumerJson(f);
-  if (f.kind === "route") return routeJson(f);
-  const { kind: _kind, ...rest } = f;
-  return rest;
+  switch (f.kind) {
+    case "consumer":
+      return consumerJson(f);
+    case "route":
+      return routeJson(f);
+    case "upstream":
+      return upstreamJson(f);
+    case "service":
+      return serviceJson(f);
+    default: {
+      // 형태가 하나 늘면 여기서 컴파일이 깨진다. 조용히 폼을 덤프하던 예전 폴백은
+      // `applyJson` 이 아무 일도 안 하고도 "반영했습니다" 라고 말하게 만들었다.
+      const exhaustive: never = f;
+      return exhaustive;
+    }
+  }
 }
 
 export function jsonText(f: FormState): string {
   return JSON.stringify(formJson(f), null, 2);
 }
 
-/** JSON 탭의 '폼에 적용' — 디자인의 applyJson() */
+/**
+ * JSON 탭의 '폼에 적용' — 디자인의 applyJson()
+ *
+ * 모든 분기가 `...current` 를 펼친 뒤 아는 키만 덮는다. 폼에 있지만 JSON 에 없는 값
+ * (`id` · `groupsLocation` · `isNew` …)이 왕복 한 번에 사라지지 않게 하기 위해서다.
+ */
 export function jsonToForm(raw: string, current: FormState): FormState {
   const o = JSON.parse(raw) as Record<string, any>;
 
-  // JSON 탭이 없는 형태는 그대로 돌려준다 (formJson 주석 참조).
-  if (current.kind === "service" || current.kind === "upstream") return current;
+  switch (current.kind) {
+    case "consumer": {
+      const j = (o.plugins && o.plugins["jwt-auth"]) || {};
+      return {
+        ...current,
+        username: o.username || "",
+        desc: o.desc || "",
+        key: j.key || "",
+        secret: j.secret || "",
+        groups: pickGroups(o, current.groupsLocation, CONSUMER_LOC),
+        // 담당자는 **키가 있을 때만** 덮는다. `{}` 로 비우는 것은 지우겠다는 뜻이지만,
+        // labels 를 아예 언급하지 않은 본문(남의 컨슈머에서 복사해 온 것 등)은 "건드리지
+        // 말라" 로 읽는다. 저장 시 `contacts: []` 는 게이트웨이 라벨을 실제로 지우므로
+        // (api.ts 의 consumerSave 주석), 빠뜨렸을 때 유지되는 쪽으로 degrade 해야 한다.
+        contacts: "labels" in o ? contactsFromLabels(o.labels) : current.contacts,
+      };
+    }
 
-  if (current.kind === "consumer") {
-    const j = (o.plugins && o.plugins["jwt-auth"]) || {};
-    return {
-      // contacts 는 여기서 덮어쓰지 않는다 — consumerJson 이 labels 를 내보내지 않으므로
-      // 펼쳐진 current 값이 그대로 유지되는 것이 맞다.
-      ...current,
-      username: o.username || "",
-      desc: o.desc || "",
-      key: j.key || "",
-      secret: j.secret || "",
-      groups: pickGroups(o, current.groupsLocation, CONSUMER_LOC),
-    };
+    case "route": {
+      const p = o.plugins || {};
+      return {
+        ...current,
+        uri: o.uri || "",
+        name: o.name || "",
+        desc: o.desc || "",
+        methods: Array.isArray(o.methods) ? o.methods : [],
+        serviceId: o.service_id || "",
+        rewrite: (p["proxy-rewrite"] && p["proxy-rewrite"].uri) || "",
+        groups: pickGroups(o, current.groupsLocation, ROUTE_LOC),
+        status: typeof o.status === "number" ? o.status : current.status,
+      };
+    }
+
+    case "upstream": {
+      const rows: unknown[] = Array.isArray(o.nodes) ? o.nodes : [];
+      const nodes = rows.map((n) => {
+        const r = (n ?? {}) as Record<string, any>;
+        // 행을 조용히 버리지 않는다 — 사용자가 센 노드 수가 적용 후에 달라지면 안 된다.
+        return {
+          host: typeof r.host === "string" ? r.host : "",
+          port: numIn(r.port),
+          weight: numIn(r.weight),
+        };
+      });
+      const t = (o.timeout ?? {}) as Record<string, any>;
+      return {
+        ...current,
+        name: o.name || "",
+        desc: o.desc || "",
+        // 노드가 하나도 없는 upstream 은 게이트웨이가 거부한다 — 빈 행 하나는 남긴다
+        // (upstreamToForm · removeNode 가 지키는 것과 같은 불변식).
+        nodes: nodes.length > 0 ? nodes : [{ host: "", port: "", weight: "1" }],
+        // timeout 키가 아예 없으면 현재 값을 유지한다. DEFAULT_TIMEOUT 으로 폴백하면
+        // 게이트웨이에 설정된 5/5/30 을 10/10/60 으로 조용히 덮어쓴다.
+        timeout: o.timeout
+          ? {
+              connect: numIn(t.connect),
+              send: numIn(t.send),
+              read: numIn(t.read),
+            }
+          : current.timeout,
+      };
+    }
+
+    case "service": {
+      const p = o.plugins || {};
+      const log = p["shi-log"] || {};
+      return {
+        ...current,
+        name: o.name || "",
+        desc: o.desc || "",
+        upstreamId: o.upstream_id || "",
+        specUrl: (o.labels && o.labels.spec_url) || "",
+        logKey: log.key || "",
+      };
+    }
+
+    default: {
+      const exhaustive: never = current;
+      return exhaustive;
+    }
   }
-
-  const p = o.plugins || {};
-  return {
-    ...current,
-    uri: o.uri || "",
-    name: o.name || "",
-    desc: o.desc || "",
-    methods: Array.isArray(o.methods) ? o.methods : [],
-    serviceId: o.service_id || "",
-    rewrite: (p["proxy-rewrite"] && p["proxy-rewrite"].uri) || "",
-    groups: pickGroups(o, current.groupsLocation, ROUTE_LOC),
-    status: typeof o.status === "number" ? o.status : current.status,
-  };
 }
 
 /**

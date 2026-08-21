@@ -178,6 +178,11 @@ pub async fn delete(app: &AppHandle<Wry>, env: Env, id: &str, name: &str) -> App
 // ── 폼 → 요청 본문 (머지) ────────────────────────────────────
 
 /// 원본 upstream 위에 폼 값을 얹는다. 앱이 모르는 필드는 그대로 보존된다.
+///
+/// JSON 탭의 미리보기(`src/lib/design.ts` 의 `upstreamJson`)가 이 함수가 만드는 모양을
+/// 흉내낸다. 앱 관리 키(name · desc · nodes · timeout)가 바뀌면 그쪽도 함께 고쳐야 한다.
+/// `type` 이 미리보기에 없는 것은 의도적이다 — 아래에서 **없을 때만** 채우는 값이라 앱이
+/// 관리하는 키가 아니다.
 fn apply_upstream_form(base: Value, f: &UpstreamForm) -> Value {
     let mut m = obj(base);
     strip_server_fields(&mut m);

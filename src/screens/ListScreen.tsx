@@ -3,9 +3,43 @@
 import { useMemo } from "react";
 
 import { maskSecret, syncLabel } from "../lib/design";
-import { consumerGroupBuckets, filterConsumers, kindOf, useStore } from "../store";
+import { filterConsumers, kindOf, NO_GROUP, useStore } from "../store";
+import { ALL_ROUTES, scopeLabel } from "../types";
 
 const ROW_H = "14px 16px";
+
+interface ReleaseChipProps {
+  /** 어느 축인지 (`consumer` · `auth-groups`) */
+  label: string;
+  value: string;
+  title: string;
+  onClear: () => void;
+}
+
+/** 지금 걸린 필터를 알려 주고 × 로 풀어 주는 칩. */
+function ReleaseChip({ label, value, title, onClear }: ReleaseChipProps) {
+  return (
+    <div className="chip on" style={{ cursor: "default" }}>
+      <span style={{ fontSize: 12 }}>{label}: </span>
+      <span className="font-mono" style={{ fontSize: 12 }}>
+        {value}
+      </span>
+      <span className="x" onClick={onClear} style={{ cursor: "pointer" }} title={title}>
+        <svg
+          viewBox="0 0 24 24"
+          width="11"
+          height="11"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.6"
+          strokeLinecap="round"
+        >
+          <path d="M6 6l12 12M18 6L6 18" />
+        </svg>
+      </span>
+    </div>
+  );
+}
 
 interface Row {
   id: string;
@@ -36,8 +70,8 @@ export default function ListScreen() {
   const error = useStore((s) => s.error);
   const settings = useStore((s) => s.settings);
   const syncedAt = useStore((s) => s.syncedAt[s.env]);
-  const routeConsumer = useStore((s) => s.routeConsumer);
-  const setRouteConsumer = useStore((s) => s.setRouteConsumer);
+  const routeScope = useStore((s) => s.routeScope);
+  const setRouteScope = useStore((s) => s.setRouteScope);
   // Route 는 내장 SQLite 가 이미 필터링해 준 결과다 (store.ts 모듈 주석 참조).
   const routes = useStore((s) => s.routes);
   const routesTotal = useStore((s) => s.routesTotal);
@@ -56,11 +90,14 @@ export default function ListScreen() {
   const rows: Row[] = isConsumer
     ? consumers.map((c) => ({
         id: c.username,
-        c1: c.username,
-        c1sub: c.key,
+        // 사람이 목록에서 찾는 것은 식별자가 아니라 설명이다. username 은 그 아래 줄로 내리되
+        // 사라지게 두지는 않는다 — APISIX 식별자이고 상세 화면의 열쇠다.
+        c1: c.desc || "(설명 없음)",
+        c1sub: c.username,
         c2: maskSecret(c.secret),
         tags: c.hasJwtAuth ? ["jwt-auth"] : [],
-        c4: "HS256",
+        // 예전 자리는 항상 `HS256` 이라 행마다 같은 값이었다. 서브라인에서 밀려난 key 를 넣는다.
+        c4: c.key,
         groups: c.groups,
         badge: "success",
         status: "사용 중",
@@ -80,36 +117,59 @@ export default function ListScreen() {
       }));
 
   const cols = isConsumer
-    ? ["username / key", "secret", "plugins", "alg", "auth-groups", "상태", "수정일시"]
+    ? ["desc / username", "secret", "plugins", "key", "auth-groups", "상태", "수정일시"]
     : ["name / service_id", "uri", "methods", "proxy-rewrite", "allowed_groups", "status", "수정일시"];
 
-  // Consumer 는 실제 auth-groups 값으로, Route 는 status 로 나눈다.
+  /**
+   * 상단 chip 은 Route 의 status 축 전용이다.
+   *
+   * Consumer 의 권한그룹 버킷은 좌측 패널이 이미 같은 값을 같은 건수로 보여 주고 있어서,
+   * 화면에 두 번 두면 어느 쪽이 켜져 있는지가 오히려 헷갈린다. 대신 고른 그룹만 아래의
+   * 해제 칩으로 남긴다 (Route 의 consumer 칩과 같은 이유 — 그 주석 참조).
+   */
   const chipKeys: Array<[string, string]> = useMemo(
     () =>
       isConsumer
-        ? [
-            ["all", "전체"] as [string, string],
-            ...consumerGroupBuckets(allConsumers).map(
-              (b) => [b.key, `${b.label} (${b.count})`] as [string, string],
-            ),
-          ]
+        ? []
         : [
             // 건수는 캐시가 돌려준 값이다 — 검색어는 반영하고 chip 은 빼서 계산한다.
             ["all", `전체 (${routeCounts.all})`],
             ["on", `status 1 (${routeCounts.on})`],
             ["off", `status 0 (${routeCounts.off})`],
           ],
-    [isConsumer, allConsumers, routeCounts],
+    [isConsumer, routeCounts],
   );
+
+  // 좌측 패널에서 걸어 둔 조건을 본문에도 남긴다. 두 화면이 서로 다른 축을 쓰지만
+  // (Consumer 는 chip, Route 는 조회 범위) 사용자에게는 같은 "지금 걸린 필터" 다.
+  const release: ReleaseChipProps | null = isConsumer
+    ? chip === "all"
+      ? null
+      : {
+          label: "auth-groups",
+          value: chip === NO_GROUP ? "(그룹 없음)" : chip,
+          title: "권한그룹 필터 해제",
+          onClear: () => setChip("all"),
+        }
+    : scopeLabel(routeScope)
+      ? {
+          // 컨슈머 한 명이면 그 이름을, '그룹 제한 없음' 이면 그 이름을 그대로 보여 준다.
+          label: routeScope.kind === "consumer" ? "consumer" : "범위",
+          value: scopeLabel(routeScope)!,
+          title: "조회 범위 해제",
+          onClear: () => setRouteScope(ALL_ROUTES),
+        }
+      : null;
 
   const adminBase = settings?.[env]?.adminBase ?? "";
   const listApiPath = `${adminBase}/${isConsumer ? "consumers" : "routes"}`;
 
   // 화면 진입이 더 이상 게이트웨이를 부르지 않으므로 "등록된 …가 없습니다" 만으로는
   // "게이트웨이에 없다" 와 "캐시를 아직 못 채웠다" 를 구별할 수 없다. 네 경우를 나눈다.
-  // 조건 판정에 routeConsumer 를 반드시 포함해야 한다 — 빠뜨리면 컨슈머를 골라 0건이 됐을 때
+  // 조건 판정에 조회 범위를 반드시 포함해야 한다 — 빠뜨리면 컨슈머를 골라 0건이 됐을 때
   // "등록된 Route가 없습니다" 가 뜬다.
-  const filtered = q.trim() !== "" || chip !== "all" || (!isConsumer && routeConsumer !== null);
+  const filtered =
+    q.trim() !== "" || chip !== "all" || (!isConsumer && routeScope.kind !== "all");
   const emptyState =
     loading || booting ? (
       <>
@@ -205,7 +265,7 @@ export default function ListScreen() {
               <path d="M20 20l-4.2-4.2" />
             </svg>
             <input
-              placeholder={isConsumer ? "username · key 검색" : "name · uri 검색"}
+              placeholder={isConsumer ? "desc · username · key 검색" : "name · uri 검색"}
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
@@ -225,45 +285,22 @@ export default function ListScreen() {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        {chipKeys.map(([k, label]) => (
-          <div
-            key={k}
-            className={"chip" + (chip === k ? " on" : "")}
-            onClick={() => setChip(k)}
-          >
-            {label}
-          </div>
-        ))}
-
-        {/* 좌측 패널을 스크롤로 지나친 사용자가 목록이 왜 짧은지 알 수 없으면 안 된다. */}
-        {!isConsumer && routeConsumer && (
-          <div className="chip on" style={{ cursor: "default" }}>
-            <span style={{ fontSize: 12 }}>consumer: </span>
-            <span className="font-mono" style={{ fontSize: 12 }}>
-              {routeConsumer}
-            </span>
-            <span
-              className="x"
-              onClick={() => setRouteConsumer(null)}
-              style={{ cursor: "pointer" }}
-              title="컨슈머 필터 해제"
+      {(chipKeys.length > 0 || release) && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          {chipKeys.map(([k, label]) => (
+            <div
+              key={k}
+              className={"chip" + (chip === k ? " on" : "")}
+              onClick={() => setChip(k)}
             >
-              <svg
-                viewBox="0 0 24 24"
-                width="11"
-                height="11"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.6"
-                strokeLinecap="round"
-              >
-                <path d="M6 6l12 12M18 6L6 18" />
-              </svg>
-            </span>
-          </div>
-        )}
-      </div>
+              {label}
+            </div>
+          ))}
+
+          {/* 좌측 패널을 스크롤로 지나친 사용자가 목록이 왜 짧은지 알 수 없으면 안 된다. */}
+          {release && <ReleaseChip {...release} />}
+        </div>
+      )}
 
       {error && (
         <div

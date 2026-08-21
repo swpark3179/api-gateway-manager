@@ -28,7 +28,7 @@ export default function JsonTab({ sub }: { sub: string }) {
   const [mode, setMode] = useState<Mode>("managed");
   const showRaw = mode === "raw" && rawJson !== null;
 
-  // groupsLocation 은 route·consumer 에만 있다 (JSON 탭도 그 둘만 쓴다 — design.formJson 주석).
+  // groupsLocation 은 route·consumer 에만 있다.
   const loc =
     form && (form.kind === "route" || form.kind === "consumer") ? form.groupsLocation : null;
   const locLabel = loc
@@ -158,6 +158,23 @@ export default function JsonTab({ sub }: { sub: string }) {
             <br />
             그룹 필드 위치: <span className="font-mono">{locLabel}</span> — 저장 시 이 자리에
             그대로 되씁니다.
+          </>
+        )}
+        {/* 폼에 없는 키는 이 화면에도 없다. "왜 안 보이지" 를 화면에서 답한다. */}
+        {!showRaw && form?.kind === "upstream" && (
+          <>
+            <br />
+            <span className="font-mono">type</span> · <span className="font-mono">checks</span>{" "}
+            처럼 폼에 없는 키는 여기에 적어도 저장되지 않습니다. 게이트웨이에 설정된 값은 그대로
+            보존됩니다.
+          </>
+        )}
+        {!showRaw && form?.kind === "service" && (
+          <>
+            <br />
+            <span className="font-mono">{"plugins.jwt-auth: {}"}</span> — 게이트웨이에 이미 설정이
+            있으면 그 값을 유지합니다. <span className="font-mono">labels</span> 는{" "}
+            <span className="font-mono">spec_url</span> 만 보여 주며, 나머지 라벨은 보존됩니다.
           </>
         )}
       </div>

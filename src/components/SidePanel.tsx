@@ -9,6 +9,7 @@
 import { useMemo, useState } from "react";
 
 import { consumerGroupBuckets, useStore } from "../store";
+import { ALL_ROUTES, scopeKey, type RouteScope } from "../types";
 
 /** 컨슈머가 이보다 많으면 패널 안에 찾기 입력칸을 띄운다. 수백 행은 스크롤로 감당이 안 된다. */
 const FILTER_THRESHOLD = 12;
@@ -18,8 +19,8 @@ interface Row {
   count: string | number;
   /** 클릭 시 적용할 chip 필터. null 이면 클릭 불가 항목. */
   chip: string | null;
-  /** Route 섹션 전용 — 클릭 시 선택할 컨슈머 (null = 필터 해제) */
-  consumer?: string | null;
+  /** Route 섹션 전용 — 클릭 시 적용할 조회 범위. 없으면 클릭 불가 항목. */
+  scope?: RouteScope;
   /** 접근 가능한 라우트가 0건인 컨슈머는 흐리게 */
   dim?: boolean;
 }
@@ -29,7 +30,7 @@ export default function SidePanel() {
   const env = useStore((s) => s.env);
   const chip = useStore((s) => s.chip);
   const view = useStore((s) => s.view);
-  const routeConsumer = useStore((s) => s.routeConsumer);
+  const routeScope = useStore((s) => s.routeScope);
   // 패널 숫자는 캐시가 따로 돌려준 고정 집계다 — routeCounts 를 쓰면 컨슈머를 고른 순간
   // '전체' 행이 그 컨슈머의 건수를 표시하게 되어 순환한다 (store.ts 모듈 주석 참조).
   const access = useStore((s) => s.access);
@@ -39,7 +40,7 @@ export default function SidePanel() {
   const dash = useStore((s) => s.dash);
   const settings = useStore((s) => s.settings);
   const setChip = useStore((s) => s.setChip);
-  const setRouteConsumer = useStore((s) => s.setRouteConsumer);
+  const setRouteScope = useStore((s) => s.setRouteScope);
 
   const [needle, setNeedle] = useState("");
 
@@ -59,17 +60,25 @@ export default function SidePanel() {
         return {
           title: "CONSUMER 접근",
           rows: [
-            { label: "전체 Route", count: access?.all ?? 0, chip: null, consumer: null },
-            ...list.map((c) => ({
+            { label: "전체 Route", count: access?.all ?? 0, chip: null, scope: ALL_ROUTES },
+            ...list.map((c): Row => ({
               label: c.username,
               count: c.count,
               chip: null,
-              consumer: c.username,
+              scope: { kind: "consumer", username: c.username },
               dim: c.count === 0,
             })),
-            // 어떤 컨슈머로도 걸리지 않는 라우트를 화면에서 사라지게 두지 않는다.
+            // 어떤 컨슈머로도 걸리지 않는 라우트를 화면에서 사라지게 두지 않는다 —
+            // 건수만 보여 주는 것으로는 부족해서 이 행도 눌러 조회할 수 있다.
             ...(access && access.ungrouped > 0
-              ? [{ label: "그룹 제한 없음", count: access.ungrouped, chip: null }]
+              ? [
+                  {
+                    label: "그룹 제한 없음",
+                    count: access.ungrouped,
+                    chip: null,
+                    scope: { kind: "ungrouped" } as RouteScope,
+                  },
+                ]
               : []),
           ],
         };
@@ -171,13 +180,14 @@ export default function SidePanel() {
       )}
 
       {rows.map((p, i) => {
-        // Route 섹션은 컨슈머 축, 나머지는 chip 축으로 선택 상태를 판단한다.
+        // Route 섹션은 조회 범위 축, 나머지는 chip 축으로 선택 상태를 판단한다.
+        // 범위는 객체라서 scopeKey 로 비교한다 — `===` 로는 영영 같아지지 않는다.
         const on = isRoutes
-          ? p.consumer !== undefined && view === "list" && routeConsumer === p.consumer
+          ? !!p.scope && view === "list" && scopeKey(routeScope) === scopeKey(p.scope)
           : p.chip
             ? chip === p.chip && view === "list"
             : i === 0;
-        const clickable = isRoutes ? p.consumer !== undefined : !!p.chip;
+        const clickable = isRoutes ? !!p.scope : !!p.chip;
 
         return (
           <div
@@ -185,7 +195,7 @@ export default function SidePanel() {
             className={"lnb-item" + (on ? " on" : "")}
             onClick={() => {
               if (isRoutes) {
-                if (p.consumer !== undefined) setRouteConsumer(p.consumer);
+                if (p.scope) setRouteScope(p.scope);
               } else if (p.chip) {
                 setChip(p.chip);
               }

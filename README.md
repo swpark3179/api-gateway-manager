@@ -14,7 +14,7 @@ OAS 3.0 스펙을 읽어 "이 API 가 게이트웨이에 등록돼 있는지" �
 npm install
 npm run tauri dev        # 개발 실행
 npm run tauri build      # 릴리스 빌드 (MSI · NSIS)
-cargo test --lib --manifest-path src-tauri/Cargo.toml   # 회귀 테스트 (25건)
+cargo test --lib --manifest-path src-tauri/Cargo.toml   # 회귀 테스트 (63건)
 npm run build                                          # tsc --noEmit + vite build
 ```
 
@@ -180,7 +180,7 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 
 목록 화면은 게이트웨이를 부르지 않는다. `GET /routes` · `GET /consumers` 결과를
 **메모리 SQLite**(`Connection::open_in_memory()`, `src-tauri/src/db.rs`)에 통째로 넣고,
-검색어·chip·컨슈머 필터를 SQL 로 처리한다. 예전에는 프런트가 배열을 들고 매 키 입력마다
+검색어·chip·조회 범위 필터를 SQL 로 처리한다. 예전에는 프런트가 배열을 들고 매 키 입력마다
 `JSON.stringify(route)` 를 훑었다 — 라우트가 수백 건이면 눈에 띄게 느려지고, Import 의 등록
 여부 판정은 (스펙 오퍼레이션 수) × (라우트 수) 번 비교가 된다. uri 를 정규화해 인덱스로
 만들면 둘이 같이 풀린다.
@@ -191,7 +191,7 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 |---|---|---|
 | `routes_sync` | O | Route 전체 재조회 → 캐시 전면 교체 (건수만 반환) |
 | `consumers_sync` | O | Consumer 전체 재조회 → 캐시 전면 교체 → 목록 반환 |
-| `routes_query` | X | 캐시 조회 (chip · 검색어 · 컨슈머) |
+| `routes_query` | X | 캐시 조회 (chip · 검색어 · 조회 범위) |
 | `consumers_cached` | X | 캐시의 Consumer 전체 목록 |
 | `route_cached` | X | 캐시에서 단건 (Import 결과 → 상세 이동) |
 | `consumer_access_counts` | X | 컨슈머별 접근 가능 Route 수 (좌측 패널) |
@@ -200,7 +200,7 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 | `services_sync` | O | Service 전체 재조회 → 캐시 전면 교체 → 목록 반환 |
 | `services_cached` | X | 캐시의 Service 전체 목록 (`service_id` 셀렉트 · Import 의 spec_url) |
 
-sync 가 조회 결과를 돌려주지 않는 이유: 조회 축이 셋(chip · 검색어 · 컨슈머)이라 채우기에
+sync 가 조회 결과를 돌려주지 않는 이유: 조회 축이 셋(chip · 검색어 · 조회 범위)이라 채우기에
 필터를 실어 보내면 호출부마다 세 인자를 끌고 다녀야 한다. 메모리 SQLite 라 왕복 비용이 없으니
 프런트가 sync → query 를 이어 부른다.
 
@@ -276,10 +276,37 @@ EXISTS (SELECT 1 FROM route_groups rg
   흉내를 내야 한다 — 화면이 "접근 가능"이라 했는데 실제 호출이 403 이면 화면이 깐깐한 것보다
   훨씬 나쁘다. `COLLATE NOCASE` 는 ASCII 만 접어서 한글 그룹명에는 효과가 없기도 하다.
 - `allowed_groups` 가 **빈** 라우트는 어떤 컨슈머로도 걸리지 않는다. 화면에서 사라지지 않도록
-  패널이 `그룹 제한 없음 (N)` 행으로 건수를 따로 보여준다.
+  패널의 `그룹 제한 없음 (N)` 행을 눌러 그것만 조회할 수 있다.
 
 상단 status chip 과 좌측 패널은 서로 **다른 축**이라 AND 로 겹쳐 적용된다. `store.chip` 하나에
-둘을 담을 수 없어서 `routeConsumer` 를 따로 둔다.
+둘을 담을 수 없어서 조회 범위를 따로 둔다.
+
+### 조회 범위는 세 값짜리 한 축이다
+
+```
+RouteScope = { kind: "all" } | { kind: "consumer", username } | { kind: "ungrouped" }
+```
+
+`string | null` 로는 '그룹 제한 없음' 을 담을 자리가 없고, `consumer` + `ungrouped` 두 필드로
+나누면 **둘 다 켜진 상태**를 표현할 수 있게 되어 그게 무슨 뜻인지 SQL 이 정해야 한다. 그래서
+프런트(`types.ts` 의 `RouteScope`)와 Rust(`db::RouteScope`, serde 내부 태그 `kind`)를 같은
+모양의 판별 유니온으로 둔다.
+
+SQL 은 `EXISTS` 옆에 `NOT EXISTS` 절을 하나 더 붙인 것뿐이다. 조각을 붙였다 뗐다 하지 않고
+`?4` 를 **항상** 바인딩한다 — 조각을 빼면 `params!` 길이가 안 맞아 rusqlite 가 런타임에
+`InvalidParameterCount` 를 던진다 (검색어의 `?2`, 컨슈머의 `?3` 이 이미 같은 관례다).
+
+```sql
+AND (?4 = 0 OR NOT EXISTS (SELECT 1 FROM route_groups rg
+                            WHERE rg.env = ?1 AND rg.route_id = routes.id))
+```
+
+`query_routes` 와 `route_counts` **둘 다** 범위를 받는다. 상단 chip 라벨의 숫자가 범위를
+따라가야 하는 이유는 컨슈머와 같다 — 범위로 2건이 남았는데 chip 이 `status 1 (312)` 라고
+말하면 안 된다.
+
+객체를 비교할 때는 `types.ts` 의 `scopeKey` 를 쓴다. `===` 로 비교하면 매 렌더마다 새로 만든
+`{kind:"consumer"}` 가 절대 같아지지 않아 좌측 패널의 선택 표시가 영영 켜지지 않는다.
 
 ---
 
@@ -289,9 +316,14 @@ Consumer 상세의 폼 편집 탭에 담당자 그리드가 있다. 게이트웨
 `name1`/`dept1`, `name2`/`dept2`, … 쌍으로 저장돼 있는 값이고, `n` 은 상한이 없으며
 `dept{n}` 없이 `name{n}` 만 있는 경우도 있다.
 
-번호 규칙은 **Rust 한 곳에만** 둔다 (`models::contacts_of` · `set_contacts_at`).
-JSON 탭의 요청 본문에 `labels` 를 넣지 않는 것도 같은 이유다 — 규칙이 두 곳에 있으면 반드시
-어긋난다. (`jsonToForm` 이 `...current` 를 펼치므로 담당자는 JSON 탭을 왕복해도 살아남는다.)
+번호 규칙의 **진실은 Rust** 다 (`models::contacts_of` · `set_contacts_at`) — 저장 때 실제로
+적용되는 것이 그쪽이다.
+
+담당자는 JSON 탭에도 `labels` 로 함께 보인다. 폼에서 담당자를 입력했는데 JSON 탭 텍스트가 한
+글자도 바뀌지 않는 편이 더 나쁘다고 판단해, `lib/design.ts` 에 **표시 전용 사본**
+(`contactLabels` · `contactsFromLabels`)을 두었다. `nameFromPrefix` 와 같은 위치다 — 규칙이
+바뀌면 Rust 쪽이 진실이고, 양쪽 주석이 서로를 가리킨다. 사본이니만큼 어긋나기 쉬운 두 지점을
+그대로 옮겨 놓았다: **빈 행을 걸러낸 뒤** 번호를 붙이는 것과, 앞자리 0 판정이다.
 
 - 읽기: `BTreeMap<usize, _>` 에 모아 **숫자 순**으로 정렬한다. serde_json 이 `preserve_order`
   없이 빌드돼 `Map` 이 BTreeMap 이라, 키 문자열을 그대로 순회하면 `name1, name10, name2` 순이
@@ -306,6 +338,14 @@ JSON 탭의 요청 본문에 `labels` 를 넣지 않는 것도 같은 이유다 
   `[]` = 담당자 라벨을 전부 지운다. `Vec<Contact>` + `serde(default)` 로 두면 `api.ts` 에서
   필드 한 줄을 빠뜨린 순간 게이트웨이의 담당자 라벨이 전부 지워진다 — 빠뜨렸을 때
   **지워지는 쪽이 아니라 유지되는 쪽**으로 degrade 해야 한다.
+- JSON 탭도 같은 원칙을 한 층 위에서 따른다. `consumerJson` 은 담당자가 없어도 `labels: {}` 를
+  **항상** 내보내고, `jsonToForm` 은 `labels` 키가 **있을 때만** 담당자를 덮는다.
+    - `{}` → 전부 지우기 (JSON 탭에서 담당자를 비우는 수단이고, 항상 내보내는 `{}` 자체가 그
+      발견 가능성을 만든다)
+    - 키 없음 → 폼의 담당자 유지
+  조건부로 생략하면 "담당자가 없다" 와 "이 초안은 담당자를 언급하지 않는다" 를 구별할 수 없다.
+  그러면 `labels` 없는 본문을 붙여넣고 '폼에 적용' → 저장, **두 번 클릭으로 게이트웨이의
+  담당자 라벨이 사라진다.**
 
 ### APISIX labels 제약
 
@@ -456,8 +496,27 @@ Service 폼도 저장 시점에 같은 스킴 제한을 걸어, 나중에 `fetch
 
 아이콘 레일에 `Upstream` · `Service` 두 화면이 있다. 각각 목록(검색 + 동기화 버튼) 과
 편집 화면을 갖고, 편집 화면은 Route·Consumer 와 같은 `EditScreen` 껍데기를 공유한다 —
-저장·취소·삭제 헤더를 네 번 복붙하지 않기 위해서다. 두 형태는 **폼 탭만** 있다
-(JSON 탭은 `labels`·`nodes` 표기 규칙을 TS 에 다시 구현해야 해서 두지 않았다).
+저장·취소·삭제 헤더를 네 번 복붙하지 않기 위해서다. 네 형태 모두 `폼 편집` · `JSON` 탭을
+쓴다 (`JWT 토큰` 탭만 Consumer 상세 전용이다).
+
+두 형태의 JSON 본문도 `lib/design.ts` 의 **표시 전용 사본**(`upstreamJson` · `serviceJson`)
+이다 — 담당자 `labels` 와 같은 판단이고, Rust 의 `apply_upstream_form` ·
+`apply_service_form` 이 진실이다. 실제 저장과 다른 세 지점은 화면에 문구로 적어 두었다.
+
+| 미리보기 | 실제 저장 | 왜 |
+|---|---|---|
+| `type` 이 없다 | 원본에 **없을 때만** `roundrobin` 을 채운다 | 앱이 관리하는 키가 아니다. 여기 적어도 반영되지 않는다 |
+| `plugins."jwt-auth": {}` | 이미 설정이 있으면 그 값을 **유지** | `{}` 로 덮으면 게이트웨이의 jwt-auth 옵션이 사라진다 |
+| `labels` 에 `spec_url` 만 | 나머지 라벨은 보존 | 인식하는 라벨 하나만 손댄다 |
+
+노드 `weight` 는 폼에 없지만 **JSON 에는 넣는다.** 빼 두면 `jsonToForm` 이 `nodes` 를 다시
+만들 때 값을 잃고, JSON 탭을 한 번 왕복하는 것만으로 게이트웨이의 `weight: 3` 이 1 로 덮인다
+(Rust 의 `n.weight.unwrap_or(1)`). 보이지 않는 값을 조용히 잃지 않는다는 원칙 그대로다.
+
+숫자 칸(port · weight · timeout)은 편집 중 빈 칸일 수 있어 폼이 문자열로 들고 있다. 미리보기는
+파싱되면 숫자, 아니면 `null` 로 내보낸다 — 편집 중인 빈 칸을 `0` 으로 보여 주면 거짓말이다.
+`api.ts` 의 와이어 변환(`Number()`)과 **일부러 다르다**: 저쪽은 Rust 의 `i64`/`f64`
+(둘 다 non-Option) 에 맞춰야 하고, 빈 값은 `store.save` 의 필수값 검사가 먼저 막는다.
 
 ### 왜 필요했나
 
@@ -547,9 +606,13 @@ APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에
 | `editSub` | 항상 `PUT …/routes/{name}` | 신규는 `POST …/routes` | 실제 호출과 일치시킴 |
 | JSON 탭 `status` | 항상 `1` | 실제 status | 비활성 라우트를 잘못 표시하지 않도록 |
 | Consumer `username` | 항상 편집 가능 | 상세에서는 읽기 전용 | APISIX 식별자라 바꾸면 다른 consumer 가 됨 |
-| Consumer 좌측 탭·칩 | 전체 / 제휴사 / 내부 시스템 고정 | 실제 `auth-groups` 값별 버킷 + `(그룹 없음)` | `partner`·`internal` 이라는 특정 문자열을 가정한 구분이라 조직마다 맞지 않음 |
+| Consumer 좌측 탭 | 전체 / 제휴사 / 내부 시스템 고정 | 실제 `auth-groups` 값별 버킷 + `(그룹 없음)` | `partner`·`internal` 이라는 특정 문자열을 가정한 구분이라 조직마다 맞지 않음 |
+| Consumer 목록 상단 칩 | 권한그룹별 칩 줄 | 없음. 고른 그룹만 해제 칩 하나로 | 좌측 패널이 같은 값을 같은 건수로 이미 보여 준다. 두 번 두면 어느 쪽이 켜져 있는지가 오히려 헷갈린다 |
+| Consumer 목록 첫 열 | `username / key` | `desc / username` (`key` 는 `alg` 자리로) | 목록에서 찾는 것은 식별자가 아니라 설명이다. `alg` 열은 모든 행이 `HS256` 이라 정보가 없었다 |
 | JWT `nbf` | 발급 시각(now) | **로컬 2025-08-01 00:00 고정** | 누를 때마다 토큰이 달라지면 이미 배포된 토큰과 값이 어긋남 |
 | JSON 탭 | 앱 관리 키만 | + `게이트웨이 원본` 읽기 전용 보기 | 그룹 필드가 실제로 어디 있는지 확인해야 할 때가 있음 |
+| JSON 탭 범위 | Route · Consumer | + Upstream · Service, Consumer 는 담당자 `labels` 까지 | 폼에서 고친 값이 JSON 탭에 안 보이면 두 탭이 서로 다른 말을 한다. 표시 전용 사본으로 풀었다 (위 두 절 참조) |
+| 권한그룹 콤보박스 | 항상 아래로 | 공간이 없으면 위로, 남은 높이에 맞춰 조임 | 창 하단에서 열면 본문 스크롤 높이가 늘어 목록이 화면 밖으로 밀렸다 |
 | 설정 토글 | 프록시 우회 1개 | + 인증서 검증 건너뛰기 | 사설 인증서 환경 대응 |
 | JWT 안내 문구 | "Authorization 헤더 없이 `Authorization: Bearer …`" | "호출 시 `Authorization: Bearer …`" | 원문이 모순된 문장이라 정정 |
 | Route 목록 헤더 | 검색 + `신규 Route` | + 리프레시 · `Import` 버튼 | 원본에 없던 화면. 목록 캐시를 명시적으로 갱신할 수단과 스펙 대조 진입점이 필요하다 |
