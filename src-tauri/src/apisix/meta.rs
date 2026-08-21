@@ -1,14 +1,15 @@
-//! Service · Upstream 조회(읽기 전용)와 대시보드 집계.
+//! 대시보드 집계.
 //!
-//! Route 폼의 `service_id` 셀렉트와 대시보드 KPI 를 채우기 위해서만 쓴다.
-//! 이 앱은 Service/Upstream 을 생성·수정하지 않는다.
+//! Service · Upstream 의 CRUD 는 `services.rs` · `upstreams.rs` 에 있다. 여기 남은 것은
+//! 대시보드 KPI 뿐이다 — 목록 화면은 캐시(`db`)에서 읽지만 대시보드는 게이트웨이 실측을
+//! 보여 주는 화면이라 `services` · `upstreams` 건수를 라이브로 센다.
 
 use reqwest::Method;
 use serde::Serialize;
 use tauri::{AppHandle, Wry};
 
 use super::client;
-use super::models::{extract_list, ServiceOption};
+use super::models::extract_list;
 use crate::config::Env;
 use crate::db::OverviewCounts;
 use crate::error::AppResult;
@@ -16,12 +17,6 @@ use crate::error::AppResult;
 async fn raw_list(app: &AppHandle<Wry>, env: Env, resource: &str) -> AppResult<Vec<serde_json::Value>> {
     let (resp, _) = client::request(app, env, Method::GET, resource, None).await?;
     Ok(extract_list(&resp))
-}
-
-pub async fn services(app: &AppHandle<Wry>, env: Env) -> AppResult<Vec<ServiceOption>> {
-    let ups = raw_list(app, env, "upstreams").await.unwrap_or_default();
-    let svcs = raw_list(app, env, "services").await?;
-    Ok(svcs.iter().map(|s| ServiceOption::from_value(s, &ups)).collect())
 }
 
 /// 대시보드 상단 KPI + 연결 상태 카드에 필요한 실측값 일체.

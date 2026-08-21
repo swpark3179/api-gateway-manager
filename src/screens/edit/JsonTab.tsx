@@ -28,7 +28,9 @@ export default function JsonTab({ sub }: { sub: string }) {
   const [mode, setMode] = useState<Mode>("managed");
   const showRaw = mode === "raw" && rawJson !== null;
 
-  const loc = form?.groupsLocation;
+  // groupsLocation 은 route·consumer 에만 있다 (JSON 탭도 그 둘만 쓴다 — design.formJson 주석).
+  const loc =
+    form && (form.kind === "route" || form.kind === "consumer") ? form.groupsLocation : null;
   const locLabel = loc
     ? loc.plugin
       ? `plugins.${loc.plugin}.${loc.key}${loc.asCsv ? " (콤마 구분 문자열)" : ""}`

@@ -22,9 +22,12 @@ import type {
   RouteFormState,
   RoutesPage,
   RouteView,
-  ServiceOption,
+  ServiceFormState,
+  ServiceView,
   SettingsView,
   TestResult,
+  UpstreamFormState,
+  UpstreamView,
 } from "./types";
 
 /** Rust 가 던진 AppError 인지 판별한다. */
@@ -140,9 +143,67 @@ export const consumerSave = (env: EnvKey, f: ConsumerFormState) =>
 export const consumerDelete = (env: EnvKey, username: string) =>
   call<void>("consumer_delete", { env, username });
 
-// ── 기타 ─────────────────────────────────────────────────────
+// ── Upstream ─────────────────────────────────────────────────
 
-export const servicesList = (env: EnvKey) => call<ServiceOption[]>("services_list", { env });
+/** 게이트웨이에서 Upstream 전체 목록을 다시 받아 캐시를 갱신하고 그 목록을 돌려준다. */
+export const upstreamsSync = (env: EnvKey) => call<UpstreamView[]>("upstreams_sync", { env });
+
+/** 캐시의 Upstream 전체 목록 (게이트웨이 호출 없음). */
+export const upstreamsCached = (env: EnvKey) => call<UpstreamView[]>("upstreams_cached", { env });
+
+/**
+ * 폼의 숫자 필드는 문자열이다 (편집 중 빈 칸이 가능해야 한다 — types.ts 주석 참조).
+ * 숫자 변환은 여기 한 곳에서만 한다.
+ */
+export const upstreamSave = (env: EnvKey, f: UpstreamFormState) =>
+  call<UpstreamView>("upstream_save", {
+    env,
+    form: {
+      id: f.id,
+      name: f.name,
+      desc: f.desc,
+      nodes: f.nodes.map((n) => ({
+        host: n.host.trim(),
+        port: Number(n.port),
+        // 빈 값이면 Rust 가 1 을 넣는다 (Number("") === 0 이라 그대로 보내면 안 된다).
+        weight: n.weight.trim() === "" ? null : Number(n.weight),
+      })),
+      timeout: {
+        connect: Number(f.timeout.connect),
+        send: Number(f.timeout.send),
+        read: Number(f.timeout.read),
+      },
+    },
+  });
+
+export const upstreamDelete = (env: EnvKey, id: string, name: string) =>
+  call<void>("upstream_delete", { env, id, name });
+
+// ── Service ──────────────────────────────────────────────────
+
+/** 게이트웨이에서 Service 전체 목록을 다시 받아 캐시를 갱신하고 그 목록을 돌려준다. */
+export const servicesSync = (env: EnvKey) => call<ServiceView[]>("services_sync", { env });
+
+/** 캐시의 Service 전체 목록 (게이트웨이 호출 없음). */
+export const servicesCached = (env: EnvKey) => call<ServiceView[]>("services_cached", { env });
+
+export const serviceSave = (env: EnvKey, f: ServiceFormState) =>
+  call<ServiceView>("service_save", {
+    env,
+    form: {
+      id: f.id,
+      name: f.name,
+      desc: f.desc,
+      upstreamId: f.upstreamId,
+      specUrl: f.specUrl,
+      logKey: f.logKey,
+    },
+  });
+
+export const serviceDelete = (env: EnvKey, id: string, name: string) =>
+  call<void>("service_delete", { env, id, name });
+
+// ── 기타 ─────────────────────────────────────────────────────
 
 export const dashboard = (env: EnvKey) => call<DashboardPayload>("dashboard", { env });
 

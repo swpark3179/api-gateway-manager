@@ -142,6 +142,42 @@ fn server_prefix(root: &Value) -> String {
     }
 }
 
+/// APISIX route `name` 의 최대 길이 (apisix/schema_def.lua 의 rule_name_def).
+pub const MAX_NAME_LEN: usize = 100;
+
+/// 경로 접두사 → route 명 접두사. `/v1` → `V1/`
+///
+/// 규약은 "앞 슬래시를 떼고 · 대문자로 바꾸고 · 뒤에 슬래시를 붙인다" 다.
+/// 접두사가 없을 때 `/` 만 남기면 이름이 슬래시로 시작해 버리므로 빈 문자열을 준다.
+pub fn name_prefix(prefix: &str) -> String {
+    let core = prefix.trim().trim_matches('/');
+    if core.is_empty() {
+        return String::new();
+    }
+    format!("{}/", core.to_uppercase())
+}
+
+/// route 명 프리필 — `name_prefix(prefix)` + 접두사를 뗀 OAS 원본 path.
+///
+/// path 표기는 스펙 그대로 둔다 (`/orders/{orderId}` → `V1/orders/{orderId}`).
+/// 게이트웨이 uri 는 `to_apisix_uri` 가 따로 만들고, 이름은 사람이 읽는 값이라
+/// 스펙과 같은 표기를 유지하는 편이 대조하기 쉽다.
+///
+/// APISIX 의 `name` 은 100자 제한이라 넘치면 잘라야 한다. 바이트로 자르면 UTF-8
+/// 경계가 깨져 serde 직렬화가 아니라 저장이 실패하므로 **char 경계**에서 자른다.
+pub fn suggested_name(prefix: &str, path: &str) -> String {
+    let mut out = name_prefix(prefix);
+    out.push_str(path.trim().trim_start_matches('/'));
+    truncate_chars(&out, MAX_NAME_LEN)
+}
+
+fn truncate_chars(v: &str, max: usize) -> String {
+    match v.char_indices().nth(max) {
+        Some((i, _)) => v[..i].to_string(),
+        None => v.to_string(),
+    }
+}
+
 fn ops_from_typed(doc: &openapiv3::OpenAPI) -> Vec<OasOp> {
     let mut out = Vec::new();
     for (path, item) in doc.paths.iter() {

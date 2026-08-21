@@ -15,9 +15,12 @@ import Dashboard from "./screens/Dashboard";
 import ImportScreen from "./screens/ImportScreen";
 import ListScreen from "./screens/ListScreen";
 import LockedScreen from "./screens/LockedScreen";
+import ServicesScreen from "./screens/ServicesScreen";
 import Settings from "./screens/Settings";
+import UpstreamsScreen from "./screens/UpstreamsScreen";
 import EditScreen from "./screens/edit/EditScreen";
 import { selectShowLock, useStore } from "./store";
+import type { Section } from "./types";
 
 export default function App() {
   const section = useStore((s) => s.section);
@@ -68,9 +71,14 @@ export default function App() {
   }, []);
 
   const isImport = section === "routes" && view === "import";
+  // 목록 화면은 섹션마다 다르지만 편집 화면(EditScreen)은 네 형태가 공유한다 —
+  // 저장·취소·삭제 헤더를 네 번 복붙하지 않기 위해서다.
+  const EDITABLE: Section[] = ["routes", "consumers", "upstreams", "services"];
+  const editable = EDITABLE.includes(section);
   const isList = (section === "routes" || section === "consumers") && view === "list";
-  const isEdit =
-    (section === "routes" || section === "consumers") && view !== "list" && !isImport;
+  const isUpstreams = section === "upstreams" && view === "list";
+  const isServices = section === "services" && view === "list";
+  const isEdit = editable && view !== "list" && !isImport;
 
   return (
     <div
@@ -103,6 +111,8 @@ export default function App() {
               {section === "dash" && <Dashboard />}
               {section === "settings" && <Settings />}
               {isList && <ListScreen />}
+              {isUpstreams && <UpstreamsScreen />}
+              {isServices && <ServicesScreen />}
               {isImport && <ImportScreen />}
               {isEdit && <EditScreen />}
             </>

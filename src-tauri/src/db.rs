@@ -9,7 +9,8 @@
 //!
 //! # 무엇이 들어 있나
 //!
-//! Route 와 Consumer 의 **전체 목록**, 그리고 둘의 그룹을 이어 주는 정션 테이블이다.
+//! Route · Consumer · Upstream · Service 의 **전체 목록**, 그리고 Route/Consumer 의 그룹을
+//! 이어 주는 정션 테이블이다.
 //! 목록 화면은 게이트웨이를 부르지 않고 여기만 본다. 채우는 경로는 두 가지다 —
 //! 부트스트랩(기동 · 환경 전환 · 상단 새로고침 버튼)과, 저장·삭제 직후의 해당 리소스 재동기화.
 //!
@@ -31,7 +32,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::apisix::models::{ConsumerView, RouteView};
+use crate::apisix::models::{ConsumerView, RouteView, ServiceView, UpstreamView};
 use crate::error::{AppError, AppResult};
 use crate::oas::{self, OasOp};
 
@@ -133,6 +134,33 @@ pub fn init(conn: &Connection) -> AppResult<()> {
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS consumer_groups_grp ON consumer_groups(env, grp);
 
+        -- Upstream 목록. routes 와 같은 이유로 UpstreamView 를 JSON 그대로 담는다.
+        CREATE TABLE IF NOT EXISTS upstreams (
+          env    TEXT    NOT NULL,
+          id     TEXT    NOT NULL,
+          seq    INTEGER NOT NULL,          -- 게이트웨이가 준 원래 순서 (표시 순서 유지)
+          name   TEXT    NOT NULL DEFAULT '',
+          search TEXT    NOT NULL,          -- 소문자 통합 블롭
+          view   TEXT    NOT NULL,          -- serde_json::to_string(&UpstreamView)
+          PRIMARY KEY (env, id)
+        );
+        CREATE INDEX IF NOT EXISTS upstreams_env_seq ON upstreams(env, seq);
+
+        -- Service 목록. spec_url 을 열로 뽑아 둔 것은 Import 화면이 service 를 고른 순간
+        -- 그 주소만 필요하기 때문이다 (view 전체를 파싱하지 않아도 된다).
+        CREATE TABLE IF NOT EXISTS services (
+          env         TEXT    NOT NULL,
+          id          TEXT    NOT NULL,
+          seq         INTEGER NOT NULL,
+          name        TEXT    NOT NULL DEFAULT '',
+          upstream_id TEXT    NOT NULL DEFAULT '',
+          spec_url    TEXT    NOT NULL DEFAULT '',
+          search      TEXT    NOT NULL,
+          view        TEXT    NOT NULL,     -- serde_json::to_string(&ServiceView)
+          PRIMARY KEY (env, id)
+        );
+        CREATE INDEX IF NOT EXISTS services_env_seq ON services(env, seq);
+
         -- Import 한 OAS 문서의 오퍼레이션. 비교를 SQL 조인 한 번으로 끝내기 위한 것.
         CREATE TABLE IF NOT EXISTS oas_ops (
           seq          INTEGER PRIMARY KEY,
@@ -143,6 +171,8 @@ pub fn init(conn: &Connection) -> AppResult<()> {
           full_path    TEXT NOT NULL DEFAULT '',
           -- APISIX route 의 uri 후보 (신규 생성 폼 프리필). oas::to_apisix_uri 참조.
           suggested_uri TEXT NOT NULL DEFAULT '',
+          -- route 명 후보 — 접두사를 대문자로 바꾼 것 + 원본 path. oas::suggested_name 참조.
+          suggested_name TEXT NOT NULL DEFAULT '',
           norm         TEXT NOT NULL DEFAULT ''
         );
         "#,
@@ -585,6 +615,100 @@ pub fn overview_counts(conn: &Connection, env: &str) -> AppResult<OverviewCounts
     Ok(OverviewCounts { routes, routes_active, routes_inactive, consumers, consumers_jwt })
 }
 
+// ── Upstream · Service 캐시 ─────────────────────────────────
+
+/// 게이트웨이에서 받은 Upstream 목록으로 캐시를 **교체**한다.
+///
+/// `sync_routes` 와 같은 이유로 부분 upsert 를 하지 않는다 — 게이트웨이에서 지워진 항목이
+/// 캐시에 남으면 Service 폼의 upstream 콤보에 유령 항목이 뜨고, 그걸 고르면 저장이 400 이 된다.
+pub fn sync_upstreams(conn: &Connection, env: &str, items: &[UpstreamView]) -> AppResult<()> {
+    let tx = conn.unchecked_transaction().map_err(sql_err)?;
+    tx.execute("DELETE FROM upstreams WHERE env = ?1", params![env]).map_err(sql_err)?;
+    {
+        let mut ins = tx
+            .prepare(
+                "INSERT INTO upstreams (env, id, seq, name, search, view)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )
+            .map_err(sql_err)?;
+        for (i, u) in items.iter().enumerate() {
+            if u.id.trim().is_empty() {
+                log::warn!("id 가 없는 upstream 을 건너뜁니다 (name={})", u.name);
+                continue;
+            }
+            let view = serde_json::to_string(u)?;
+            ins.execute(params![env, &u.id, i as i64, &u.name, view.to_lowercase(), view])
+                .map_err(sql_err)?;
+        }
+    }
+    tx.commit().map_err(sql_err)?;
+    Ok(())
+}
+
+/// 캐시의 Upstream 전체 목록. 게이트웨이 순서를 유지한다.
+pub fn upstreams_cached(conn: &Connection, env: &str) -> AppResult<Vec<UpstreamView>> {
+    let mut stmt = conn
+        .prepare("SELECT view FROM upstreams WHERE env = ?1 ORDER BY seq")
+        .map_err(sql_err)?;
+    let rows =
+        stmt.query_map(params![env], |row| row.get::<_, String>(0)).map_err(sql_err)?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(serde_json::from_str::<UpstreamView>(&r.map_err(sql_err)?)?);
+    }
+    Ok(out)
+}
+
+/// 게이트웨이에서 받은 Service 목록으로 캐시를 **교체**한다.
+pub fn sync_services(conn: &Connection, env: &str, items: &[ServiceView]) -> AppResult<()> {
+    let tx = conn.unchecked_transaction().map_err(sql_err)?;
+    tx.execute("DELETE FROM services WHERE env = ?1", params![env]).map_err(sql_err)?;
+    {
+        let mut ins = tx
+            .prepare(
+                "INSERT INTO services (env, id, seq, name, upstream_id, spec_url, search, view)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )
+            .map_err(sql_err)?;
+        for (i, sv) in items.iter().enumerate() {
+            if sv.id.trim().is_empty() {
+                log::warn!("id 가 없는 service 를 건너뜁니다 (name={})", sv.name);
+                continue;
+            }
+            let view = serde_json::to_string(sv)?;
+            ins.execute(params![
+                env,
+                &sv.id,
+                i as i64,
+                &sv.name,
+                &sv.upstream_id,
+                &sv.spec_url,
+                view.to_lowercase(),
+                view
+            ])
+            .map_err(sql_err)?;
+        }
+    }
+    tx.commit().map_err(sql_err)?;
+    Ok(())
+}
+
+/// 캐시의 Service 전체 목록. 게이트웨이 순서를 유지한다.
+pub fn services_cached(conn: &Connection, env: &str) -> AppResult<Vec<ServiceView>> {
+    let mut stmt = conn
+        .prepare("SELECT view FROM services WHERE env = ?1 ORDER BY seq")
+        .map_err(sql_err)?;
+    let rows =
+        stmt.query_map(params![env], |row| row.get::<_, String>(0)).map_err(sql_err)?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(serde_json::from_str::<ServiceView>(&r.map_err(sql_err)?)?);
+    }
+    Ok(out)
+}
+
 // ── OAS 비교 ─────────────────────────────────────────────────
 
 /// 스펙 오퍼레이션 한 건의 판정 결과.
@@ -610,6 +734,12 @@ pub struct CompareRow {
     /// 미등록 건을 신규 생성할 때 폼에 채울 uri 후보.
     /// 경로 파라미터 변환 규칙이 한 곳에만 있어야 하므로 프런트에서 다시 만들지 않는다.
     pub suggested_uri: String,
+    /// 신규 생성 폼의 `name` 후보 — `V1/` 같은 접두사 + 접두사를 뗀 원본 path.
+    /// (`oas::suggested_name`. uri 와 같은 이유로 프런트에서 다시 만들지 않는다.)
+    pub suggested_name: String,
+    /// 신규 생성 폼의 `proxy-rewrite.uri` 후보 — 접두사를 붙이지 않은 OAS 원본 path.
+    /// 게이트웨이 uri 에는 접두사가 붙지만 upstream 이 아는 경로는 접두사 없는 쪽이다.
+    pub suggested_rewrite: String,
 }
 
 pub const REGISTERED: &str = "registered";
@@ -686,7 +816,8 @@ pub fn compare(
         {
             let mut upd = tx
                 .prepare(
-                    "UPDATE oas_ops SET full_path = ?2, norm = ?3, suggested_uri = ?4
+                    "UPDATE oas_ops SET full_path = ?2, norm = ?3, suggested_uri = ?4,
+                            suggested_name = ?5
                       WHERE seq = ?1",
                 )
                 .map_err(sql_err)?;
@@ -694,7 +825,8 @@ pub fn compare(
                 let full = oas::join_path(prefix, &path);
                 let norm = oas::normalize(&full).norm;
                 let suggested = oas::to_apisix_uri(prefix, &path);
-                upd.execute(params![seq, full, norm, suggested]).map_err(sql_err)?;
+                let name = oas::suggested_name(prefix, &path);
+                upd.execute(params![seq, full, norm, suggested, name]).map_err(sql_err)?;
             }
         }
         tx.commit().map_err(sql_err)?;
@@ -706,7 +838,7 @@ pub fn compare(
         .prepare(
             "SELECT o.seq, o.path, o.full_path, o.method, o.operation_id, o.summary,
                     r.id, r.name, r.uri, r.status, ru.wildcard,
-                    o.suggested_uri,
+                    o.suggested_uri, o.suggested_name,
                     EXISTS(SELECT 1 FROM route_methods m
                             WHERE m.env = ?1 AND m.route_id = r.id AND m.method = o.method),
                     (SELECT COUNT(*) FROM route_methods m
@@ -737,8 +869,8 @@ pub fn compare(
 
         let cand = match route_id {
             Some(id) if !id.is_empty() => {
-                let method_count: i64 = row.get(13).map_err(sql_err)?;
-                let method_hit: bool = row.get(12).map_err(sql_err)?;
+                let method_count: i64 = row.get(14).map_err(sql_err)?;
+                let method_hit: bool = row.get(13).map_err(sql_err)?;
                 Some(Cand {
                     route_id: id,
                     route_name: row.get(7).map_err(sql_err)?,
@@ -768,6 +900,9 @@ pub fn compare(
                     route_status: 0,
                     wildcard: false,
                     suggested_uri: row.get(11).map_err(sql_err)?,
+                    suggested_name: row.get(12).map_err(sql_err)?,
+                    // 접두사를 붙이지 않은 원본 path 가 곧 rewrite 후보다.
+                    suggested_rewrite: row.get(1).map_err(sql_err)?,
                 },
                 None,
             ));

@@ -29,13 +29,17 @@ export default function GroupsCard() {
   // 새 배열을 만드는 계산이라 스토어 셀렉터가 아니라 useMemo 로 감싼다 (store.ts 주석 참조).
   // 이미 선택된 값은 후보에서 빼고, 사용 빈도순(consumerGroupBuckets)을 그대로 쓴다.
   const options = useMemo(() => {
-    const picked = new Set(form?.groups ?? []);
+    const picked = new Set(
+      form && (form.kind === "route" || form.kind === "consumer") ? form.groups : [],
+    );
     return consumerGroupBuckets(consumers)
       .map((b) => b.key)
       .filter((k) => k !== NO_GROUP && !picked.has(k));
-  }, [consumers, form?.groups]);
+  }, [consumers, form]);
 
-  if (!form) return null;
+  // 이 카드는 route·consumer 전용이다. Service·Upstream 폼은 이걸 렌더하지 않지만,
+  // 타입으로도 좁혀 둬야 form.groups 접근이 성립한다.
+  if (!form || (form.kind !== "route" && form.kind !== "consumer")) return null;
 
   // 조회한 항목이면 실제로 값이 들어 있던 자리를 알려 준다.
   // (다른 도구가 `auth_groups` 처럼 다른 표기로 넣어 둔 경우를 숨기지 않기 위해)
