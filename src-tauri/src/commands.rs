@@ -12,7 +12,7 @@ use crate::apisix::models::{ConsumerView, RouteView, ServiceOption};
 use crate::apisix::routes::{self, RouteForm};
 use crate::apisix::client;
 use crate::config::{self, Env, EnvConfig, SettingsView};
-use crate::db::{self, Cache, CompareRow, RoutesPage};
+use crate::db::{self, AccessCounts, Cache, CompareRow, RoutesPage};
 use crate::error::{AppError, AppResult};
 use crate::history::{self, EntryView};
 use crate::jwt::{self, JwtResult};
@@ -127,31 +127,69 @@ pub async fn route_delete(
     routes::delete(&app, env, &id, name.as_deref().unwrap_or("")).await
 }
 
-// ── Route 캐시 (내장 SQLite) ─────────────────────────────────
+// ── 로컬 캐시 (내장 SQLite) ──────────────────────────────────
 //
-// 목록 검색·필터는 게이트웨이를 다시 부르지 않고 캐시에서 처리한다. 캐시를 채우는 경로는
-// `routes_sync` 하나뿐이다 — 목록 화면 진입과 상단 리프레시 버튼이 이걸 호출한다.
+// 목록 화면은 게이트웨이를 부르지 않고 캐시만 조회한다. 캐시를 채우는 경로는
+// `routes_sync` · `consumers_sync` 두 개뿐이다 — 프런트의 부트스트랩(기동 · 환경 전환 ·
+// 상단 새로고침 버튼)과 저장·삭제 직후의 재동기화가 이들을 호출한다.
+//
+// sync 커맨드는 조회 결과를 돌려주지 않고 건수만 준다. 조회 축이 셋(chip · 검색어 · 컨슈머)이라
+// 채우기에 필터를 실어 보내면 호출부마다 세 인자를 끌고 다녀야 하기 때문이다.
+// 채우기와 읽기를 나누고 프런트가 둘을 이어 부른다 — 메모리 SQLite 라 왕복 비용이 없다.
 
 fn cache(app: &AppHandle<Wry>) -> AppResult<tauri::State<'_, Cache>> {
     app.try_state::<Cache>()
         .ok_or_else(|| AppError::internal("로컬 캐시가 초기화되지 않았습니다."))
 }
 
-/// 게이트웨이에서 전체 목록을 다시 받아 캐시를 통째로 갱신하고 첫 조회 결과를 돌려준다.
+/// 게이트웨이에서 Route 전체 목록을 다시 받아 캐시를 통째로 갱신한다. 반환값은 건수다.
+///
+/// 잠금을 `.await` 너머로 들고 가지 않는다 — `Cache::with` 가 잡는 `MutexGuard` 는 `!Send` 라
+/// 그 상태로 await 하면 커맨드 future 가 `!Send` 가 되고 `#[tauri::command]` 매크로가
+/// 알아보기 힘든 에러를 낸다. 반드시 먼저 받아 오고, 그 다음 캐시에 넣는다.
 #[tauri::command]
-pub async fn routes_sync(app: AppHandle<Wry>, env: Env, chip: String, q: String) -> AppResult<RoutesPage> {
+pub async fn routes_sync(app: AppHandle<Wry>, env: Env) -> AppResult<usize> {
     let routes = routes::list(&app, env).await?;
-    let cache = cache(&app)?;
-    cache.with(|conn| {
-        db::sync_routes(conn, env.as_str(), &routes)?;
-        db::query_routes(conn, env.as_str(), &chip, &q)
-    })
+    let n = routes.len();
+    cache(&app)?.with(|conn| db::sync_routes(conn, env.as_str(), &routes))?;
+    Ok(n)
 }
 
 /// 캐시만 조회한다 (게이트웨이 호출 없음).
 #[tauri::command]
-pub fn routes_query(app: AppHandle<Wry>, env: Env, chip: String, q: String) -> AppResult<RoutesPage> {
-    cache(&app)?.with(|conn| db::query_routes(conn, env.as_str(), &chip, &q))
+pub fn routes_query(
+    app: AppHandle<Wry>,
+    env: Env,
+    chip: String,
+    q: String,
+    consumer: Option<String>,
+) -> AppResult<RoutesPage> {
+    cache(&app)?
+        .with(|conn| db::query_routes(conn, env.as_str(), &chip, &q, consumer.as_deref()))
+}
+
+/// 게이트웨이에서 Consumer 전체 목록을 다시 받아 캐시를 갱신하고, 그 목록을 돌려준다.
+///
+/// Route 와 달리 목록을 그대로 돌려주는 이유: Consumer 는 건수가 적어 프런트가 배열을 통째로
+/// 들고 필터링하고(`store.filterConsumers`), 권한그룹 콤보 옵션도 이 배열에서 파생한다.
+#[tauri::command]
+pub async fn consumers_sync(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<ConsumerView>> {
+    let items = consumers::list(&app, env).await?;
+    cache(&app)?.with(|conn| db::sync_consumers(conn, env.as_str(), &items))?;
+    Ok(items)
+}
+
+/// 캐시의 Consumer 전체 목록 (게이트웨이 호출 없음).
+#[tauri::command]
+pub fn consumers_cached(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<ConsumerView>> {
+    cache(&app)?.with(|conn| db::consumers_cached(conn, env.as_str()))
+}
+
+/// Route 화면 좌측 패널이 쓰는 컨슈머별 접근 가능 건수. routes·consumers 가 모두 동기화된
+/// 뒤에 부른다.
+#[tauri::command]
+pub fn consumer_access_counts(app: AppHandle<Wry>, env: Env) -> AppResult<AccessCounts> {
+    cache(&app)?.with(|conn| db::consumer_access_counts(conn, env.as_str()))
 }
 
 /// 캐시에서 라우트 한 건. 목록이 필터돼 있어도 상세로 갈 수 있게 해 준다.
@@ -227,11 +265,6 @@ pub fn oas_compare(
 // ── Consumer ─────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn consumers_list(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<ConsumerView>> {
-    consumers::list(&app, env).await
-}
-
-#[tauri::command]
 pub async fn consumer_save(
     app: AppHandle<Wry>,
     env: Env,
@@ -268,7 +301,10 @@ pub struct DashboardPayload {
 
 #[tauri::command]
 pub async fn dashboard(app: AppHandle<Wry>, env: Env) -> AppResult<DashboardPayload> {
-    let overview = meta::overview(&app, env).await?;
+    // KPI 중 route·consumer 건수는 캐시에서 센다 — 대시보드를 열 때마다 전체 목록을 다시
+    // 받으면 "기동 시 1회 조회"가 무의미해진다. 잠금은 await 전에 풀어 둔다.
+    let counts = cache(&app)?.with(|conn| db::overview_counts(conn, env.as_str()))?;
+    let overview = meta::overview(&app, env, counts).await?;
     let settings = config::load(&app);
     let cfg = settings.get(env);
     Ok(DashboardPayload {

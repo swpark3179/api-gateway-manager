@@ -69,7 +69,7 @@ src/                        프런트엔드 (React 19 + TS + zustand)
 ├─ api.ts                   Rust 커맨드 래퍼 — 게이트웨이 HTTP 의 유일한 통로
 ├─ lib/design.ts            디자인 원본의 순수 헬퍼 (JSON 모양 · 아이콘 · 스타일)
 ├─ styles/                  OPUS-X 토큰 CSS (디자인 원본을 그대로 복사)
-├─ components/              TitleBar · IconRail · SidePanel · Toast
+├─ components/              TitleBar · IconRail · SidePanel · Toast · BootProgress · GroupCombo
 └─ screens/                 Locked · Dashboard · List · Import · Settings · edit/*
 
 src-tauri/src/
@@ -78,7 +78,7 @@ src-tauri/src/
 ├─ config.rs                환경 설정 + Windows 자격 증명 관리자(토큰)
 ├─ apisix/client.rs         ★ no_proxy HTTP 클라이언트 (단일 진입점)
 ├─ apisix/{routes,consumers,meta,models}.rs
-├─ db.rs                    Route 목록 검색 · Import 비교용 메모리 SQLite
+├─ db.rs                    Route·Consumer 목록 · 접근 권한 조인 · Import 비교용 메모리 SQLite
 ├─ oas.rs                   OAS 3.0 파싱 + uri 정규화 (순수 함수)
 ├─ jwt.rs                   HS256 서명
 ├─ history.rs               대시보드 "최근 관리 API 호출" 이력
@@ -170,34 +170,142 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 
 ---
 
-## Route 목록 — 내장 SQLite 캐시
+## 목록 — 내장 SQLite 캐시
 
-목록 검색·필터가 게이트웨이를 다시 부르지 않는다. `GET /routes` 결과를 **메모리 SQLite**
-(`Connection::open_in_memory()`, `src-tauri/src/db.rs`)에 통째로 넣고, 검색어와 chip 은
-SQL 로 처리한다. 예전에는 프런트가 배열을 들고 매 키 입력마다 `JSON.stringify(route)` 를
-훑었다 — 라우트가 수백 건이면 눈에 띄게 느려지고, Import 의 등록 여부 판정은
-(스펙 오퍼레이션 수) × (라우트 수) 번 비교가 된다. uri 를 정규화해 인덱스로 만들면 둘이 같이 풀린다.
+목록 화면은 게이트웨이를 부르지 않는다. `GET /routes` · `GET /consumers` 결과를
+**메모리 SQLite**(`Connection::open_in_memory()`, `src-tauri/src/db.rs`)에 통째로 넣고,
+검색어·chip·컨슈머 필터를 SQL 로 처리한다. 예전에는 프런트가 배열을 들고 매 키 입력마다
+`JSON.stringify(route)` 를 훑었다 — 라우트가 수백 건이면 눈에 띄게 느려지고, Import 의 등록
+여부 판정은 (스펙 오퍼레이션 수) × (라우트 수) 번 비교가 된다. uri 를 정규화해 인덱스로
+만들면 둘이 같이 풀린다.
+
+### 채우기와 읽기를 나눈다
 
 | 커맨드 | 게이트웨이 호출 | 하는 일 |
 |---|---|---|
-| `routes_sync` | O | 전체 재조회 → 캐시 전면 교체 → 첫 조회 결과 반환 |
-| `routes_query` | X | 캐시만 조회 (검색어·chip) |
+| `routes_sync` | O | Route 전체 재조회 → 캐시 전면 교체 (건수만 반환) |
+| `consumers_sync` | O | Consumer 전체 재조회 → 캐시 전면 교체 → 목록 반환 |
+| `routes_query` | X | 캐시 조회 (chip · 검색어 · 컨슈머) |
+| `consumers_cached` | X | 캐시의 Consumer 전체 목록 |
 | `route_cached` | X | 캐시에서 단건 (Import 결과 → 상세 이동) |
+| `consumer_access_counts` | X | 컨슈머별 접근 가능 Route 수 (좌측 패널) |
 
-캐시를 채우는 경로는 `routes_sync` 하나다. 목록 화면 진입, **상단 리프레시 버튼**,
-저장·삭제 직후, 그리고 Import 에서 스펙을 읽는 시점에 호출된다.
-부분 갱신(upsert)을 하지 않는 이유는 게이트웨이에서 삭제된 라우트가 캐시에 남으면
-Import 가 "등록됨"으로 잘못 판정하기 때문이다.
+sync 가 조회 결과를 돌려주지 않는 이유: 조회 축이 셋(chip · 검색어 · 컨슈머)이라 채우기에
+필터를 실어 보내면 호출부마다 세 인자를 끌고 다녀야 한다. 메모리 SQLite 라 왕복 비용이 없으니
+프런트가 sync → query 를 이어 부른다.
 
-**디스크에 남기지 않는다.** 앱을 다시 켜면 캐시는 비어 있고 전체 조회가 유일한 채우기
-경로다. 게이트웨이가 진실의 원천이고 이건 조회 가속용 사본이라, stale 데이터를 들고 있을
-위험을 아예 만들지 않는 편을 택했다.
+캐시를 채우는 경로는 두 가지다.
 
-건수 표기에 주의할 점이 있다. `store.routes` 는 **현재 조회 결과**이므로 배열 길이로
-전체 건수를 세면 검색 중에 숫자가 흔들린다. chip 라벨과 사이드 패널은 캐시가 따로 돌려주는
-`routeCounts`(chip 을 빼고 검색어만 적용한 상태별 건수)를 쓴다.
+- **부트스트랩** (`store.bootstrap`) — 기동, 환경 전환, 상단 새로고침 버튼.
+  Route → Consumer → Service → 접근 권한 집계 네 단계를 순차로 돌며 진행률을 보여준다
+  (`components/BootProgress.tsx`). Tauri 이벤트를 새로 깔지 않고 프런트가 커맨드를 하나씩
+  부르며 단계를 갱신한다.
+- **저장·삭제 직후** (`store.syncTouched`) — 건드린 리소스만 전체 재조회한다.
 
-Consumer 목록은 그대로 배열 필터를 쓴다 (`store.filterConsumers`).
+부분 갱신(upsert)을 하지 않는 이유는 게이트웨이에서 삭제된 항목이 캐시에 남으면 Import 가
+"등록됨"으로 잘못 판정하고, 좌측 패널에 유령 컨슈머가 뜨기 때문이다.
+
+**디스크에 남기지 않는다.** 앱을 다시 켜면 캐시는 비어 있고 기동 시의 전체 조회가 첫
+채우기다. 게이트웨이가 진실의 원천이고 이건 조회 가속용 사본이라, 디스크에 stale 데이터가
+남을 위험은 아예 만들지 않았다. 대신 사본이 얼마나 오래된 것인지를 목록 상단의
+**마지막 동기화 시각**으로 드러낸다 — route·consumer 두 단계가 모두 성공했을 때만 찍는다.
+
+대시보드의 route·consumer KPI 도 캐시에서 센다 (`db::overview_counts`). 그러지 않으면
+대시보드를 열 때마다 같은 전체 목록을 다시 받아 "기동 시 1회 조회"가 무의미해진다.
+version·latency 는 라이브 값이라야 의미가 있어 그대로 호출한다.
+
+### 건수는 세 종류다
+
+`store.routes` 는 **현재 조회 결과**이므로 배열 길이로 전체 건수를 세면 검색 중에 숫자가
+흔들린다. 반영하는 조건이 서로 달라 세 값을 따로 본다.
+
+| 값 | 반영하는 조건 | 쓰는 곳 |
+|---|---|---|
+| `routesTotal` | chip + 검색어 + 컨슈머 | 하단 `총 N건` |
+| `routeCounts` | 검색어 + 컨슈머 (chip 제외) | 상단 chip 라벨 |
+| `access` | **아무것도 반영 안 함** | 좌측 패널 |
+
+좌측 패널이 `routeCounts` 를 쓰면 순환한다 — 컨슈머를 고른 순간 '전체 Route' 행이 그 컨슈머의
+건수를 표시하게 된다. 그래서 패널은 필터를 반영하지 않는 고정 집계(`consumer_access_counts`)를
+본다. 컨슈머를 고르면 chip 숫자는 함께 줄어드는데, 컨슈머는 chip 과 나란한 필터가 아니라
+조회 범위이기 때문이다.
+
+Consumer 목록 화면의 검색·chip 은 건수가 적어 프런트 배열 필터를 그대로 쓴다
+(`store.filterConsumers`). 캐시에서 읽어 온 배열을 필터링하므로 게이트웨이는 부르지 않는다.
+
+---
+
+## 컨슈머 접근 권한 — Route 화면 좌측 패널
+
+좌측 패널은 예전에 전체/활성/비활성이었는데, 같은 조건을 상단 토글 칩이 이미 제공한다.
+그래서 **컨슈머 목록**으로 바꿨다. 컨슈머를 고르면 그 컨슈머가 접근할 수 있는 Route 만 남는다.
+
+판정 규칙은 **교집합**이다 — 컨슈머의 `auth-groups` 중 하나라도 라우트의 `allowed_groups` 에
+있으면 권한이 있다. 두 값 모두 `models::find_groups` 가 이미 정규화해 둔 것을 쓴다
+(비표준 표기까지 훑어 찾은 값이다. 아래 "auth-groups 를 어디에 넣어 뒀든 찾아 읽는다" 참조).
+
+SQL 로는 정션 테이블 두 개의 세미조인이다.
+
+```sql
+EXISTS (SELECT 1 FROM route_groups rg
+          JOIN consumer_groups cg ON cg.env = rg.env AND cg.grp = rg.grp
+         WHERE rg.env = ?1 AND rg.route_id = routes.id AND cg.username = ?3)
+```
+
+- `EXISTS` 는 첫 일치에서 멈추므로 그룹을 둘 이상 공유해도 라우트가 중복으로 나오지 않는다.
+  평범한 `JOIN` 으로 바꾸면 중복이 생긴다 (`tests.rs` 의 `consumer_filter_returns_each_route_once`).
+- 정션 테이블은 PK 와 보조 인덱스를 **둘 다** 둔다. PK 는 `(env, route_id) → grp` 방향(위 조건),
+  보조 인덱스는 `(env, grp) → route_id` 방향(접근 건수 집계)을 탄다.
+- 그룹 비교는 **대소문자를 구분한다.** 게이트웨이가 요청 시점에 하는 비교를 화면이 그대로
+  흉내를 내야 한다 — 화면이 "접근 가능"이라 했는데 실제 호출이 403 이면 화면이 깐깐한 것보다
+  훨씬 나쁘다. `COLLATE NOCASE` 는 ASCII 만 접어서 한글 그룹명에는 효과가 없기도 하다.
+- `allowed_groups` 가 **빈** 라우트는 어떤 컨슈머로도 걸리지 않는다. 화면에서 사라지지 않도록
+  패널이 `그룹 제한 없음 (N)` 행으로 건수를 따로 보여준다.
+
+상단 status chip 과 좌측 패널은 서로 **다른 축**이라 AND 로 겹쳐 적용된다. `store.chip` 하나에
+둘을 담을 수 없어서 `routeConsumer` 를 따로 둔다.
+
+---
+
+## 담당자 — labels 의 name{n} / dept{n}
+
+Consumer 상세의 폼 편집 탭에 담당자 그리드가 있다. 게이트웨이 `labels` 에
+`name1`/`dept1`, `name2`/`dept2`, … 쌍으로 저장돼 있는 값이고, `n` 은 상한이 없으며
+`dept{n}` 없이 `name{n}` 만 있는 경우도 있다.
+
+번호 규칙은 **Rust 한 곳에만** 둔다 (`models::contacts_of` · `set_contacts_at`).
+JSON 탭의 요청 본문에 `labels` 를 넣지 않는 것도 같은 이유다 — 규칙이 두 곳에 있으면 반드시
+어긋난다. (`jsonToForm` 이 `...current` 를 펼치므로 담당자는 JSON 탭을 왕복해도 살아남는다.)
+
+- 읽기: `BTreeMap<usize, _>` 에 모아 **숫자 순**으로 정렬한다. serde_json 이 `preserve_order`
+  없이 빌드돼 `Map` 이 BTreeMap 이라, 키 문자열을 그대로 순회하면 `name1, name10, name2` 순이
+  되어 10번째 담당자가 2번째 앞에 온다.
+- 앞자리 0 은 우리 키로 보지 않는다. `name01` 을 인식하면 재번호 과정에서 `name1` 과 충돌해
+  한쪽이 조용히 사라진다. `name01` · `name0` · `nameX` · 맨 `name` 은 다른 라벨처럼 보존한다.
+- 쓰기: 인식한 키만 지우고 1..N 으로 **조밀하게 재번호**한다. 중간 행을 지우면 뒤가 당겨진다.
+  그래서 아무것도 고치지 않고 저장해도 `name1`/`name3` 은 `name1`/`name2` 가 된다.
+- `name`/`dept` 이외의 labels 키는 손대지 않는다 (`set_groups_at` 이 다른 플러그인을 보존하는
+  것과 같은 규칙).
+- `ConsumerForm.contacts` 는 `Option<Vec<Contact>>` 다. `null` = 기존 labels 를 건드리지 않고,
+  `[]` = 담당자 라벨을 전부 지운다. `Vec<Contact>` + `serde(default)` 로 두면 `api.ts` 에서
+  필드 한 줄을 빠뜨린 순간 게이트웨이의 담당자 라벨이 전부 지워진다 — 빠뜨렸을 때
+  **지워지는 쪽이 아니라 유지되는 쪽**으로 degrade 해야 한다.
+
+### APISIX labels 제약
+
+`apisix/schema_def.lua` 의 `label_value_def` 기준이다.
+
+| 제약 | 값 |
+|---|---|
+| 값 패턴 | `^\S+$` — **공백이 하나라도 있으면 400** |
+| 길이 | 1 ~ 256 **바이트** (Lua 의 `#str`. 한글 약 85자) |
+| 개수 상한 | 없음 |
+
+한글 자체는 문제없다 — `\S` 가 바이트 단위라 한글 바이트는 전부 non-space 다. 순수하게 ASCII
+공백만 걸린다. 그래서 `플랫폼 개발팀` 같은 부서명은 게이트웨이가 거절한다.
+`ConsumerForm::validate()` 가 저장 전에 막고 무엇을 어떻게 고쳐야 하는지 알려 주며, 폼에서도
+공백이 있으면 경고를 띄운다. **자동 치환은 하지 않는다** — `_` 치환은 데이터를 몰래 바꾸는
+것이고, U+00A0 은 패턴을 통과하면서 화면상 공백과 구분이 안 된다.
 
 ---
 

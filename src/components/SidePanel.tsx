@@ -1,17 +1,27 @@
 /**
  * 232px 사이드 패널 — 섹션별 요약 항목(클릭 시 목록 필터) + 하단 ENDPOINT 블록.
- * 디자인의 panelDef / panelChipKeys 규칙을 그대로 따른다.
+ *
+ * Route 섹션의 패널은 **컨슈머 접근** 목록이다. 상태(전체/활성/비활성)는 상단 토글 칩이
+ * 이미 제공하므로 여기서 되풀이하지 않고, 대신 "이 컨슈머가 쓸 수 있는 API" 를 고르게 한다.
+ * 판정은 컨슈머의 auth-groups 와 라우트의 allowed_groups 교집합이고 SQLite 조인으로 푼다.
  */
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { consumerGroupBuckets, useStore } from "../store";
+
+/** 컨슈머가 이보다 많으면 패널 안에 찾기 입력칸을 띄운다. 수백 행은 스크롤로 감당이 안 된다. */
+const FILTER_THRESHOLD = 12;
 
 interface Row {
   label: string;
   count: string | number;
   /** 클릭 시 적용할 chip 필터. null 이면 클릭 불가 항목. */
   chip: string | null;
+  /** Route 섹션 전용 — 클릭 시 선택할 컨슈머 (null = 필터 해제) */
+  consumer?: string | null;
+  /** 접근 가능한 라우트가 0건인 컨슈머는 흐리게 */
+  dim?: boolean;
 }
 
 export default function SidePanel() {
@@ -19,29 +29,53 @@ export default function SidePanel() {
   const env = useStore((s) => s.env);
   const chip = useStore((s) => s.chip);
   const view = useStore((s) => s.view);
-  // Route 는 목록 배열이 아니라 캐시가 돌려준 건수를 쓴다 — 배열은 필터된 결과라
-  // 여기서 세면 검색 중에 숫자가 흔들린다 (store.ts 모듈 주석 참조).
-  const routeCounts = useStore((s) => s.routeCounts);
+  const routeConsumer = useStore((s) => s.routeConsumer);
+  // 패널 숫자는 캐시가 따로 돌려준 고정 집계다 — routeCounts 를 쓰면 컨슈머를 고른 순간
+  // '전체' 행이 그 컨슈머의 건수를 표시하게 되어 순환한다 (store.ts 모듈 주석 참조).
+  const access = useStore((s) => s.access);
   const consumers = useStore((s) => s.consumers);
   const dash = useStore((s) => s.dash);
   const settings = useStore((s) => s.settings);
   const setChip = useStore((s) => s.setChip);
+  const setRouteConsumer = useStore((s) => s.setRouteConsumer);
+
+  const [needle, setNeedle] = useState("");
+
+  const isRoutes = section === "routes";
 
   const { title, rows } = useMemo<{ title: string; rows: Row[] }>(() => {
     switch (section) {
-      case "routes":
+      case "routes": {
+        const counts = new Map(access?.items.map((i) => [i.username, i.count]));
+        const n = needle.trim().toLowerCase();
+        const list = consumers
+          .filter((c) => !n || c.username.toLowerCase().includes(n))
+          .map((c) => ({ username: c.username, count: counts.get(c.username) ?? 0 }))
+          // 많이 쓰는 컨슈머를 위로, 같으면 이름순 (consumerGroupBuckets 와 같은 관례)
+          .sort((a, b) => b.count - a.count || a.username.localeCompare(b.username));
+
         return {
-          title: "ROUTES",
+          title: "CONSUMER 접근",
           rows: [
-            { label: "전체", count: routeCounts.all, chip: "all" },
-            { label: "활성 (status 1)", count: routeCounts.on, chip: "on" },
-            { label: "비활성 (status 0)", count: routeCounts.off, chip: "off" },
+            { label: "전체 Route", count: access?.all ?? 0, chip: null, consumer: null },
+            ...list.map((c) => ({
+              label: c.username,
+              count: c.count,
+              chip: null,
+              consumer: c.username,
+              dim: c.count === 0,
+            })),
+            // 어떤 컨슈머로도 걸리지 않는 라우트를 화면에서 사라지게 두지 않는다.
+            ...(access && access.ungrouped > 0
+              ? [{ label: "그룹 제한 없음", count: access.ungrouped, chip: null }]
+              : []),
           ],
         };
+      }
       case "consumers":
         // 고정 구분(제휴사/내부 시스템) 대신, 실제 데이터에 존재하는 auth-groups 값으로 나눈다.
         return {
-          title: "AUTH-GROUPS",
+          title: "권한그룹",
           rows: [
             { label: "전체", count: consumers.length, chip: "all" },
             ...consumerGroupBuckets(consumers).map((b) => ({
@@ -71,7 +105,7 @@ export default function SidePanel() {
           ],
         };
     }
-  }, [section, routeCounts, consumers, settings, dash]);
+  }, [section, access, consumers, settings, dash, needle]);
 
   const cfg = settings?.[env];
   const hasToken = !!cfg?.hasToken;
@@ -101,14 +135,40 @@ export default function SidePanel() {
         {title}
       </div>
 
+      {isRoutes && consumers.length > FILTER_THRESHOLD && (
+        <input
+          className="text-input"
+          value={needle}
+          onChange={(e) => setNeedle(e.target.value)}
+          placeholder="consumer 찾기"
+          style={{ height: 30, fontSize: 12, margin: "0 4px 8px", width: "calc(100% - 8px)" }}
+        />
+      )}
+
       {rows.map((p, i) => {
-        const on = p.chip ? chip === p.chip && view === "list" : i === 0;
+        // Route 섹션은 컨슈머 축, 나머지는 chip 축으로 선택 상태를 판단한다.
+        const on = isRoutes
+          ? p.consumer !== undefined && view === "list" && routeConsumer === p.consumer
+          : p.chip
+            ? chip === p.chip && view === "list"
+            : i === 0;
+        const clickable = isRoutes ? p.consumer !== undefined : !!p.chip;
+
         return (
           <div
             key={p.label}
             className={"lnb-item" + (on ? " on" : "")}
-            onClick={() => p.chip && setChip(p.chip)}
-            style={p.chip ? undefined : { cursor: "default" }}
+            onClick={() => {
+              if (isRoutes) {
+                if (p.consumer !== undefined) setRouteConsumer(p.consumer);
+              } else if (p.chip) {
+                setChip(p.chip);
+              }
+            }}
+            style={{
+              ...(clickable ? undefined : { cursor: "default" }),
+              ...(p.dim && !on ? { opacity: 0.6 } : undefined),
+            }}
           >
             <span
               style={{
@@ -125,6 +185,12 @@ export default function SidePanel() {
           </div>
         );
       })}
+
+      {isRoutes && consumers.length === 0 && (
+        <div className="text-xs muted" style={{ padding: "8px 10px" }}>
+          등록된 Consumer 가 없습니다.
+        </div>
+      )}
 
       <div style={{ flex: 1, minHeight: 16 }} />
 

@@ -1,6 +1,7 @@
-/** Consumer 폼 탭 — username / desc / jwt-auth.key / jwt-auth.secret + auth-groups. */
+/** Consumer 폼 탭 — username / desc / jwt-auth.key / jwt-auth.secret + 담당자 + 권한그룹. */
 
 import { useStore } from "../../store";
+import ContactsCard from "./ContactsCard";
 import GroupsCard from "./GroupsCard";
 
 const Req = () => <span style={{ color: "var(--red-600)" }}>*</span>;
@@ -94,6 +95,8 @@ export default function ConsumerForm() {
         </div>
       </div>
 
+      {/* 담당자는 계정 메타데이터, 권한그룹은 인가 — 인가를 뒤에 둔다. */}
+      <ContactsCard />
       <GroupsCard />
     </div>
   );

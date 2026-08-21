@@ -5,12 +5,20 @@
  * zustand 스토어로 거의 1:1 대응된다. 필드 이름과 화면 전환 규칙은 원본을 따랐고,
  * 목업 데이터가 있던 자리는 Rust 커맨드 호출로 바뀌었다.
  *
- * # Route 목록은 내장 SQLite 를 거친다
+ * # 목록은 전부 내장 SQLite 캐시를 거친다
  *
- * `routes` 는 "전체 목록"이 아니라 **현재 조회 결과**다. 검색어·chip 이 바뀌면 배열을
- * 다시 필터링하는 대신 `routes_query` 로 캐시를 다시 조회한다. 그래서 전체 건수는
- * `routesTotal` · `routeCounts` 를 따로 봐야 한다 (사이드 패널과 chip 라벨이 이걸 쓴다).
- * 캐시를 채우는 경로는 `routes_sync` 하나뿐이다 — 화면 진입과 리프레시 버튼.
+ * 게이트웨이 전체 조회는 **부트스트랩**(기동 · 환경 전환 · 상단 새로고침 버튼)과 저장·삭제
+ * 직후의 재동기화에서만 일어난다. 섹션을 오가는 것만으로는 게이트웨이를 부르지 않는다
+ * (대시보드는 예외 — version·latency 가 라이브 값이라야 의미가 있다).
+ *
+ * `routes` 는 "전체 목록"이 아니라 **현재 조회 결과**다. 그래서 건수는 세 종류를 따로 본다:
+ *
+ *   - `routesTotal`  — chip · 검색어 · 컨슈머를 모두 적용 → 하단 '총 N건'
+ *   - `routeCounts`  — chip 만 뺀 건수                    → 상단 chip 라벨
+ *   - `access`       — 아무것도 적용하지 않은 고정값       → 좌측 패널
+ *
+ * 좌측 패널이 `routeCounts` 를 쓰면 순환한다 — 컨슈머를 고른 순간 '전체' 행이 그 컨슈머의
+ * 건수를 표시하게 된다. 그래서 패널은 `access` 를 본다.
  */
 
 import { create } from "zustand";
@@ -24,8 +32,10 @@ import {
   emptyRouteForm,
   routeFormFromOas,
   routeToForm,
+  type AccessCounts,
   type AppError,
   type CompareRow,
+  type Contact,
   type ConsumerView,
   type DashboardPayload,
   type EnvKey,
@@ -48,6 +58,8 @@ import {
 
 const NO_COUNTS: RouteCounts = { all: 0, on: 0, off: 0 };
 
+export type BootVariant = "overlay" | "bar";
+
 interface AppState {
   // ── 내비게이션 ──
   env: EnvKey;
@@ -55,7 +67,14 @@ interface AppState {
   view: View;
   selId: string | null;
   tab: Tab;
+  /** 상단 status chip 축 (all / on / off). 좌측 패널의 컨슈머 축과 독립이다. */
   chip: string;
+  /**
+   * 좌측 패널의 컨슈머 축. null = 필터 없음.
+   *
+   * `chip` 과 한 슬롯을 공유할 수 없다 — 두 조건은 AND 로 **동시에** 켜져야 한다.
+   */
+  routeConsumer: string | null;
   q: string;
 
   // ── 편집 ──
@@ -72,10 +91,12 @@ interface AppState {
   settings: SettingsView | null;
   /** 현재 조회 결과. 전체 목록이 아니다 — 위 모듈 주석 참조. */
   routes: RouteView[];
-  /** 검색어·chip 을 적용한 건수 */
+  /** chip · 검색어 · 컨슈머를 모두 적용한 건수 */
   routesTotal: number;
-  /** chip 을 빼고 검색어만 적용한 상태별 건수 (chip 라벨·사이드 패널) */
+  /** chip 만 뺀 상태별 건수 (상단 chip 라벨) */
   routeCounts: RouteCounts;
+  /** 좌측 패널용 고정 집계. 필터를 아무것도 반영하지 않는다. */
+  access: AccessCounts | null;
   consumers: ConsumerView[];
   services: ServiceOption[];
   dash: DashboardPayload | null;
@@ -102,16 +123,35 @@ interface AppState {
   /** Win32 쪽에서 알려주는 최대화 버튼 hover 상태 (Snap Layouts) */
   maxHover: boolean;
 
+  // ── 부트스트랩 ──
+  booting: boolean;
+  /** `overlay` = 기동·환경 전환(가릴 것이 없다), `bar` = 새로고침 버튼(목록을 가리면 안 된다) */
+  bootVariant: BootVariant;
+  bootStep: number;
+  bootTotal: number;
+  bootLabel: string;
+  /** 환경별 마지막 동기화 시각. route·consumer 단계가 **모두** 성공했을 때만 찍는다. */
+  syncedAt: Record<EnvKey, number | null>;
+
   // ── 액션 ──
-  init: () => Promise<void>;
+  /** 로컬 설정만 읽는다 (네트워크 없음). 잠금 여부가 정해져야 첫 화면이 정확하다. */
+  loadSettings: () => Promise<void>;
+  /** 게이트웨이 전체 조회 → 캐시 갱신. 기동 · 환경 전환 · 새로고침 버튼이 부른다. */
+  bootstrap: (variant?: BootVariant) => Promise<void>;
   setEnv: (env: EnvKey) => void;
   go: (section: Section) => void;
   setChip: (chip: string) => void;
+  setRouteConsumer: (username: string | null) => void;
   setQ: (q: string) => void;
+  /** 대시보드·설정 화면만 게이트웨이를 다시 본다 (목록은 캐시가 진실의 사본이다) */
   refresh: () => Promise<void>;
   /** 캐시만 다시 조회한다 (게이트웨이 호출 없음) */
   queryRoutes: () => Promise<void>;
-  /** 상단 리프레시 버튼 — 게이트웨이 전체 재조회 + 캐시 갱신 */
+  /** Consumer 목록을 캐시에서 읽는다 (게이트웨이 호출 없음) */
+  loadConsumers: () => Promise<void>;
+  /** 좌측 패널 집계만 다시 센다 (게이트웨이 호출 없음) */
+  refreshAccess: () => Promise<void>;
+  /** 상단 리프레시 버튼 — `bootstrap("bar")` */
   hardRefresh: () => Promise<void>;
 
   openItem: (id: string) => void;
@@ -140,9 +180,14 @@ interface AppState {
   patchForm: (patch: Partial<Record<string, unknown>>) => void;
   toggleMethod: (m: string) => void;
   setGroupDraft: (v: string) => void;
-  addGroup: () => void;
+  /** 값을 넘기지 않으면 `groupDraft` 를 쓴다 (콤보박스에서 마우스로 고른 경우는 값을 넘긴다) */
+  addGroup: (value?: string) => void;
   removeGroup: (i: number) => void;
   makeSecret: () => Promise<void>;
+
+  addContact: () => void;
+  patchContact: (i: number, patch: Partial<Contact>) => void;
+  removeContact: (i: number) => void;
 
   setJsonDraft: (v: string) => void;
   applyJson: () => void;
@@ -150,6 +195,8 @@ interface AppState {
 
   save: () => Promise<void>;
   remove: () => Promise<void>;
+  /** 저장·삭제 직후 건드린 리소스만 게이트웨이에서 다시 받아 캐시를 맞춘다 */
+  syncTouched: (kind: Kind) => Promise<void>;
 
   signJwt: () => Promise<void>;
   copyJwt: () => Promise<void>;
@@ -171,6 +218,12 @@ let prefixTimer: ReturnType<typeof setTimeout> | undefined;
  */
 let queryToken = 0;
 
+/**
+ * 같은 이유의 부트스트랩용 토큰. 개발/운영 세그먼트를 빠르게 두 번 누르면 4단계가 겹쳐
+ * dev 의 결과가 prod 상태에 얹힌다.
+ */
+let bootToken = 0;
+
 /** 검색어 입력의 디바운스 — 한 글자마다 IPC 를 왕복하지 않게 한다. */
 const SEARCH_DEBOUNCE_MS = 150;
 
@@ -189,6 +242,39 @@ const IMPORT_RESET = {
   importReturn: false,
 };
 
+/**
+ * 목록 화면으로 되돌릴 때의 공통 초기화.
+ *
+ * `go` 와 `newRouteFromDash` 에 같은 블록이 복붙돼 있었다. 축이 하나 늘 때마다 두 곳 중
+ * 한 곳만 고치는 사고가 나므로 묶어 둔다. (`setEnv` 는 이것의 상위집합이다.)
+ */
+const LIST_RESET = {
+  view: "list" as View,
+  selId: null,
+  tab: "form" as Tab,
+  chip: "all",
+  routeConsumer: null as string | null,
+  q: "",
+  jsonErr: "",
+  jsonOk: "",
+  form: null,
+  jwt: null,
+  error: null,
+  ...IMPORT_RESET,
+};
+
+/**
+ * 라우트 조회의 세 축을 한 곳에서 만든다.
+ *
+ * 조회하는 곳이 여럿(`queryRoutes` · `syncTouched` · `loadOas`)인데 각자 `get()` 에서 필드를
+ * 꺼내면 축이 하나 늘 때 어긋난다. 컨슈머는 username 을 그대로 넘긴다 — 캐시에 없는
+ * username 이면 SQL 이 0건으로 답하므로, "필터가 조용히 풀려 전체가 보이는" 쪽보다
+ * 안전한 방향으로 실패한다.
+ */
+function routeFilter(s: AppState): { chip: string; q: string; consumer: string | null } {
+  return { chip: s.chip, q: s.q, consumer: s.routeConsumer };
+}
+
 export const useStore = create<AppState>((set, get) => ({
   env: "dev",
   section: "dash",
@@ -196,6 +282,7 @@ export const useStore = create<AppState>((set, get) => ({
   selId: null,
   tab: "form",
   chip: "all",
+  routeConsumer: null,
   q: "",
 
   form: null,
@@ -210,6 +297,7 @@ export const useStore = create<AppState>((set, get) => ({
   routes: [],
   routesTotal: 0,
   routeCounts: NO_COUNTS,
+  access: null,
   consumers: [],
   services: [],
   dash: null,
@@ -231,64 +319,161 @@ export const useStore = create<AppState>((set, get) => ({
   error: null,
   maxHover: false,
 
+  booting: false,
+  bootVariant: "overlay",
+  bootStep: 0,
+  bootTotal: 0,
+  bootLabel: "",
+  syncedAt: { dev: null, prod: null },
+
   // ── 초기화 ────────────────────────────────────────────────
-  async init() {
+  async loadSettings() {
     try {
-      const settings = await api.settingsGet();
-      set({ settings });
+      set({ settings: await api.settingsGet() });
     } catch (e) {
+      // 여기서 throw 하면 App.tsx 가 창을 띄우지도, 부트스트랩을 돌리지도 못한다.
       set({ error: api.toAppError(e) });
     }
-    await get().refresh();
+  },
+
+  /**
+   * 게이트웨이 전체 조회 → 캐시 갱신. 단계별로 진행률을 갱신한다.
+   *
+   * 단계를 배열로 두는 이유: `bootTotal` 을 손으로 관리하면 단계가 하나 늘 때 반드시 어긋난다.
+   * 단계별 실패는 흡수하고 계속 간다(첫 에러만 남긴다) — services 를 못 받았다고 목록까지
+   * 못 볼 이유는 없다. 다만 `syncedAt` 은 route·consumer 가 **모두** 성공했을 때만 찍는다.
+   */
+  async bootstrap(variant = "overlay") {
+    const { env, settings } = get();
+    // 토큰이 없는 환경은 잠금 화면이 뜨므로 호출하지 않는다. 에러도 세우지 않는다.
+    if (!settings?.[env]?.hasToken) return;
+
+    const token = ++bootToken;
+    let firstError: AppError | null = null;
+    let routesOk = false;
+    let consumersOk = false;
+
+    const steps: Array<[string, () => Promise<void>]> = [
+      [
+        "Route 목록 조회",
+        async () => {
+          await api.routesSync(env);
+          routesOk = true;
+        },
+      ],
+      [
+        "Consumer 목록 조회",
+        async () => {
+          set({ consumers: await api.consumersSync(env) });
+          consumersOk = true;
+        },
+      ],
+      [
+        "Service 목록 조회",
+        async () => {
+          set({ services: await api.servicesList(env) });
+        },
+      ],
+      [
+        "접근 권한 집계",
+        async () => {
+          set({ access: await api.consumerAccessCounts(env) });
+        },
+      ],
+    ];
+
+    set({
+      booting: true,
+      bootVariant: variant,
+      bootStep: 0,
+      bootTotal: steps.length,
+      bootLabel: steps[0][0],
+      error: null,
+    });
+
+    try {
+      for (let i = 0; i < steps.length; i += 1) {
+        const [label, run] = steps[i];
+        if (token !== bootToken) return; // 더 최신 부트스트랩이 시작됐다 — 이 결과는 버린다
+        set({ bootStep: i, bootLabel: label });
+        try {
+          await run();
+        } catch (e) {
+          firstError = firstError ?? api.toAppError(e);
+        }
+      }
+      if (token !== bootToken) return;
+
+      set({
+        bootStep: steps.length,
+        ...(routesOk && consumersOk
+          ? { syncedAt: { ...get().syncedAt, [env]: Date.now() } }
+          : {}),
+      });
+
+      // 게이트웨이에서 사라진 컨슈머로 필터가 걸려 있으면 풀어 준다.
+      const { routeConsumer, consumers } = get();
+      if (routeConsumer && !consumers.some((c) => c.username === routeConsumer)) {
+        set({ routeConsumer: null });
+      }
+      // 서비스 기본값 — 아직 고르지 않았다면 첫 항목.
+      set({ importService: get().importService || get().services[0]?.id || "" });
+
+      // queryRoutes 가 성공하면 error 를 null 로 밀어 버리므로, 단계 에러는 그 **뒤에** 세운다.
+      // (Consumer 조회만 실패했을 때 빈 패널이 아무 설명 없이 남는 것을 막는다.)
+      await get().queryRoutes();
+      if (token === bootToken && firstError) set({ error: firstError });
+    } finally {
+      if (token === bootToken) set({ booting: false });
+    }
   },
 
   setEnv(env) {
     if (get().env === env) return;
-    // 환경이 바뀌면 다른 게이트웨이이므로 캐시된 목록을 모두 버린다.
+    // 환경이 바뀌면 다른 게이트웨이다 — 캐시에서 읽어 온 것을 모두 버린다.
+    // username 은 환경 스코프라 routeConsumer 도 같이 지운다.
     set({
       env,
-      view: "list",
-      selId: null,
-      chip: "all",
-      q: "",
-      form: null,
-      jwt: null,
+      ...LIST_RESET,
       routes: [],
       routesTotal: 0,
       routeCounts: NO_COUNTS,
+      access: null,
       consumers: [],
       services: [],
       dash: null,
-      error: null,
       importService: "",
       importPrefix: "",
-      ...IMPORT_RESET,
     });
-    void get().refresh();
+    void (async () => {
+      await get().bootstrap();
+      if (get().section === "dash") await get().refresh();
+    })();
   },
 
   go(section) {
-    set({
-      section,
-      view: "list",
-      selId: null,
-      tab: "form",
-      chip: "all",
-      q: "",
-      jsonErr: "",
-      jsonOk: "",
-      form: null,
-      jwt: null,
-      error: null,
-      ...IMPORT_RESET,
-    });
-    void get().refresh();
+    set({ section, ...LIST_RESET });
+    // 목록은 캐시만 본다. 대시보드는 version·latency 가 라이브라야 의미가 있어 예외다.
+    if (section === "routes") {
+      void get().queryRoutes();
+    } else if (section === "consumers") {
+      void get().loadConsumers();
+    } else {
+      void get().refresh();
+    }
   },
 
   setChip(chip) {
     set({ chip, view: "list", selId: null });
     // Route 는 캐시(SQLite)로 필터링한다. Consumer 는 배열 필터를 그대로 쓴다.
     if (get().section === "routes") void get().queryRoutes();
+  },
+
+  setRouteConsumer(username) {
+    // 같은 행을 다시 누르면 해제 — 패널에 별도 '해제' 버튼을 두지 않기 위해서다.
+    const next = get().routeConsumer === username ? null : username;
+    set({ routeConsumer: next, view: "list", selId: null });
+    void get().queryRoutes();
   },
 
   setQ(q) {
@@ -298,8 +483,15 @@ export const useStore = create<AppState>((set, get) => ({
     searchTimer = setTimeout(() => void get().queryRoutes(), SEARCH_DEBOUNCE_MS);
   },
 
+  /**
+   * 게이트웨이를 다시 보는 화면만 여기서 처리한다.
+   *
+   * 목록(routes · consumers)은 캐시가 진실의 사본이므로 섹션 진입만으로 게이트웨이를 부르지
+   * 않는다. 대시보드는 version·latency 가 라이브라야 의미가 있어 예외다 — 다만 route·consumer
+   * 건수는 Rust 쪽에서 캐시로 세므로 전체 목록을 다시 받지는 않는다.
+   */
   async refresh() {
-    const { env, section, settings, chip, q } = get();
+    const { env, section, settings } = get();
 
     if (section === "settings") {
       try {
@@ -309,32 +501,14 @@ export const useStore = create<AppState>((set, get) => ({
       }
       return;
     }
+    if (section !== "dash") return;
 
     // 토큰이 없는 환경은 잠금 화면이 뜨므로 호출하지 않는다.
-    const cfg = settings?.[env];
-    if (!cfg?.hasToken) return;
+    if (!settings?.[env]?.hasToken) return;
 
     set({ loading: true, error: null });
     try {
-      if (section === "routes") {
-        // service_id 셀렉트를 채우려면 services 도 필요하다.
-        const [page, services] = await Promise.all([
-          api.routesSync(env, chip, q),
-          api.servicesList(env).catch(() => [] as ServiceOption[]),
-        ]);
-        set({
-          routes: page.items,
-          routesTotal: page.total,
-          routeCounts: page.counts,
-          services,
-          // Import 화면의 service 기본값 — 아직 고르지 않았다면 첫 항목.
-          importService: get().importService || services[0]?.id || "",
-        });
-      } else if (section === "consumers") {
-        set({ consumers: await api.consumersList(env) });
-      } else {
-        set({ dash: await api.dashboard(env) });
-      }
+      set({ dash: await api.dashboard(env) });
     } catch (e) {
       set({ error: api.toAppError(e) });
     } finally {
@@ -343,12 +517,13 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   async queryRoutes() {
-    const { env, chip, q, settings } = get();
+    const { env, settings } = get();
     if (!settings?.[env]?.hasToken) return;
+    const { chip, q, consumer } = routeFilter(get());
 
     const token = ++queryToken;
     try {
-      const page = await api.routesQuery(env, chip, q);
+      const page = await api.routesQuery(env, chip, q, consumer);
       // 더 최신 요청이 이미 나갔으면 이 응답은 버린다.
       if (token !== queryToken) return;
       set({ routes: page.items, routesTotal: page.total, routeCounts: page.counts, error: null });
@@ -358,27 +533,46 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  async loadConsumers() {
+    const { env, settings } = get();
+    if (!settings?.[env]?.hasToken) return;
+    try {
+      set({ consumers: await api.consumersCached(env), error: null });
+    } catch (e) {
+      set({ error: api.toAppError(e) });
+    }
+  },
+
+  /**
+   * Route 를 고쳐도 패널 숫자가 바뀌므로 저장·삭제 양쪽에서 부른다.
+   *
+   * 실패해도 목록 자체는 멀쩡하니 에러를 세우지 않는다 — 패널 숫자가 잠시 낡을 뿐이다.
+   */
+  async refreshAccess() {
+    const { env, settings } = get();
+    if (!settings?.[env]?.hasToken) return;
+    try {
+      set({ access: await api.consumerAccessCounts(env) });
+    } catch {
+      /* 무시 */
+    }
+  },
+
   async hardRefresh() {
-    const { env, section, settings } = get();
-    if (section !== "routes") {
-      await get().refresh();
+    const before = get().syncedAt[get().env];
+    await get().bootstrap("bar");
+
+    const { env, error, syncedAt, access, consumers } = get();
+    if (error) {
+      get().flash(error.message);
       return;
     }
-    if (!settings?.[env]?.hasToken) return;
-
-    set({ loading: true, error: null });
-    try {
-      const { chip, q } = get();
-      const page = await api.routesSync(env, chip, q);
-      set({ routes: page.items, routesTotal: page.total, routeCounts: page.counts });
-      get().flash(`Route 목록을 갱신했습니다. (${page.counts.all}건)`);
-    } catch (e) {
-      const err = api.toAppError(e);
-      set({ error: err });
-      get().flash(err.message);
-    } finally {
-      set({ loading: false });
-    }
+    // 토큰이 없어 bootstrap 이 조용히 반환한 경우는 토스트도 띄우지 않는다.
+    if (syncedAt[env] === before) return;
+    get().flash(
+      `게이트웨이와 동기화했습니다. (Route ${access?.all ?? 0}건 · Consumer ${consumers.length}건)`,
+    );
+    if (get().section === "dash") await get().refresh();
   },
 
   // ── 목록 → 상세 ───────────────────────────────────────────
@@ -458,20 +652,14 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   async newRouteFromDash() {
-    set({
-      section: "routes",
-      view: "list",
-      selId: null,
-      tab: "form",
-      chip: "all",
-      q: "",
-      form: null,
-      jwt: null,
-      error: null,
-      ...IMPORT_RESET,
-    });
+    set({ section: "routes", ...LIST_RESET });
     // services 가 채워져야 service_id 셀렉트의 기본값을 정할 수 있다.
-    await get().refresh();
+    // 부트스트랩이 이미 채웠으면 다시 부르지 않는다 (실패했을 때만 한 번 더 시도한다).
+    if (get().services.length === 0) {
+      const { env } = get();
+      set({ services: await api.servicesList(env).catch(() => [] as ServiceOption[]) });
+    }
+    void get().queryRoutes();
     get().newItem();
   },
 
@@ -528,17 +716,13 @@ export const useStore = create<AppState>((set, get) => ({
 
       // 판정의 근거가 캐시이므로 여기서 한 번 갱신한다. 게이트웨이에서 이미 지워진 라우트를
       // '등록' 으로 보여 주면 이 화면의 존재 이유가 없어지므로, 실패하면 비교하지 않는다.
-      const { chip, q } = get();
-      const page = await api.routesSync(env, chip, q);
+      await api.routesSync(env);
 
       set({
         importDoc: doc,
         importPrefix: doc.serverPrefix,
         importChip: "all",
         importQ: "",
-        routes: page.items,
-        routesTotal: page.total,
-        routeCounts: page.counts,
       });
     } catch (e) {
       set({ importError: api.toAppError(e) });
@@ -546,6 +730,9 @@ export const useStore = create<AppState>((set, get) => ({
     } finally {
       set({ importBusy: false });
     }
+    // 캐시가 바뀌었으니 목록과 패널 숫자도 맞춰 둔다.
+    await get().queryRoutes();
+    await get().refreshAccess();
     await get().runCompare();
   },
 
@@ -631,10 +818,11 @@ export const useStore = create<AppState>((set, get) => ({
     set({ groupDraft: v });
   },
 
-  addGroup() {
+  addGroup(value) {
     const { form, groupDraft } = get();
     if (!form) return;
-    const v = groupDraft.trim();
+    // 콤보박스에서 마우스로 고른 값은 입력칸을 거치지 않으므로 인자로 받는다.
+    const v = (value ?? groupDraft).trim();
     if (!v) return;
     if (form.groups.includes(v)) {
       set({ groupDraft: "" });
@@ -648,6 +836,31 @@ export const useStore = create<AppState>((set, get) => ({
     const { form } = get();
     if (!form) return;
     get().patchForm({ groups: form.groups.filter((_, j) => j !== i) });
+  },
+
+  // ── 담당자 (labels · name{n}/dept{n}) ─────────────────────
+  //
+  // 세 액션 모두 patchForm 을 거친다. set({ form }) 으로 우회하면 JSON 탭의 jsonDraft 가
+  // 조용히 어긋난다 (patchForm 주석 참조).
+
+  addContact() {
+    const { form } = get();
+    if (!form || form.kind !== "consumer") return;
+    get().patchForm({ contacts: [...form.contacts, { name: "", dept: "" }] });
+  },
+
+  patchContact(i, patch) {
+    const { form } = get();
+    if (!form || form.kind !== "consumer") return;
+    get().patchForm({
+      contacts: form.contacts.map((c, j) => (j === i ? { ...c, ...patch } : c)),
+    });
+  },
+
+  removeContact(i) {
+    const { form } = get();
+    if (!form || form.kind !== "consumer") return;
+    get().patchForm({ contacts: form.contacts.filter((_, j) => j !== i) });
   },
 
   async makeSecret() {
@@ -723,7 +936,7 @@ export const useStore = create<AppState>((set, get) => ({
         importReturn: false,
       });
       // 캐시를 갱신한 뒤 비교를 다시 돌리면 방금 만든 API 가 '등록' 으로 바뀐다.
-      await get().refresh();
+      await get().syncTouched(form.kind);
       if (backToImport) await get().runCompare();
     } catch (e) {
       const err = api.toAppError(e);
@@ -747,13 +960,44 @@ export const useStore = create<AppState>((set, get) => ({
       }
       get().flash("삭제되었습니다.");
       set({ view: "list", selId: null, form: null, jwt: null, importReturn: false });
-      await get().refresh();
+      // 필터로 걸어 둔 컨슈머를 지웠으면 유령 조건이 남지 않게 풀어 준다.
+      if (form.kind === "consumer" && get().routeConsumer === form.username) {
+        set({ routeConsumer: null });
+      }
+      await get().syncTouched(form.kind);
     } catch (e) {
       const err = api.toAppError(e);
       set({ error: err });
       get().flash(err.message);
     } finally {
       set({ saving: false });
+    }
+  },
+
+  /**
+   * 저장·삭제 직후의 재동기화.
+   *
+   * 전체 부트스트랩을 다시 돌리지 않는 이유는 명백하지만, **건드린 리소스는 반드시 전체를
+   * 다시 받아야 한다** — 부분 갱신을 하면 게이트웨이에서 지워진 항목이 캐시에 남는다
+   * (db.rs 의 sync_routes 주석). 접근 집계는 route 를 고쳐도 바뀌므로 양쪽에서 다시 센다.
+   */
+  async syncTouched(kind) {
+    const { env, settings } = get();
+    if (!settings?.[env]?.hasToken) return;
+
+    set({ loading: true });
+    try {
+      if (kind === "consumer") {
+        set({ consumers: await api.consumersSync(env) });
+      } else {
+        await api.routesSync(env);
+      }
+      await get().queryRoutes();
+      await get().refreshAccess();
+    } catch (e) {
+      set({ error: api.toAppError(e) });
+    } finally {
+      set({ loading: false });
     }
   },
 
@@ -789,6 +1033,10 @@ export const useStore = create<AppState>((set, get) => ({
       const settings = await api.settingsSave(env, payload);
       set({ settings, error: null });
       get().flash(`${env === "dev" ? "개발" : "운영"} 서버 설정이 저장되었습니다.`);
+      // 섹션 진입이 더 이상 게이트웨이를 부르지 않으므로, 토큰이 방금 생겼다면 여기서
+      // 캐시를 채워 줘야 한다. 안 그러면 사용자는 새로고침 아이콘을 찾아낼 때까지
+      // 빈 목록만 보게 된다.
+      if (env === get().env && settings[env].hasToken) void get().bootstrap();
       return true;
     } catch (e) {
       const err = api.toAppError(e);

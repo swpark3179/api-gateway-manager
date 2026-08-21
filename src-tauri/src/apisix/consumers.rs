@@ -10,7 +10,10 @@ use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Wry};
 
 use super::client;
-use super::models::{extract_list, extract_one, set_groups_at, ConsumerView, GroupsLocation};
+use super::models::{
+    check_label_value, extract_list, extract_one, set_contacts_at, set_groups_at, Contact,
+    ConsumerView, GroupsLocation,
+};
 use crate::config::Env;
 use crate::error::{AppError, AppResult, ErrorKind};
 use crate::history;
@@ -31,6 +34,14 @@ pub struct ConsumerForm {
     /// 조회 때 auth-groups 가 실제로 있던 자리. 없으면 기본(jwt-auth/auth-groups).
     #[serde(default)]
     pub groups_location: Option<GroupsLocation>,
+    /// labels 의 담당자 목록.
+    ///
+    /// `null` = 기존 labels 를 건드리지 않는다, `[]` = 담당자 라벨을 전부 지운다.
+    /// `commands::EnvPayload.token` 과 같은 관례다. **`Vec<Contact>` 로 두면 안 된다** —
+    /// `api.ts` 의 `consumerSave` 는 필드를 하나씩 나열하는 객체 리터럴이라, 한 줄을 빠뜨리면
+    /// `#[serde(default)]` 가 빈 배열을 만들어 게이트웨이의 담당자 라벨을 전부 지운다.
+    #[serde(default)]
+    pub contacts: Option<Vec<Contact>>,
 }
 
 impl ConsumerForm {
@@ -54,6 +65,16 @@ impl ConsumerForm {
         }
         if self.secret.trim().is_empty() {
             return Err(AppError::config("jwt-auth.secret 은 필수입니다."));
+        }
+        // 담당자는 labels 로 저장되므로 APISIX 의 label 값 제약을 받는다.
+        for (i, c) in self.contacts.iter().flatten().enumerate() {
+            let no = i + 1;
+            if !c.name.trim().is_empty() {
+                check_label_value(&format!("{no}행 성명"), c.name.trim())?;
+            }
+            if !c.dept.trim().is_empty() {
+                check_label_value(&format!("{no}행 부서"), c.dept.trim())?;
+            }
         }
         Ok(())
     }
@@ -115,7 +136,11 @@ pub async fn save(app: &AppHandle<Wry>, env: Env, form: ConsumerForm) -> AppResu
         if form.is_new {
             format!("컨슈머 신규 등록 · jwt-auth key {}", form.key.trim())
         } else {
-            format!("컨슈머 수정 · auth-groups {}건", form.groups.len())
+            format!(
+                "컨슈머 수정 · 권한그룹 {}건 · 담당자 {}건",
+                form.groups.len(),
+                form.contacts.as_ref().map(Vec::len).unwrap_or(0)
+            )
         },
         &format!("/apisix/admin/consumers/{username}"),
     );
@@ -178,6 +203,12 @@ fn apply_consumer_form(base: Value, f: &ConsumerForm) -> Value {
     // 기존 키가 남아 둘로 갈라진다. (models::find_groups 참조)
     let loc = f.groups_location.clone().unwrap_or_default();
     set_groups_at(&mut m, &loc, &f.groups);
+
+    // 담당자 — 미지정(null)이면 게이트웨이의 labels 를 그대로 둔다. 폼에서 온 요청은 항상
+    // 배열을 보내므로 "전부 지우기"도 그대로 성립한다. (ConsumerForm.contacts 주석 참조)
+    if let Some(cs) = &f.contacts {
+        set_contacts_at(&mut m, cs);
+    }
 
     Value::Object(m)
 }

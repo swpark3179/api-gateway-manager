@@ -7,6 +7,8 @@ use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::error::{AppError, AppResult};
+
 /// 목록 응답에서 각 항목의 `value` 객체만 뽑아낸다. (v3 · v2 모두 처리)
 pub fn extract_list(resp: &Value) -> Vec<Value> {
     // v3: { "total": n, "list": [ { "key":…, "value": {…} } ] }
@@ -259,6 +261,128 @@ pub fn set_groups_at(m: &mut Map<String, Value>, loc: &GroupsLocation, groups: &
     m.insert("plugins".into(), Value::Object(plugins));
 }
 
+// ── 담당자 (labels · name{n} / dept{n}) ──────────────────────
+
+/// 게이트웨이의 `labels` 에 `name1`/`dept1`, `name2`/`dept2`, … 형태로 들어 있는
+/// 관련 담당자 정보. `n` 은 상한이 없고, `dept{n}` 없이 `name{n}` 만 있는 경우도 있다.
+///
+/// # APISIX labels 제약 (apisix/schema_def.lua 의 label_value_def)
+///
+/// 값 패턴이 `^\S+$` 라 **공백이 하나라도 들어가면 게이트웨이가 400 을 낸다.**
+/// 한글 자체는 문제없다 — `\S` 가 바이트 단위라 한글 바이트는 전부 non-space 다.
+/// `minLength = 1` 이므로 빈 값은 `""` 로 쓰지 말고 키를 통째로 생략해야 하고,
+/// `maxLength = 256` 은 **바이트** 기준이다 (Lua 의 `#str`).
+/// 개수 상한(`maxProperties`)은 없다.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Contact {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub dept: String,
+}
+
+impl Contact {
+    fn is_empty(&self) -> bool {
+        self.name.trim().is_empty() && self.dept.trim().is_empty()
+    }
+}
+
+/// `name12` → `Some(12)`. 우리가 관리하는 키인지 판정한다.
+///
+/// `rest == n.to_string()` 비교가 앞자리 0 을 걸러 낸다. `name01` 을 우리 키로 보면
+/// 재번호 과정에서 `name1` 과 충돌해 한쪽이 조용히 사라지므로, **증명할 수 있는 키만**
+/// 우리 것으로 취급하고 나머지(`name01` · `name0` · `nameX` · 맨 `name`)는
+/// 다른 라벨처럼 그대로 보존한다.
+fn label_index(key: &str, prefix: &str) -> Option<usize> {
+    let rest = key.strip_prefix(prefix)?;
+    let n: usize = rest.parse().ok()?;
+    (n >= 1 && rest == n.to_string()).then_some(n)
+}
+
+/// consumer 객체의 `labels` 에서 담당자 목록을 뽑는다.
+///
+/// `BTreeMap<usize, _>` 에 모아 **숫자 순**으로 정렬한다. serde_json 이 `preserve_order`
+/// 없이 빌드돼 `Map` 이 BTreeMap 이라, 키 문자열을 그대로 순회하면 `name1, name10, name2`
+/// 순이 되어 10번째 담당자가 2번째 앞에 온다.
+pub fn contacts_of(v: &Value) -> Vec<Contact> {
+    let Some(labels) = v.get("labels").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+
+    let mut acc: std::collections::BTreeMap<usize, Contact> = std::collections::BTreeMap::new();
+    for (k, val) in labels {
+        let Some(s) = val.as_str() else { continue };
+        let s = s.trim();
+        if s.is_empty() {
+            continue;
+        }
+        if let Some(n) = label_index(k, "name") {
+            acc.entry(n).or_default().name = s.to_string();
+        } else if let Some(n) = label_index(k, "dept") {
+            acc.entry(n).or_default().dept = s.to_string();
+        }
+    }
+
+    acc.into_values().filter(|c| !c.is_empty()).collect()
+}
+
+/// 담당자 목록을 `labels` 에 되쓴다.
+///
+/// 인식된 `name{n}`/`dept{n}` 키만 지우고 1..N 으로 **조밀하게 재번호**한다.
+/// (중간 행을 지우면 뒤가 당겨진다 — 구멍을 남기면 이 규약을 읽는 다른 시스템이 곤란해진다.)
+/// 그 외의 라벨은 손대지 않는다. `set_groups_at` 이 다른 플러그인을 보존하는 것과 같은 규칙이다.
+pub fn set_contacts_at(m: &mut Map<String, Value>, contacts: &[Contact]) {
+    let mut labels = match m.remove("labels") {
+        Some(Value::Object(o)) => o,
+        _ => Map::new(),
+    };
+
+    labels.retain(|k, _| label_index(k, "name").is_none() && label_index(k, "dept").is_none());
+
+    let mut n = 0usize;
+    for c in contacts.iter().filter(|c| !c.is_empty()) {
+        n += 1;
+        // minLength = 1 이라 빈 값은 `""` 가 아니라 키 자체를 생략해야 한다.
+        let name = c.name.trim();
+        if !name.is_empty() {
+            labels.insert(format!("name{n}"), Value::String(name.to_string()));
+        }
+        let dept = c.dept.trim();
+        if !dept.is_empty() {
+            labels.insert(format!("dept{n}"), Value::String(dept.to_string()));
+        }
+    }
+
+    // 빈 객체를 남기지 않는다 (apply_route_form 이 빈 plugins 를 넣지 않는 것과 같은 이유).
+    if labels.is_empty() {
+        m.remove("labels");
+    } else {
+        m.insert("labels".into(), Value::Object(labels));
+    }
+}
+
+/// APISIX labels 값 제약을 저장 전에 검사한다.
+///
+/// 게이트웨이가 주는 400 은 어느 값이 왜 틀렸는지 알려 주지 않는다. `username` · `key` ·
+/// `secret` 을 미리 검사하는 것과 같은 이유로 여기서 막고 고칠 방법을 알려 준다.
+pub fn check_label_value(field: &str, v: &str) -> AppResult<()> {
+    if v.chars().any(char::is_whitespace) {
+        return Err(AppError::config(format!(
+            "담당자 {field} 에는 공백을 넣을 수 없습니다. 게이트웨이 labels 제약(^\\S+$) 때문입니다 — \
+             '플랫폼 개발팀' 대신 '플랫폼개발팀' 처럼 붙여 쓰세요."
+        )));
+    }
+    // APISIX 의 Lua JSON-schema 는 길이를 바이트로 센다 (한글 약 85자).
+    if v.len() > 256 {
+        return Err(AppError::config(format!(
+            "담당자 {field} 는 256바이트를 넘을 수 없습니다. (현재 {}바이트)",
+            v.len()
+        )));
+    }
+    Ok(())
+}
+
 // ── Route ────────────────────────────────────────────────────
 
 /// `Deserialize` 는 SQLite 캐시(`db.rs`)가 `view` 열에 넣어 둔 JSON 을 되읽기 위한 것이다.
@@ -324,7 +448,10 @@ impl RouteView {
 
 // ── Consumer ─────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+/// `Deserialize` 는 `RouteView` 와 같은 이유다 — SQLite 캐시(`db.rs`)가 `view` 열에 넣어 둔
+/// JSON 을 되읽는다. `from_str` 은 `from_value` 를 다시 돌리지 않고 직렬화된 필드를 그대로
+/// 읽으므로 `has_secret` · `has_jwt_auth` 가 `raw` 와 어긋날 여지가 없다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsumerView {
     /// APISIX 에서 consumer 의 식별자는 username 이다.
@@ -345,6 +472,8 @@ pub struct ConsumerView {
     pub groups_location: GroupsLocation,
     /// jwt-auth 플러그인이 붙어 있는지 (KPI 계산용)
     pub has_jwt_auth: bool,
+    /// labels 의 `name{n}`/`dept{n}` 쌍에서 읽은 관련 담당자 목록
+    pub contacts: Vec<Contact>,
     pub update_time: Option<i64>,
     pub updated: String,
     /// 게이트웨이 원본 객체 — JSON 탭의 '게이트웨이 원본' 보기에 그대로 쓴다
@@ -371,6 +500,7 @@ impl ConsumerView {
             groups,
             groups_location,
             has_jwt_auth: jwt.is_some(),
+            contacts: contacts_of(v),
             update_time: ts,
             updated: fmt_ts(ts),
             raw: v.clone(),

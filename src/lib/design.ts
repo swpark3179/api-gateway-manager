@@ -7,7 +7,13 @@
  * 이 JSON 에 없는 플러그인(limit-count 등)도 보존된다.
  */
 
-import type { ConsumerFormState, FormState, RouteFormState, Section } from "../types";
+import type {
+  ConsumerFormState,
+  FormState,
+  GroupsLocation,
+  RouteFormState,
+  Section,
+} from "../types";
 
 export const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 
@@ -54,13 +60,59 @@ export const railStyle = (on: boolean): React.CSSProperties => ({
     : { color: "var(--gray-500)" }),
 });
 
+// ── 권한그룹 위치 (Rust 의 find_groups / set_groups_at 대응) ──
+//
+// Rust 는 여섯 가지 표기를 모든 플러그인과 최상위에서 훑어 값을 찾고(find_groups),
+// **찾은 자리에 그대로** 되쓴다(set_groups_at). 이 파일이 그걸 무시하고 표준 표기만
+// 읽고 쓰면, 값이 `auth_groups` 에 있던 컨슈머는 '폼에 적용' 한 번으로 groups 가 비고
+// 그대로 저장하면 게이트웨이의 권한이 조용히 사라진다. 그래서 위치를 따라간다.
+
+/** Rust 의 GroupsLocation::default() 와 같아야 한다 (models.rs). */
+const CONSUMER_LOC: GroupsLocation = { plugin: "jwt-auth", key: "auth-groups", asCsv: false };
+/** RouteView::from_value 가 쓰는 기본 위치 (models.rs 의 find_groups 호출부). */
+const ROUTE_LOC: GroupsLocation = { plugin: "shi-auth", key: "allowed_groups", asCsv: false };
+
+/** 그룹 목록을 `loc` 가 가리키는 자리에, 읽은 형태(배열/CSV) 그대로 써 넣는다. */
+function putGroups(
+  o: Record<string, any>,
+  loc: GroupsLocation | null,
+  fallback: GroupsLocation,
+  groups: string[],
+): void {
+  const l = loc ?? fallback;
+  const v: unknown = l.asCsv ? groups.join(",") : groups;
+  if (!l.plugin) {
+    o[l.key] = v;
+    return;
+  }
+  o.plugins = o.plugins ?? {};
+  o.plugins[l.plugin] = { ...(o.plugins[l.plugin] ?? {}), [l.key]: v };
+}
+
+/** 같은 자리에서 읽는다. 배열과 CSV 문자열을 모두 받아들인다 (Rust 의 to_string_list 대응). */
+function pickGroups(
+  o: Record<string, any>,
+  loc: GroupsLocation | null,
+  fallback: GroupsLocation,
+): string[] {
+  const l = loc ?? fallback;
+  const raw = l.plugin ? o?.plugins?.[l.plugin]?.[l.key] : o?.[l.key];
+  if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === "string");
+  if (typeof raw === "string") {
+    return raw
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
 // ── JSON 탭 본문 ─────────────────────────────────────────────
 
 export function routeJson(f: RouteFormState): Record<string, unknown> {
   const plugins: Record<string, unknown> = {};
   if (f.rewrite) plugins["proxy-rewrite"] = { uri: f.rewrite };
-  plugins["shi-auth"] = { allowed_groups: f.groups };
-  return {
+  const o: Record<string, any> = {
     uri: f.uri,
     name: f.name,
     desc: f.desc,
@@ -71,16 +123,25 @@ export function routeJson(f: RouteFormState): Record<string, unknown> {
     service_id: f.serviceId,
     plugins,
   };
+  putGroups(o, f.groupsLocation, ROUTE_LOC, f.groups);
+  return o;
 }
 
+/**
+ * `labels`(담당자)는 여기 넣지 않는다.
+ *
+ * 넣으면 `name{n}` 번호 규칙(재번호 · 앞자리 0 배제 · 빈 값 생략)을 TS 에도 구현해야 하고,
+ * 그 규칙이 두 곳에 있으면 반드시 어긋난다 (types.ts 의 suggestedUri 주석과 같은 이유).
+ * `jsonToForm` 이 `...current` 를 펼치므로 `contacts` 는 JSON 탭을 왕복해도 그대로 살아남는다.
+ */
 export function consumerJson(f: ConsumerFormState): Record<string, unknown> {
-  return {
+  const o: Record<string, any> = {
     username: f.username,
     desc: f.desc,
-    plugins: {
-      "jwt-auth": { key: f.key, secret: f.secret, "auth-groups": f.groups },
-    },
+    plugins: { "jwt-auth": { key: f.key, secret: f.secret } },
   };
+  putGroups(o, f.groupsLocation, CONSUMER_LOC, f.groups);
+  return o;
 }
 
 export function formJson(f: FormState): Record<string, unknown> {
@@ -98,12 +159,14 @@ export function jsonToForm(raw: string, current: FormState): FormState {
   if (current.kind === "consumer") {
     const j = (o.plugins && o.plugins["jwt-auth"]) || {};
     return {
+      // contacts 는 여기서 덮어쓰지 않는다 — consumerJson 이 labels 를 내보내지 않으므로
+      // 펼쳐진 current 값이 그대로 유지되는 것이 맞다.
       ...current,
       username: o.username || "",
       desc: o.desc || "",
       key: j.key || "",
       secret: j.secret || "",
-      groups: Array.isArray(j["auth-groups"]) ? j["auth-groups"] : [],
+      groups: pickGroups(o, current.groupsLocation, CONSUMER_LOC),
     };
   }
 
@@ -116,7 +179,7 @@ export function jsonToForm(raw: string, current: FormState): FormState {
     methods: Array.isArray(o.methods) ? o.methods : [],
     serviceId: o.service_id || "",
     rewrite: (p["proxy-rewrite"] && p["proxy-rewrite"].uri) || "",
-    groups: Array.isArray(p["shi-auth"]?.allowed_groups) ? p["shi-auth"].allowed_groups : [],
+    groups: pickGroups(o, current.groupsLocation, ROUTE_LOC),
     status: typeof o.status === "number" ? o.status : current.status,
   };
 }
@@ -143,4 +206,17 @@ export function methodChips(selected: string[]): string[] {
 export function maskSecret(secret: string): string {
   if (!secret) return "—";
   return secret.slice(0, 8) + "••••••••";
+}
+
+/**
+ * 목록 상단의 마지막 동기화 시각 — `동기화 14:22`.
+ *
+ * 상대 표기("5분 전")를 쓰지 않는 이유: 타이머를 걸고 12px 라벨 하나 때문에 헤더를 매분
+ * 재렌더해야 하고, 바로 옆 '수정일시' 열이 이미 절대 표기다.
+ */
+export function syncLabel(ts: number | null): string {
+  if (ts == null) return "동기화 안 됨";
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `동기화 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }

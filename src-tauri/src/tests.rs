@@ -207,6 +207,7 @@ fn consumer_save_preserves_jwt_auth_extras() {
         groups: vec!["partner".into()],
         is_new: false,
         groups_location: None,
+        contacts: None,
     };
 
     let body = apply_consumer_form_for_test(existing, &form);
@@ -313,6 +314,7 @@ fn saves_auth_groups_back_to_where_they_were_found() {
         groups: vec!["partner".into(), "mobile".into()],
         is_new: false,
         groups_location: Some(view.groups_location.clone()),
+        contacts: None,
     };
 
     let body = apply_consumer_form_for_test(existing, &form);
@@ -337,6 +339,7 @@ fn saves_auth_groups_back_to_where_they_were_found() {
         groups: vec!["a".into(), "b".into()],
         is_new: false,
         groups_location: Some(csv_loc),
+        contacts: None,
     };
     let body = apply_consumer_form_for_test(json!({}), &form);
     assert_eq!(body.pointer("/plugins/jwt-auth/auth-groups").unwrap(), "a,b");
@@ -868,27 +871,27 @@ fn sqlite_search_and_counts_replace_the_old_array_filter() {
     .unwrap();
 
     // 검색어 없음 → 전체, 원래 순서 유지.
-    let page = db::query_routes(&c, "dev", "all", "").unwrap();
+    let page = db::query_routes(&c, "dev", "all", "", None).unwrap();
     assert_eq!(page.total, 3);
     assert_eq!(page.items.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);
 
     // 예전 필터가 JSON 전체를 훑었으므로 name·uri 어느 쪽으로도 잡혀야 한다.
-    assert_eq!(db::query_routes(&c, "dev", "all", "pet").unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "/orders").unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "API").unwrap().total, 3, "대소문자 무시");
+    assert_eq!(db::query_routes(&c, "dev", "all", "pet", None).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "/orders", None).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "API", None).unwrap().total, 3, "대소문자 무시");
 
     // '_' 가 LIKE 의 단일문자 와일드카드로 해석되면 안 된다.
-    assert_eq!(db::query_routes(&c, "dev", "all", "legacy_v1").unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "legacyXv1").unwrap().total, 0);
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacy_v1", None).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacyXv1", None).unwrap().total, 0);
 
     // chip 은 status 로 나눈다.
-    assert_eq!(db::query_routes(&c, "dev", "on", "").unwrap().total, 2);
-    assert_eq!(db::query_routes(&c, "dev", "off", "").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "on", "", None).unwrap().total, 2);
+    assert_eq!(db::query_routes(&c, "dev", "off", "", None).unwrap().total, 1);
 
     // counts 는 chip 을 빼고 검색어만 반영한다 — chip 을 눌러도 라벨 숫자가 흔들리지 않아야 한다.
-    let page = db::query_routes(&c, "dev", "off", "").unwrap();
+    let page = db::query_routes(&c, "dev", "off", "", None).unwrap();
     assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
-    let page = db::query_routes(&c, "dev", "all", "api").unwrap();
+    let page = db::query_routes(&c, "dev", "all", "api", None).unwrap();
     assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
 
     // 단건 조회 (Import 결과 → 상세 이동 경로).
@@ -897,6 +900,458 @@ fn sqlite_search_and_counts_replace_the_old_array_filter() {
 
     // 재동기화는 전체 교체다 — 게이트웨이에서 사라진 라우트가 남으면 Import 가 잘못 판정한다.
     db::sync_routes(&c, "dev", &[mk("1", "order-api", "/orders", 1)]).unwrap();
-    assert_eq!(db::query_routes(&c, "dev", "all", "").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "", None).unwrap().total, 1);
     assert!(db::route_view(&c, "dev", "2").unwrap().is_none());
+}
+
+// ── 11. 담당자 (labels · name{n} / dept{n}) ──────────────────
+
+#[test]
+fn contacts_parse_from_labels() {
+    use crate::apisix::models::ConsumerView;
+
+    let v = json!({
+        "username": "partner_alpha",
+        "labels": {
+            // 짝이 맞는 쌍
+            "name1": "김철수",  "dept1": "플랫폼",
+            // name 만
+            "name2": "이영희",
+            // dept 만
+            "dept3": "결제",
+            // 두 자리 — 문자열 정렬이면 name2 앞으로 오는 자리다
+            "name10": "박민수", "dept10": "인증",
+            // 우리 키가 아닌 것들 — 앞자리 0 · 0번 · 숫자 아님 · 접미사 없음
+            "name01": "무시", "name0": "무시", "nameX": "무시", "name": "무시",
+            // 관계없는 라벨
+            "env": "prod",
+            // 빈 값
+            "name4": ""
+        }
+    });
+
+    let c = ConsumerView::from_value(&v);
+    let got: Vec<(&str, &str)> =
+        c.contacts.iter().map(|x| (x.name.as_str(), x.dept.as_str())).collect();
+
+    // 숫자 순으로 정렬된다 — name10 이 name2 뒤다.
+    assert_eq!(got, vec![("김철수", "플랫폼"), ("이영희", ""), ("", "결제"), ("박민수", "인증")]);
+}
+
+#[test]
+fn contacts_write_back_preserves_other_labels() {
+    use crate::apisix::consumers::{apply_consumer_form_for_test, ConsumerForm};
+    use crate::apisix::models::Contact;
+
+    let existing = json!({
+        "username": "u",
+        "labels": { "env": "prod", "name1": "김철수", "dept1": "플랫폼", "name2": "이영희" },
+        "plugins": { "jwt-auth": { "key": "k", "secret": "s" } }
+    });
+
+    let form = ConsumerForm {
+        username: "u".into(),
+        desc: String::new(),
+        key: "k".into(),
+        secret: "s".into(),
+        groups: vec![],
+        is_new: false,
+        groups_location: None,
+        contacts: Some(vec![Contact { name: "박민수".into(), dept: "결제".into() }]),
+    };
+
+    let body = apply_consumer_form_for_test(existing, &form);
+    let labels = body.get("labels").unwrap();
+
+    assert_eq!(labels.get("name1").unwrap(), "박민수");
+    assert_eq!(labels.get("dept1").unwrap(), "결제");
+    // 남아 있던 두 번째 담당자는 사라지고,
+    assert!(labels.get("name2").is_none());
+    // 우리 것이 아닌 라벨은 그대로다.
+    assert_eq!(labels.get("env").unwrap(), "prod");
+}
+
+#[test]
+fn contacts_renumber_densely_and_allow_dept_only() {
+    use crate::apisix::consumers::{apply_consumer_form_for_test, ConsumerForm};
+    use crate::apisix::models::Contact;
+
+    let form = ConsumerForm {
+        username: "u".into(),
+        desc: String::new(),
+        key: "k".into(),
+        secret: "s".into(),
+        groups: vec![],
+        is_new: true,
+        groups_location: None,
+        contacts: Some(vec![
+            Contact { name: "A".into(), dept: String::new() },
+            Contact { name: String::new(), dept: "B".into() },
+            // 완전히 빈 행은 버린다 (그리드에서 행만 추가하고 안 채운 경우)
+            Contact::default(),
+        ]),
+    };
+
+    let body = apply_consumer_form_for_test(json!({}), &form);
+    let labels = body.get("labels").unwrap().as_object().unwrap();
+
+    // minLength = 1 이라 빈 값은 "" 가 아니라 키를 생략한다.
+    assert_eq!(labels.len(), 2, "{labels:?}");
+    assert_eq!(labels.get("name1").unwrap(), "A");
+    assert_eq!(labels.get("dept2").unwrap(), "B");
+    assert!(labels.get("dept1").is_none());
+    assert!(labels.get("name2").is_none());
+}
+
+#[test]
+fn empty_contacts_removes_the_labels_key() {
+    use crate::apisix::consumers::{apply_consumer_form_for_test, ConsumerForm};
+
+    let mk = |contacts| ConsumerForm {
+        username: "u".into(),
+        desc: String::new(),
+        key: "k".into(),
+        secret: "s".into(),
+        groups: vec![],
+        is_new: false,
+        groups_location: None,
+        contacts,
+    };
+
+    // 담당자 라벨만 있던 경우 → labels 키 자체가 사라진다 ("labels": {} 를 남기지 않는다)
+    let only = json!({ "username": "u", "labels": { "name1": "김철수" } });
+    let body = apply_consumer_form_for_test(only, &mk(Some(vec![])));
+    assert!(body.get("labels").is_none(), "{body}");
+
+    // 다른 라벨이 함께 있으면 labels 는 살아남고 그 라벨만 남는다.
+    let mixed = json!({ "username": "u", "labels": { "env": "prod", "name1": "김철수" } });
+    let body = apply_consumer_form_for_test(mixed, &mk(Some(vec![])));
+    let labels = body.get("labels").unwrap().as_object().unwrap();
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels.get("env").unwrap(), "prod");
+}
+
+/// `contacts: None` 은 "미지정" 이고 "전부 삭제" 가 아니다.
+///
+/// api.ts 의 consumerSave 는 필드를 하나씩 나열하는 객체 리터럴이라 한 줄만 빠뜨려도
+/// 이 경로를 타게 된다. 그때 게이트웨이의 담당자 라벨이 지워지면 되돌릴 방법이 없다.
+#[test]
+fn contacts_none_preserves_existing_labels() {
+    use crate::apisix::consumers::{apply_consumer_form_for_test, ConsumerForm};
+
+    let existing = json!({
+        "username": "u",
+        "labels": { "env": "prod", "name1": "김철수", "dept1": "플랫폼" }
+    });
+
+    let form = ConsumerForm {
+        username: "u".into(),
+        desc: String::new(),
+        key: "k".into(),
+        secret: "s".into(),
+        groups: vec![],
+        is_new: false,
+        groups_location: None,
+        contacts: None,
+    };
+
+    let body = apply_consumer_form_for_test(existing.clone(), &form);
+    assert_eq!(body.get("labels").unwrap(), existing.get("labels").unwrap());
+}
+
+#[test]
+fn rejects_label_value_with_whitespace() {
+    use crate::apisix::models::check_label_value;
+
+    // 한글 자체는 문제없다 — `\S` 가 바이트 단위라 한글 바이트는 전부 non-space 다.
+    assert!(check_label_value("부서", "플랫폼개발팀").is_ok());
+
+    let e = check_label_value("1행 부서", "플랫폼 개발팀").unwrap_err();
+    assert!(e.message.contains("1행 부서"), "{}", e.message);
+    assert!(e.message.contains("공백"), "{}", e.message);
+
+    // 길이는 바이트로 센다 (Lua 의 #str).
+    assert!(check_label_value("성명", &"가".repeat(85)).is_ok()); // 255 바이트
+    assert!(check_label_value("성명", &"가".repeat(86)).is_err()); // 258 바이트
+}
+
+// ── 12. 컨슈머 접근 권한 (Route ↔ Consumer 조인) ─────────────
+
+mod access {
+    use crate::apisix::models::{ConsumerView, RouteView};
+    use crate::db;
+    use rusqlite::Connection;
+    use serde_json::json;
+
+    fn conn() -> Connection {
+        let c = Connection::open_in_memory().expect("메모리 DB");
+        db::init(&c).expect("스키마");
+        c
+    }
+
+    /// 게이트웨이 응답 모양에서 만든다 — find_groups 를 실제로 타게 한다.
+    fn route(id: &str, name: &str, status: i64, groups: serde_json::Value) -> RouteView {
+        RouteView::from_value(&json!({
+            "id": id, "name": name, "uri": format!("/{name}"), "status": status,
+            "service_id": "svc", "plugins": { "shi-auth": { "allowed_groups": groups } }
+        }))
+    }
+
+    fn consumer(username: &str, groups: serde_json::Value) -> ConsumerView {
+        ConsumerView::from_value(&json!({
+            "username": username,
+            "plugins": { "jwt-auth": { "key": username, "secret": "s", "auth-groups": groups } }
+        }))
+    }
+
+    /// 3 라우트 · 3 컨슈머로 교집합 판정 전체를 확인한다.
+    #[test]
+    fn routes_filtered_by_consumer_access() {
+        let c = conn();
+        db::sync_routes(
+            &c,
+            "dev",
+            &[
+                route("1", "partner-api", 1, json!(["partner"])),
+                route("2", "ops-api", 0, json!(["ops"])),
+                route("3", "open-api", 1, json!([])),
+            ],
+        )
+        .unwrap();
+        db::sync_consumers(
+            &c,
+            "dev",
+            &[
+                consumer("alpha", json!(["partner"])),
+                consumer("beta", json!(["partner", "ops"])),
+                consumer("gamma", json!([])),
+            ],
+        )
+        .unwrap();
+
+        let total = |user: Option<&str>| db::query_routes(&c, "dev", "all", "", user).unwrap().total;
+
+        assert_eq!(total(None), 3, "필터 없으면 전체");
+        assert_eq!(total(Some("alpha")), 1);
+        assert_eq!(total(Some("beta")), 2);
+        assert_eq!(total(Some("gamma")), 0, "그룹이 없는 컨슈머는 아무것도 못 본다");
+
+        // allowed_groups 가 빈 라우트는 어떤 컨슈머로도 걸리지 않는다.
+        // (그래서 좌측 패널이 '그룹 제한 없음' 건수를 따로 보여 준다)
+        let names: Vec<String> = db::query_routes(&c, "dev", "all", "", Some("beta"))
+            .unwrap()
+            .items
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+        assert_eq!(names, vec!["partner-api", "ops-api"]);
+    }
+
+    /// 그룹을 둘 이상 공유해도 라우트는 한 번만 나온다.
+    /// EXISTS 세미조인을 평범한 JOIN 으로 "고치면" 이 테스트가 깨진다.
+    #[test]
+    fn consumer_filter_returns_each_route_once() {
+        let c = conn();
+        db::sync_routes(&c, "dev", &[route("1", "both", 1, json!(["a", "b"]))]).unwrap();
+        db::sync_consumers(&c, "dev", &[consumer("u", json!(["a", "b"]))]).unwrap();
+
+        let page = db::query_routes(&c, "dev", "all", "", Some("u")).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.counts.all, 1);
+    }
+
+    /// 상단 chip 라벨의 숫자는 chip 은 빼고 컨슈머·검색어는 반영한다.
+    /// 컨슈머로 좁혀 2건이 남았는데 chip 이 전체 건수를 말하면 안 된다.
+    #[test]
+    fn counts_follow_the_selected_consumer_but_not_the_chip() {
+        let c = conn();
+        db::sync_routes(
+            &c,
+            "dev",
+            &[
+                route("1", "partner-on", 1, json!(["partner"])),
+                route("2", "partner-off", 0, json!(["partner"])),
+                route("3", "ops-on", 1, json!(["ops"])),
+            ],
+        )
+        .unwrap();
+        db::sync_consumers(&c, "dev", &[consumer("alpha", json!(["partner"]))]).unwrap();
+
+        // chip 을 눌러도 라벨 숫자는 그대로다.
+        for chip in ["all", "on", "off"] {
+            let counts = db::query_routes(&c, "dev", chip, "", Some("alpha")).unwrap().counts;
+            assert_eq!((counts.all, counts.on, counts.off), (2, 1, 1), "chip={chip}");
+        }
+        // 반면 total 은 chip 을 반영한다.
+        assert_eq!(db::query_routes(&c, "dev", "on", "", Some("alpha")).unwrap().total, 1);
+
+        // 검색어도 반영한다.
+        let counts = db::query_routes(&c, "dev", "all", "partner-on", Some("alpha")).unwrap().counts;
+        assert_eq!((counts.all, counts.on, counts.off), (1, 1, 0));
+    }
+
+    #[test]
+    fn consumer_access_counts_are_zero_filled_and_search_independent() {
+        let c = conn();
+        db::sync_routes(
+            &c,
+            "dev",
+            &[
+                route("1", "shared", 1, json!(["a", "b"])),
+                route("2", "only-a", 1, json!(["a"])),
+                route("3", "open", 1, json!([])),
+            ],
+        )
+        .unwrap();
+        db::sync_consumers(
+            &c,
+            "dev",
+            &[
+                consumer("both", json!(["a", "b"])),
+                consumer("nomatch", json!(["zzz"])),
+                consumer("nogroups", json!([])),
+            ],
+        )
+        .unwrap();
+
+        let acc = db::consumer_access_counts(&c, "dev").unwrap();
+        assert_eq!(acc.all, 3);
+        assert_eq!(acc.ungrouped, 1, "allowed_groups 가 빈 라우트");
+
+        let by: std::collections::HashMap<&str, i64> =
+            acc.items.iter().map(|i| (i.username.as_str(), i.count)).collect();
+        // COUNT(DISTINCT) 증명: 'shared' 는 a·b 두 그룹으로 걸리지만 1건이다.
+        assert_eq!(by["both"], 2);
+        assert_eq!(by["nomatch"], 0);
+        assert_eq!(by["nogroups"], 0, "LEFT JOIN 이라 행 자체는 남는다");
+        assert_eq!(acc.items.len(), 3);
+    }
+
+    /// 그룹 비교는 대소문자를 구분한다 — 게이트웨이가 요청 시점에 하는 비교와 같아야 한다.
+    /// 화면이 "접근 가능"이라 했는데 실제 호출이 403 이면 화면이 깐깐한 것보다 훨씬 나쁘다.
+    #[test]
+    fn group_matching_is_case_sensitive() {
+        let c = conn();
+        db::sync_routes(&c, "dev", &[route("1", "r", 1, json!(["Partner"]))]).unwrap();
+        db::sync_consumers(&c, "dev", &[consumer("u", json!(["partner"]))]).unwrap();
+
+        assert_eq!(db::query_routes(&c, "dev", "all", "", Some("u")).unwrap().total, 0);
+        assert_eq!(db::consumer_access_counts(&c, "dev").unwrap().items[0].count, 0);
+    }
+
+    /// to_string_list 는 중복을 제거하지 않는다. 정션 테이블이 OR IGNORE 가 아니면
+    /// 이런 컨슈머 하나가 PK 충돌로 sync 트랜잭션 전체를 깨뜨려 목록이 통째로 빈다.
+    #[test]
+    fn duplicate_groups_do_not_break_sync() {
+        let c = conn();
+        db::sync_routes(&c, "dev", &[route("1", "r", 1, json!(["ops", "ops"]))]).unwrap();
+        // CSV 표기도 같은 경로를 탄다.
+        db::sync_consumers(&c, "dev", &[consumer("u", json!("ops, ops"))]).unwrap();
+
+        assert_eq!(db::query_routes(&c, "dev", "all", "", Some("u")).unwrap().total, 1);
+        assert_eq!(db::consumer_access_counts(&c, "dev").unwrap().items[0].count, 1);
+    }
+
+    /// 캐시의 `view` 열 왕복이 무손실이어야 한다 (ConsumerView: Deserialize).
+    #[test]
+    fn consumer_cache_round_trips_view() {
+        let c = conn();
+        let src = ConsumerView::from_value(&json!({
+            "username": "partner_alpha",
+            "desc": "제휴사 알파",
+            "labels": { "env": "prod", "name1": "김철수", "dept1": "플랫폼" },
+            "update_time": 1_760_000_000i64,
+            "plugins": {
+                "jwt-auth": { "key": "k", "secret": "s", "auth_groups": ["partner"] },
+                "limit-count": { "count": 100 }
+            }
+        }));
+        db::sync_consumers(&c, "dev", std::slice::from_ref(&src)).unwrap();
+
+        let got = db::consumers_cached(&c, "dev").unwrap();
+        assert_eq!(got.len(), 1);
+        let g = &got[0];
+        assert_eq!(g.username, src.username);
+        assert_eq!(g.desc, src.desc);
+        assert_eq!(g.key, src.key);
+        assert_eq!(g.secret, src.secret);
+        assert_eq!(g.has_secret, src.has_secret);
+        assert_eq!(g.has_jwt_auth, src.has_jwt_auth);
+        assert_eq!(g.groups, src.groups);
+        // 비표준 표기(auth_groups)에서 읽은 위치가 그대로 살아남아야 저장이 같은 자리로 간다.
+        assert_eq!(g.groups_location, src.groups_location);
+        assert_eq!(g.groups_location.key, "auth_groups");
+        assert_eq!(g.contacts, src.contacts);
+        assert_eq!(g.updated, src.updated);
+        // 원본은 통째로 보존된다 — JSON 탭의 '게이트웨이 원본' 이 이걸 그대로 보여 준다.
+        assert_eq!(g.raw, src.raw);
+    }
+
+    #[test]
+    fn consumer_sync_replaces_and_is_env_scoped() {
+        let c = conn();
+        db::sync_consumers(
+            &c,
+            "dev",
+            &[consumer("a", json!(["x"])), consumer("b", json!(["x"]))],
+        )
+        .unwrap();
+        db::sync_consumers(&c, "prod", &[consumer("p", json!(["x"]))]).unwrap();
+        assert_eq!(db::consumers_cached(&c, "dev").unwrap().len(), 2);
+
+        // 재동기화는 전체 교체다 — 게이트웨이에서 지워진 컨슈머가 패널에 남으면 안 된다.
+        db::sync_consumers(&c, "dev", &[consumer("a", json!(["x"]))]).unwrap();
+        let dev: Vec<String> =
+            db::consumers_cached(&c, "dev").unwrap().iter().map(|x| x.username.clone()).collect();
+        assert_eq!(dev, vec!["a"]);
+        // 다른 환경은 건드리지 않는다.
+        assert_eq!(db::consumers_cached(&c, "prod").unwrap().len(), 1);
+    }
+
+    /// 접근 판정은 환경별로 격리돼야 한다 — dev 의 컨슈머가 prod 의 라우트를 보면 안 된다.
+    #[test]
+    fn access_join_is_env_scoped() {
+        let c = conn();
+        db::sync_routes(&c, "dev", &[route("1", "dev-r", 1, json!(["shared"]))]).unwrap();
+        db::sync_routes(&c, "prod", &[route("9", "prod-r", 1, json!(["shared"]))]).unwrap();
+        db::sync_consumers(&c, "dev", &[consumer("u", json!(["shared"]))]).unwrap();
+
+        let page = db::query_routes(&c, "dev", "all", "", Some("u")).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].name, "dev-r");
+        // prod 에는 그 username 의 컨슈머가 없으니 아무것도 안 걸린다.
+        assert_eq!(db::query_routes(&c, "prod", "all", "", Some("u")).unwrap().total, 0);
+    }
+
+    #[test]
+    fn overview_counts_come_from_the_cache() {
+        let c = conn();
+        db::sync_routes(
+            &c,
+            "dev",
+            &[
+                route("1", "on-a", 1, json!([])),
+                route("2", "on-b", 1, json!([])),
+                route("3", "off", 0, json!([])),
+            ],
+        )
+        .unwrap();
+        db::sync_consumers(&c, "dev", &[consumer("a", json!([])), consumer("b", json!([]))])
+            .unwrap();
+        // jwt-auth 가 없는 컨슈머
+        db::sync_consumers(
+            &c,
+            "prod",
+            &[ConsumerView::from_value(&json!({ "username": "nojwt" }))],
+        )
+        .unwrap();
+
+        let o = db::overview_counts(&c, "dev").unwrap();
+        assert_eq!((o.routes, o.routes_active, o.routes_inactive), (3, 2, 1));
+        assert_eq!((o.consumers, o.consumers_jwt), (2, 2));
+
+        let p = db::overview_counts(&c, "prod").unwrap();
+        assert_eq!((p.consumers, p.consumers_jwt), (1, 0));
+    }
 }
