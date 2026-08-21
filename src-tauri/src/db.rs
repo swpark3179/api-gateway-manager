@@ -7,12 +7,18 @@
 //! 필요로 하는 "이 uri·method 가 등록돼 있나"를 배열 순회로 풀면 (스펙 오퍼레이션 수) ×
 //! (라우트 수) 번 비교하게 된다. uri 를 정규화해 인덱스로 만들어 두면 두 문제가 같이 풀린다.
 //!
+//! # 무엇이 들어 있나
+//!
+//! Route 와 Consumer 의 **전체 목록**, 그리고 둘의 그룹을 이어 주는 정션 테이블이다.
+//! 목록 화면은 게이트웨이를 부르지 않고 여기만 본다. 채우는 경로는 두 가지다 —
+//! 부트스트랩(기동 · 환경 전환 · 상단 새로고침 버튼)과, 저장·삭제 직후의 해당 리소스 재동기화.
+//!
 //! # 메모리 전용
 //!
 //! `Connection::open_in_memory()` 다. 디스크에 남기지 않으므로 앱을 다시 켜면 비어 있고,
-//! 목록 화면에 들어갈 때(또는 리프레시 버튼)의 전체 조회가 유일한 채우기 경로다.
-//! 게이트웨이가 진실의 원천이고 이건 조회 가속용 사본이라, stale 데이터를 들고 있을 위험을
-//! 아예 만들지 않는 편을 택했다.
+//! 기동 시의 전체 조회가 첫 채우기다. 게이트웨이가 진실의 원천이고 이건 조회 가속용 사본이라,
+//! 디스크에 stale 데이터가 남을 위험은 아예 만들지 않았다. 대신 사본이 얼마나 오래된
+//! 것인지를 화면(마지막 갱신시각)에 드러내 사용자가 판단할 수 있게 한다.
 //!
 //! # 스레드 안전
 //!
@@ -25,7 +31,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::apisix::models::RouteView;
+use crate::apisix::models::{ConsumerView, RouteView};
 use crate::error::{AppError, AppResult};
 use crate::oas::{self, OasOp};
 
@@ -94,6 +100,39 @@ pub fn init(conn: &Connection) -> AppResult<()> {
         );
         CREATE INDEX IF NOT EXISTS route_methods_lookup ON route_methods(env, route_id, method);
 
+        -- route 의 allowed_groups. 한 행이 그룹 하나다.
+        -- PK 는 (env, route_id) → grp 방향(컨슈머 접근 판정의 EXISTS)을,
+        -- 보조 인덱스는 (env, grp) → route_id 방향(접근 건수 집계)을 탄다. 둘 다 필요하다.
+        CREATE TABLE IF NOT EXISTS route_groups (
+          env      TEXT NOT NULL,
+          route_id TEXT NOT NULL,
+          grp      TEXT NOT NULL,
+          PRIMARY KEY (env, route_id, grp)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS route_groups_grp ON route_groups(env, grp);
+
+        -- Consumer 목록. routes 와 같은 이유로 ConsumerView 를 JSON 그대로 담는다.
+        -- 검색용 search 열이 없는 것은 의도적이다 — Consumer 목록 화면은 건수가 적어
+        -- 프런트 배열 필터(store.filterConsumers)를 그대로 쓴다.
+        CREATE TABLE IF NOT EXISTS consumers (
+          env      TEXT    NOT NULL,
+          username TEXT    NOT NULL,
+          seq      INTEGER NOT NULL,          -- 게이트웨이가 준 원래 순서 (표시 순서 유지)
+          has_jwt  INTEGER NOT NULL DEFAULT 0,-- 대시보드 KPI 를 캐시에서 계산하기 위한 것
+          view     TEXT    NOT NULL,          -- serde_json::to_string(&ConsumerView)
+          PRIMARY KEY (env, username)
+        );
+        CREATE INDEX IF NOT EXISTS consumers_env_seq ON consumers(env, seq);
+
+        -- consumer 의 auth-groups. route_groups 와 대칭이다.
+        CREATE TABLE IF NOT EXISTS consumer_groups (
+          env      TEXT NOT NULL,
+          username TEXT NOT NULL,
+          grp      TEXT NOT NULL,
+          PRIMARY KEY (env, username, grp)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS consumer_groups_grp ON consumer_groups(env, grp);
+
         -- Import 한 OAS 문서의 오퍼레이션. 비교를 SQL 조인 한 번으로 끝내기 위한 것.
         CREATE TABLE IF NOT EXISTS oas_ops (
           seq          INTEGER PRIMARY KEY,
@@ -124,6 +163,7 @@ pub fn sync_routes(conn: &Connection, env: &str, routes: &[RouteView]) -> AppRes
     tx.execute("DELETE FROM routes WHERE env = ?1", params![env]).map_err(sql_err)?;
     tx.execute("DELETE FROM route_uris WHERE env = ?1", params![env]).map_err(sql_err)?;
     tx.execute("DELETE FROM route_methods WHERE env = ?1", params![env]).map_err(sql_err)?;
+    tx.execute("DELETE FROM route_groups WHERE env = ?1", params![env]).map_err(sql_err)?;
 
     {
         let mut ins_route = tx
@@ -140,6 +180,12 @@ pub fn sync_routes(conn: &Connection, env: &str, routes: &[RouteView]) -> AppRes
             .map_err(sql_err)?;
         let mut ins_method = tx
             .prepare("INSERT INTO route_methods (env, route_id, method) VALUES (?1, ?2, ?3)")
+            .map_err(sql_err)?;
+        // OR IGNORE 인 이유: models::to_string_list 는 trim·빈값 제거는 하지만 중복 제거는
+        // 하지 않는다. allowed_groups 에 같은 값이 두 번 들어 있는 라우트 하나가 PK 충돌로
+        // sync 트랜잭션 전체를 깨뜨리면 목록 화면이 통째로 빈다.
+        let mut ins_group = tx
+            .prepare("INSERT OR IGNORE INTO route_groups (env, route_id, grp) VALUES (?1, ?2, ?3)")
             .map_err(sql_err)?;
 
         for (i, r) in routes.iter().enumerate() {
@@ -186,6 +232,12 @@ pub fn sync_routes(conn: &Connection, env: &str, routes: &[RouteView]) -> AppRes
                 if !m.is_empty() {
                     ins_method.execute(params![env, &r.id, m]).map_err(sql_err)?;
                 }
+            }
+
+            // 값은 그대로 넣는다 — to_string_list 가 이미 trim 했고 빈 값을 걸렀다.
+            // 대소문자도 접지 않는다 (grp 열 주석 참조).
+            for g in &r.groups {
+                ins_group.execute(params![env, &r.id, g]).map_err(sql_err)?;
             }
         }
     }
@@ -239,9 +291,25 @@ pub struct RouteCounts {
 pub struct RoutesPage {
     pub items: Vec<RouteView>,
     pub total: i64,
-    /// chip 필터를 빼고 검색어만 적용한 상태별 건수 — chip 라벨과 사이드 패널이 쓴다.
+    /// chip 을 빼고 검색어·컨슈머만 적용한 상태별 건수 — 상단 chip 라벨이 쓴다.
+    /// 좌측 패널은 이걸 쓰지 않는다 (`consumer_access_counts` 참조).
     pub counts: RouteCounts,
 }
+
+/// 컨슈머 필터를 SQL 조건으로 바꾼다.
+///
+/// 조건 조각을 붙였다 뗐다 하는 대신 `?3 = '' OR …` 형태를 쓴다. 조각을 빼면 SQL 에서 `?3` 이
+/// 사라져 `params!` 길이가 안 맞고 rusqlite 가 런타임에 `InvalidParameterCount` 를 던진다.
+/// (검색어의 `?2` 가 이미 같은 관례를 쓴다.)
+///
+/// `EXISTS` 는 첫 일치에서 멈추는 세미조인이라 **`DISTINCT` 가 필요 없다** — 넣으면 정렬이
+/// 강제돼 `ORDER BY seq` 가 `routes_env_seq` 인덱스를 못 탄다.
+/// 서브쿼리를 `route_groups` 에서 시작하는 것도 의도적이다: `(env, route_id)` PK 로 몇 행만
+/// 훑고 `consumer_groups` 를 PK 로 조회한다. 반대로 시작하면 그 그룹을 가진 모든 라우트로 퍼진다.
+const ACCESS_CLAUSE: &str = " AND (?3 = '' OR EXISTS (
+          SELECT 1 FROM route_groups rg
+            JOIN consumer_groups cg ON cg.env = rg.env AND cg.grp = rg.grp
+           WHERE rg.env = ?1 AND rg.route_id = routes.id AND cg.username = ?3))";
 
 /// chip 값(`all` / `on` / `off`)을 status 조건으로 바꾼다.
 fn status_clause(chip: &str) -> &'static str {
@@ -257,21 +325,34 @@ fn needle(q: &str) -> String {
     q.trim().to_lowercase()
 }
 
-pub fn query_routes(conn: &Connection, env: &str, chip: &str, q: &str) -> AppResult<RoutesPage> {
+/// 세 축(상태 chip · 검색어 · 컨슈머)을 적용해 라우트를 조회한다.
+///
+/// `consumer` 가 `Some` 이면 그 컨슈머의 auth-groups 와 라우트의 allowed_groups 교집합이
+/// 비어 있지 않은 라우트만 남는다. allowed_groups 가 아예 없는 라우트는 어떤 컨슈머로도
+/// 걸리지 않는다 — 화면에서 사라지지 않도록 좌측 패널이 '그룹 제한 없음' 건수를 따로 보여 준다.
+pub fn query_routes(
+    conn: &Connection,
+    env: &str,
+    chip: &str,
+    q: &str,
+    consumer: Option<&str>,
+) -> AppResult<RoutesPage> {
     let n = needle(q);
+    let user = consumer.map(str::trim).unwrap_or("");
 
     // instr() 은 LIKE 와 달리 % · _ 를 메타문자로 취급하지 않는다.
     // uri 에 밑줄이 흔하므로 검색어를 이스케이프해야 하는 부담을 아예 없앤다.
     let sql = format!(
         "SELECT view FROM routes
-          WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){}
+          WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){}{}
           ORDER BY seq",
+        ACCESS_CLAUSE,
         status_clause(chip)
     );
 
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
     let rows = stmt
-        .query_map(params![env, &n], |row| row.get::<_, String>(0))
+        .query_map(params![env, &n, user], |row| row.get::<_, String>(0))
         .map_err(sql_err)?;
 
     let mut items = Vec::new();
@@ -280,20 +361,32 @@ pub fn query_routes(conn: &Connection, env: &str, chip: &str, q: &str) -> AppRes
         items.push(serde_json::from_str::<RouteView>(&json)?);
     }
 
-    let counts = route_counts(conn, env, q)?;
+    let counts = route_counts(conn, env, q, consumer)?;
     Ok(RoutesPage { total: items.len() as i64, items, counts })
 }
 
-/// 검색어만 적용한 상태별 건수. chip 을 눌러도 라벨의 숫자가 흔들리지 않게 하려고 분리했다.
-pub fn route_counts(conn: &Connection, env: &str, q: &str) -> AppResult<RouteCounts> {
+/// 검색어와 컨슈머만 적용한 상태별 건수.
+///
+/// chip 을 빼는 이유는 chip 을 눌러도 라벨의 숫자가 흔들리지 않게 하기 위해서고,
+/// 컨슈머를 **넣는** 이유는 컨슈머가 chip 과 나란한 필터가 아니라 조회 범위이기 때문이다.
+/// 컨슈머로 8건이 남았는데 chip 이 `status 1 (312)` 라고 말하면 안 된다.
+pub fn route_counts(
+    conn: &Connection,
+    env: &str,
+    q: &str,
+    consumer: Option<&str>,
+) -> AppResult<RouteCounts> {
     let n = needle(q);
+    let user = consumer.map(str::trim).unwrap_or("");
     conn.query_row(
-        "SELECT COUNT(*),
-                COALESCE(SUM(status =  1), 0),
-                COALESCE(SUM(status <> 1), 0)
-           FROM routes
-          WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0)",
-        params![env, &n],
+        &format!(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(status =  1), 0),
+                    COALESCE(SUM(status <> 1), 0)
+               FROM routes
+              WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){ACCESS_CLAUSE}"
+        ),
+        params![env, &n, user],
         |row| Ok(RouteCounts { all: row.get(0)?, on: row.get(1)?, off: row.get(2)? }),
     )
     .map_err(sql_err)
@@ -315,6 +408,181 @@ pub fn route_view(conn: &Connection, env: &str, id: &str) -> AppResult<Option<Ro
         Some(j) => Ok(Some(serde_json::from_str::<RouteView>(&j)?)),
         None => Ok(None),
     }
+}
+
+// ── Consumer 캐시 채우기 ─────────────────────────────────────
+
+/// 해당 환경의 Consumer 캐시를 전체 교체한다.
+///
+/// `sync_routes` 와 같은 이유로 부분 갱신을 하지 않는다 — 게이트웨이에서 지워진 컨슈머가
+/// 캐시에 남으면 Route 화면 좌측 패널에 유령 항목이 뜨고, 그걸 눌러 필터링하면
+/// "권한 있는 API 가 0건"이라는 거짓 답을 보게 된다.
+///
+/// # 그룹 값은 원문 그대로, 대소문자를 구분한다
+///
+/// 게이트웨이의 `shi-auth` 가 요청 시점에 하는 비교를 화면이 그대로 흉내를 내야 하기 때문이다.
+/// 화면이 "접근 가능"이라고 했는데 실제 호출이 403 이면, 화면이 깐깐한 것보다 훨씬 나쁘다.
+/// (`oas::normalize` 가 uri 대소문자를 보존하는 것과 같은 판단이다.)
+/// `COLLATE NOCASE` 는 ASCII 만 접어서 한글 그룹명에는 아무 효과가 없으므로 쓰지 않는다.
+pub fn sync_consumers(conn: &Connection, env: &str, items: &[ConsumerView]) -> AppResult<()> {
+    let tx = conn.unchecked_transaction().map_err(sql_err)?;
+
+    tx.execute("DELETE FROM consumers WHERE env = ?1", params![env]).map_err(sql_err)?;
+    tx.execute("DELETE FROM consumer_groups WHERE env = ?1", params![env]).map_err(sql_err)?;
+
+    {
+        let mut ins = tx
+            .prepare(
+                "INSERT INTO consumers (env, username, seq, has_jwt, view)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .map_err(sql_err)?;
+        // sync_routes 의 route_groups 와 같은 이유로 OR IGNORE 다.
+        let mut ins_group = tx
+            .prepare(
+                "INSERT OR IGNORE INTO consumer_groups (env, username, grp) VALUES (?1, ?2, ?3)",
+            )
+            .map_err(sql_err)?;
+
+        for (i, c) in items.iter().enumerate() {
+            // APISIX 는 username 을 보장하지만 models::unwrap_item 은 key 에서 id 만 보충하고
+            // username 은 보충하지 않는다. 빈 값이 둘이면 PK 가 깨지므로 건너뛰되,
+            // 조용히 사라지면 건수가 게이트웨이와 어긋나므로 로그를 남긴다. (sync_routes 와 동일)
+            if c.username.trim().is_empty() {
+                log::warn!("username 을 알 수 없는 컨슈머를 캐시에서 제외했습니다 (key={})", c.key);
+                continue;
+            }
+
+            let view = serde_json::to_string(c)?;
+            ins.execute(params![env, &c.username, i as i64, c.has_jwt_auth as i64, view])
+                .map_err(sql_err)?;
+
+            for g in &c.groups {
+                ins_group.execute(params![env, &c.username, g]).map_err(sql_err)?;
+            }
+        }
+    }
+
+    tx.commit().map_err(sql_err)?;
+    Ok(())
+}
+
+/// 캐시의 Consumer 전체 목록. 게이트웨이 순서를 유지한다.
+pub fn consumers_cached(conn: &Connection, env: &str) -> AppResult<Vec<ConsumerView>> {
+    let mut stmt = conn
+        .prepare("SELECT view FROM consumers WHERE env = ?1 ORDER BY seq")
+        .map_err(sql_err)?;
+    let rows = stmt
+        .query_map(params![env], |row| row.get::<_, String>(0))
+        .map_err(sql_err)?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(serde_json::from_str::<ConsumerView>(&r.map_err(sql_err)?)?);
+    }
+    Ok(out)
+}
+
+// ── 컨슈머 접근 권한 (Route ↔ Consumer 조인) ────────────────
+
+/// 컨슈머 한 명이 접근할 수 있는 라우트 수.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsumerAccess {
+    pub username: String,
+    pub count: i64,
+}
+
+/// Route 화면 좌측 패널이 쓰는 집계.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessCounts {
+    /// 필터 없는 전체 라우트 수 — 패널의 '전체 Route' 행.
+    pub all: i64,
+    /// allowed_groups 가 비어 어떤 컨슈머로도 걸리지 않는 라우트 수.
+    pub ungrouped: i64,
+    pub items: Vec<ConsumerAccess>,
+}
+
+/// 컨슈머별 접근 가능 라우트 수를 한 번에 집계한다.
+///
+/// 검색어·status chip 을 **반영하지 않는다.** 이 숫자는 결과 요약이 아니라 범위 선택을 돕는
+/// 고정값이라, 타이핑할 때마다 패널의 모든 숫자가 흔들리면 고를 수가 없다.
+pub fn consumer_access_counts(conn: &Connection, env: &str) -> AppResult<AccessCounts> {
+    let all: i64 = conn
+        .query_row("SELECT COUNT(*) FROM routes WHERE env = ?1", params![env], |r| r.get(0))
+        .map_err(sql_err)?;
+
+    let ungrouped: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM routes r
+              WHERE r.env = ?1
+                AND NOT EXISTS (SELECT 1 FROM route_groups rg
+                                 WHERE rg.env = r.env AND rg.route_id = r.id)",
+            params![env],
+            |r| r.get(0),
+        )
+        .map_err(sql_err)?;
+
+    let mut stmt = conn
+        .prepare(
+            // COUNT(DISTINCT …) 가 필수다: 컨슈머와 라우트가 그룹을 둘 이상 공유하면
+            // 같은 (컨슈머, 라우트) 쌍이 조인 결과에 여러 행으로 나온다.
+            // LEFT JOIN 이라 그룹이 없는 컨슈머도 0 으로 남는다.
+            "SELECT c.username, COUNT(DISTINCT rg.route_id)
+               FROM consumers c
+               LEFT JOIN consumer_groups cg
+                      ON cg.env = c.env AND cg.username = c.username
+               LEFT JOIN route_groups rg
+                      ON rg.env = c.env AND rg.grp = cg.grp
+              WHERE c.env = ?1
+              GROUP BY c.username
+              ORDER BY c.username",
+        )
+        .map_err(sql_err)?;
+
+    let rows = stmt
+        .query_map(params![env], |r| {
+            Ok(ConsumerAccess { username: r.get(0)?, count: r.get(1)? })
+        })
+        .map_err(sql_err)?;
+
+    let items = rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)?;
+    Ok(AccessCounts { all, ungrouped, items })
+}
+
+/// 대시보드 KPI 중 캐시에서 셀 수 있는 것.
+///
+/// 이게 없으면 앱을 켤 때마다 route·consumer 전체 조회가 네 번(부트스트랩 2 + 대시보드 2)
+/// 나가고, 50건짜리 호출 이력이 목록 조회로 도배된다.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OverviewCounts {
+    pub routes: i64,
+    pub routes_active: i64,
+    pub routes_inactive: i64,
+    pub consumers: i64,
+    pub consumers_jwt: i64,
+}
+
+pub fn overview_counts(conn: &Connection, env: &str) -> AppResult<OverviewCounts> {
+    let (routes, routes_active, routes_inactive) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(status = 1), 0), COALESCE(SUM(status <> 1), 0)
+               FROM routes WHERE env = ?1",
+            params![env],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(sql_err)?;
+
+    let (consumers, consumers_jwt) = conn
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(has_jwt = 1), 0) FROM consumers WHERE env = ?1",
+            params![env],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(sql_err)?;
+
+    Ok(OverviewCounts { routes, routes_active, routes_inactive, consumers, consumers_jwt })
 }
 
 // ── OAS 비교 ─────────────────────────────────────────────────

@@ -8,6 +8,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AccessCounts,
   AppError,
   CompareRow,
   ConsumerFormState,
@@ -57,15 +58,16 @@ export const settingsTest = (env: EnvKey, payload: EnvPayload) =>
 // ── Route ────────────────────────────────────────────────────
 
 /**
- * 게이트웨이에서 전체 목록을 다시 받아 내장 SQLite 캐시를 갱신하고 조회 결과를 돌려준다.
- * 목록 화면 진입과 상단 리프레시 버튼이 부르는 유일한 갱신 경로다.
+ * 게이트웨이에서 Route 전체 목록을 다시 받아 내장 SQLite 캐시를 갱신한다. 반환값은 건수다.
+ *
+ * 채우기(sync)와 읽기(query)를 나눈 이유: 조회 축이 셋(chip · 검색어 · 컨슈머)이라
+ * 채우기에 필터를 실어 보내면 호출부마다 세 인자를 끌고 다녀야 한다.
  */
-export const routesSync = (env: EnvKey, chip: string, q: string) =>
-  call<RoutesPage>("routes_sync", { env, chip, q });
+export const routesSync = (env: EnvKey) => call<number>("routes_sync", { env });
 
-/** 캐시만 조회한다 — 검색어·chip 이 바뀔 때마다 게이트웨이를 다시 부르지 않는다. */
-export const routesQuery = (env: EnvKey, chip: string, q: string) =>
-  call<RoutesPage>("routes_query", { env, chip, q });
+/** 캐시만 조회한다 — 필터가 바뀔 때마다 게이트웨이를 다시 부르지 않는다. */
+export const routesQuery = (env: EnvKey, chip: string, q: string, consumer: string | null) =>
+  call<RoutesPage>("routes_query", { env, chip, q, consumer });
 
 /** 캐시에서 라우트 한 건. 목록이 필터돼 있어도 상세로 갈 수 있게 해 준다. */
 export const routeCached = (env: EnvKey, id: string) =>
@@ -108,7 +110,15 @@ export const oasCompare = (env: EnvKey, serviceId: string, prefix: string) =>
 
 // ── Consumer ─────────────────────────────────────────────────
 
-export const consumersList = (env: EnvKey) => call<ConsumerView[]>("consumers_list", { env });
+/** 게이트웨이에서 Consumer 전체 목록을 다시 받아 캐시를 갱신하고 그 목록을 돌려준다. */
+export const consumersSync = (env: EnvKey) => call<ConsumerView[]>("consumers_sync", { env });
+
+/** 캐시의 Consumer 전체 목록 (게이트웨이 호출 없음). */
+export const consumersCached = (env: EnvKey) => call<ConsumerView[]>("consumers_cached", { env });
+
+/** Route 화면 좌측 패널의 컨슈머별 접근 가능 건수. routes·consumers 동기화 후에 부른다. */
+export const consumerAccessCounts = (env: EnvKey) =>
+  call<AccessCounts>("consumer_access_counts", { env });
 
 export const consumerSave = (env: EnvKey, f: ConsumerFormState) =>
   call<ConsumerView>("consumer_save", {
@@ -121,6 +131,9 @@ export const consumerSave = (env: EnvKey, f: ConsumerFormState) =>
       groups: f.groups,
       isNew: f.isNew,
       groupsLocation: f.groupsLocation,
+      // 이 줄을 빠뜨리면 Rust 쪽 contacts 가 null 로 들어가 "labels 를 건드리지 않는다"가 된다.
+      // 지워지는 게 아니라 유지되는 쪽으로 degrade 하도록 Option<Vec<_>> 으로 받는다.
+      contacts: f.contacts,
     },
   });
 

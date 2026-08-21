@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 
-import { maskSecret } from "../lib/design";
+import { maskSecret, syncLabel } from "../lib/design";
 import { consumerGroupBuckets, filterConsumers, kindOf, useStore } from "../store";
 
 const ROW_H = "14px 16px";
@@ -32,8 +32,12 @@ export default function ListScreen() {
   const openImport = useStore((s) => s.openImport);
   const hardRefresh = useStore((s) => s.hardRefresh);
   const loading = useStore((s) => s.loading);
+  const booting = useStore((s) => s.booting);
   const error = useStore((s) => s.error);
   const settings = useStore((s) => s.settings);
+  const syncedAt = useStore((s) => s.syncedAt[s.env]);
+  const routeConsumer = useStore((s) => s.routeConsumer);
+  const setRouteConsumer = useStore((s) => s.setRouteConsumer);
   // Route 는 내장 SQLite 가 이미 필터링해 준 결과다 (store.ts 모듈 주석 참조).
   const routes = useStore((s) => s.routes);
   const routesTotal = useStore((s) => s.routesTotal);
@@ -101,6 +105,32 @@ export default function ListScreen() {
   const adminBase = settings?.[env]?.adminBase ?? "";
   const listApiPath = `${adminBase}/${isConsumer ? "consumers" : "routes"}`;
 
+  // 화면 진입이 더 이상 게이트웨이를 부르지 않으므로 "등록된 …가 없습니다" 만으로는
+  // "게이트웨이에 없다" 와 "캐시를 아직 못 채웠다" 를 구별할 수 없다. 네 경우를 나눈다.
+  // 조건 판정에 routeConsumer 를 반드시 포함해야 한다 — 빠뜨리면 컨슈머를 골라 0건이 됐을 때
+  // "등록된 Route가 없습니다" 가 뜬다.
+  const filtered = q.trim() !== "" || chip !== "all" || (!isConsumer && routeConsumer !== null);
+  const emptyState =
+    loading || booting ? (
+      <>
+        <div className="spinner" />
+        <div className="msg">동기화 중…</div>
+      </>
+    ) : error ? (
+      <div className="msg">목록을 불러오지 못했습니다. 새로고침으로 다시 시도하세요.</div>
+    ) : syncedAt == null ? (
+      <>
+        <div className="msg">아직 게이트웨이와 동기화하지 않았습니다.</div>
+        <button className="btn sm outline" onClick={() => void hardRefresh()}>
+          새로고침
+        </button>
+      </>
+    ) : filtered ? (
+      <div className="msg">조건에 맞는 항목이 없습니다.</div>
+    ) : (
+      <div className="msg">등록된 {isConsumer ? "Consumer" : "Route"}가 없습니다.</div>
+    );
+
   return (
     <div data-screen-label="목록" style={{ padding: "24px 28px 48px" }}>
       <div className="page-header" style={{ marginBottom: 16 }}>
@@ -115,42 +145,51 @@ export default function ListScreen() {
           </p>
         </div>
         <div className="page-actions">
+          <span
+            className="text-xs muted font-mono"
+            title={
+              syncedAt
+                ? `마지막 동기화: ${new Date(syncedAt).toLocaleString("ko-KR")}`
+                : "아직 게이트웨이와 동기화하지 않았습니다"
+            }
+            style={{ whiteSpace: "nowrap" }}
+          >
+            {syncLabel(syncedAt)}
+          </span>
+          <button
+            className="icon-btn"
+            title="게이트웨이에서 Route · Consumer 전체 목록을 다시 조회해 로컬 캐시를 갱신합니다"
+            onClick={() => void hardRefresh()}
+            disabled={loading || booting}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
+              <path d="M20 11a8 8 0 1 0-2.3 5.7" />
+              <path d="M20 4v7h-7" />
+            </svg>
+          </button>
           {!isConsumer && (
-            <>
-              <button
-                className="icon-btn"
-                title="게이트웨이에서 전체 목록을 다시 조회해 로컬 캐시를 갱신합니다"
-                onClick={() => void hardRefresh()}
-                disabled={loading}
+            <button className="btn md outline" onClick={openImport}>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
               >
-                <svg
-                  viewBox="0 0 24 24"
-                  width="16"
-                  height="16"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                >
-                  <path d="M20 11a8 8 0 1 0-2.3 5.7" />
-                  <path d="M20 4v7h-7" />
-                </svg>
-              </button>
-              <button className="btn md outline" onClick={openImport}>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M12 3v12M7 10l5 5 5-5" />
-                  <path d="M4 19h16" />
-                </svg>
-                Import
-              </button>
-            </>
+                <path d="M12 3v12M7 10l5 5 5-5" />
+                <path d="M4 19h16" />
+              </svg>
+              Import
+            </button>
           )}
           <div className="gnb-search" style={{ width: 240, height: 36 }}>
             <svg
@@ -196,6 +235,34 @@ export default function ListScreen() {
             {label}
           </div>
         ))}
+
+        {/* 좌측 패널을 스크롤로 지나친 사용자가 목록이 왜 짧은지 알 수 없으면 안 된다. */}
+        {!isConsumer && routeConsumer && (
+          <div className="chip on" style={{ cursor: "default" }}>
+            <span style={{ fontSize: 12 }}>consumer: </span>
+            <span className="font-mono" style={{ fontSize: 12 }}>
+              {routeConsumer}
+            </span>
+            <span
+              className="x"
+              onClick={() => setRouteConsumer(null)}
+              style={{ cursor: "pointer" }}
+              title="컨슈머 필터 해제"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="11"
+                height="11"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.6"
+                strokeLinecap="round"
+              >
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </span>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -282,22 +349,7 @@ export default function ListScreen() {
           {rows.length === 0 && (
             <tr>
               <td colSpan={cols.length} style={{ padding: 0 }}>
-                <div className="state-block">
-                  {loading ? (
-                    <>
-                      <div className="spinner" />
-                      <div className="msg">불러오는 중…</div>
-                    </>
-                  ) : (
-                    <div className="msg">
-                      {q.trim() || chip !== "all"
-                        ? "조건에 맞는 항목이 없습니다."
-                        : error
-                          ? "목록을 불러오지 못했습니다."
-                          : `등록된 ${isConsumer ? "Consumer" : "Route"}가 없습니다.`}
-                    </div>
-                  )}
-                </div>
+                <div className="state-block">{emptyState}</div>
               </td>
             </tr>
           )}

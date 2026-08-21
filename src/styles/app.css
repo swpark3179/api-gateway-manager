@@ -71,6 +71,52 @@ input, textarea, pre, code, .selectable {
   animation: spin 700ms linear infinite;
 }
 
+/* 부트스트랩 진행 막대 (components/BootProgress.tsx) */
+.progress {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--gray-200);
+  overflow: hidden;
+}
+.progress > .bar {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--purple-500);
+  transition: width var(--duration-medium) var(--ease-standard);
+}
+
+/* 권한그룹 콤보박스 팝업 (components/GroupCombo.tsx) */
+.combo-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  max-height: 220px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 4px;
+}
+.combo-item {
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font: 400 13px/18px var(--font-mono);
+  color: var(--gray-700);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.combo-item.on { background: var(--purple-50); color: var(--purple-700); }
+.combo-more {
+  padding: 6px 10px 4px;
+  font: 400 11px/16px var(--font-sans);
+  color: var(--gray-400);
+}
+
 /* select 는 kit.css 의 .text-input 을 그대로 쓰되 화살표 여백만 확보 */
 select.text-input { padding-right: 32px; appearance: auto; }
 

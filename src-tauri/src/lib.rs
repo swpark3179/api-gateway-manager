@@ -64,7 +64,7 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            // Route 목록 검색과 OAS Import 비교가 함께 쓰는 메모리 SQLite 캐시.
+            // Route·Consumer 목록과 OAS Import 비교가 함께 쓰는 메모리 SQLite 캐시.
             // 열지 못하면 목록 화면이 아무것도 못 하므로 조용히 넘기지 않고 기동을 멈춘다.
             app.manage(db::Cache::new().map_err(|e| e.message)?);
 
@@ -101,9 +101,11 @@ pub fn run() {
             commands::routes_sync,
             commands::routes_query,
             commands::route_cached,
+            commands::consumers_sync,
+            commands::consumers_cached,
+            commands::consumer_access_counts,
             commands::oas_load,
             commands::oas_compare,
-            commands::consumers_list,
             commands::consumer_save,
             commands::consumer_delete,
             commands::services_list,

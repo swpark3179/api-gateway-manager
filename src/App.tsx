@@ -6,6 +6,7 @@
 import { useEffect, useRef } from "react";
 
 import { appReady } from "./api";
+import BootProgress from "./components/BootProgress";
 import IconRail from "./components/IconRail";
 import SidePanel from "./components/SidePanel";
 import TitleBar from "./components/TitleBar";
@@ -21,7 +22,9 @@ import { selectShowLock, useStore } from "./store";
 export default function App() {
   const section = useStore((s) => s.section);
   const view = useStore((s) => s.view);
-  const init = useStore((s) => s.init);
+  const loadSettings = useStore((s) => s.loadSettings);
+  const bootstrap = useStore((s) => s.bootstrap);
+  const refresh = useStore((s) => s.refresh);
   const showLock = useStore(selectShowLock);
   const started = useRef(false);
 
@@ -31,11 +34,24 @@ export default function App() {
     started.current = true;
 
     void (async () => {
-      await init();
-      // 첫 렌더가 끝난 뒤 창을 보여준다 (흰 화면 깜빡임 방지)
+      // 1) 로컬 설정부터 읽는다 — 네트워크 없음.
+      //    selectLocked 는 settings 가 null 이면 true 라, 설정보다 창을 먼저 띄우면
+      //    토큰이 있는 사용자도 잠금 화면을 한 프레임 보게 된다.
+      await loadSettings();
+
+      // 2) 페인트를 한 번 보장한 뒤 창을 띄운다 (흰 화면 깜빡임 방지).
+      //    useEffect 는 페인트 이후 실행이 보장되지 않으므로 rAF 를 두 번 넘긴다.
+      await new Promise<void>((r) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => r())),
+      );
       await appReady().catch(() => undefined);
+
+      // 3) 게이트웨이 조회는 창이 뜬 뒤에. 토큰이 없으면 bootstrap 이 즉시 반환한다.
+      await bootstrap();
+      // 첫 화면은 대시보드다 — KPI 는 캐시에서 세지만 version·latency 는 라이브 값이다.
+      await refresh();
     })();
-  }, [init]);
+  }, [loadSettings, bootstrap, refresh]);
 
   // 드롭존 밖에 파일을 떨어뜨리면 WebView2 가 그 파일로 내비게이션해 앱 화면이 사라진다.
   // (tauri.conf.json 의 dragDropEnabled 가 false 라 웹뷰 기본 동작이 그대로 온다.)
@@ -91,6 +107,9 @@ export default function App() {
               {isEdit && <EditScreen />}
             </>
           )}
+          {/* 본문 컬럼 안에 둔다 — 창 전체를 덮으면 커스텀 타이틀바의 드래그 영역과
+              창 조작 버튼까지 가려진다. */}
+          <BootProgress />
           <Toast />
         </div>
       </div>

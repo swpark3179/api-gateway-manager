@@ -65,6 +65,17 @@ export interface RouteView {
   raw: unknown;
 }
 
+/**
+ * 게이트웨이 `labels` 의 `name{n}` / `dept{n}` 쌍에서 읽은 관련 담당자.
+ *
+ * 번호 규칙(재번호 · 앞자리 0 배제 · 빈 값은 키 생략)은 Rust 한 곳에만 있다
+ * (`models::contacts_of` · `set_contacts_at`). 여기서 다시 구현하지 않는다.
+ */
+export interface Contact {
+  name: string;
+  dept: string;
+}
+
 export interface ConsumerView {
   username: string;
   desc: string;
@@ -74,6 +85,7 @@ export interface ConsumerView {
   groups: string[];
   groupsLocation: GroupsLocation;
   hasJwtAuth: boolean;
+  contacts: Contact[];
   updateTime: number | null;
   updated: string;
   /** 게이트웨이 원본 객체 — JSON 탭의 '게이트웨이 원본' 보기용 */
@@ -94,12 +106,34 @@ export interface RouteCounts {
   off: number;
 }
 
-/** `routes_sync` · `routes_query` 의 응답. */
+/** `routes_query` 의 응답. */
 export interface RoutesPage {
   items: RouteView[];
+  /** 세 축(chip · 검색어 · 컨슈머)을 모두 적용한 건수 — 하단 '총 N건' */
   total: number;
-  /** chip 필터를 빼고 검색어만 적용한 건수 — chip 라벨과 사이드 패널이 쓴다. */
+  /** chip 을 빼고 검색어·컨슈머만 적용한 건수 — 상단 chip 라벨 */
   counts: RouteCounts;
+}
+
+/** 컨슈머 한 명이 접근할 수 있는 라우트 수. */
+export interface ConsumerAccess {
+  username: string;
+  count: number;
+}
+
+/**
+ * Route 화면 좌측 패널이 쓰는 집계.
+ *
+ * `RouteCounts` 와 달리 검색어·chip·컨슈머를 **아무것도 반영하지 않는다.**
+ * 결과 요약이 아니라 범위를 고르기 위한 고정값이라, 타이핑할 때마다 모든 숫자가
+ * 흔들리면 고를 수가 없다.
+ */
+export interface AccessCounts {
+  /** 필터 없는 전체 라우트 수 */
+  all: number;
+  /** allowed_groups 가 비어 어떤 컨슈머로도 걸리지 않는 라우트 수 */
+  ungrouped: number;
+  items: ConsumerAccess[];
 }
 
 // ── OAS Import ───────────────────────────────────────────────
@@ -246,6 +280,7 @@ export interface ConsumerFormState {
   key: string;
   secret: string;
   groups: string[];
+  contacts: Contact[];
   isNew: boolean;
   /** 게이트웨이가 secret 을 돌려주지 않은 경우 JWT 탭에서 안내한다 */
   hasSecret: boolean;
@@ -276,6 +311,7 @@ export const emptyConsumerForm = (): ConsumerFormState => ({
   key: "",
   secret: "",
   groups: [],
+  contacts: [],
   isNew: true,
   hasSecret: true,
   groupsLocation: null,
@@ -326,6 +362,8 @@ export const consumerToForm = (c: ConsumerView): ConsumerFormState => ({
   key: c.key,
   secret: c.secret,
   groups: [...c.groups],
+  // groups 와 같은 이유로 깊은 복사한다 — 폼 편집이 목록의 원본을 건드리면 안 된다.
+  contacts: c.contacts.map((x) => ({ ...x })),
   isNew: false,
   hasSecret: c.hasSecret,
   groupsLocation: c.groupsLocation,
