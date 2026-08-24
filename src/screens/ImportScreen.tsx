@@ -3,10 +3,16 @@
  *
  * 두 단계가 한 화면에 있다:
  *   1. 스펙 불러오기 — 드래그&드롭 또는 파일 선택 + service · 경로 접두사
- *   2. 비교 결과 — 등록 / 메서드 불일치 / 미등록.
- *      · 등록 · 메서드 불일치 → 스펙 적용본과의 차이를 먼저 본다 (ImportDiffScreen).
- *        차이가 없으면 그 단계를 건너뛰고 상세로 간다.
+ *   2. 비교 결과 — 일치 / 속성 차이 / 미등록.
+ *      · 일치 → 그 route 상세로 간다.
+ *      · 속성 차이 → 등록돼 있지만 name·uri·rewrite·desc 중 스펙과 다른 값이 있다.
+ *        무엇을 적용할지 고르는 단계로 간다 (ImportDiffScreen).
  *      · 미등록 → 값이 채워진 신규 Route 폼.
+ *
+ * 판정 축이 `등록 / 메서드 불일치 / 미등록` 이었을 때 '메서드 불일치' 는 uri 는 맞지만 그
+ * 메서드가 없는 route 를 가리켰다. API 의 단위가 (path, method) 라 그런 route 는 이 API 를
+ * 처리하지 않으므로 지금은 `미등록` 이다 (`db::compare`). 그 자리를 대신 채우는 것이
+ * '속성 차이' 다 — 등록은 됐는데 값이 스펙과 다른, 실제로 손볼 것이 있는 건들이다.
  *
  * # 스펙을 어디서 읽는가 — 두 모드
  *
@@ -26,24 +32,25 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import ErrorBanner from "../components/ErrorBanner";
 import { nameFromPrefix } from "../lib/design";
+import { attrsOfRow, changedKeys, rowVerdict, type RowVerdict } from "../lib/importDiff";
 import { filterCompareRows, useStore } from "../store";
-import type { CompareRow, MatchState } from "../types";
+import type { CompareRow } from "../types";
 
 const ROW_H = "12px 16px";
 
 /** URL 로 받는 스펙의 크기 상한 (Rust 쪽 MAX_SPEC_BYTES 와 같은 값). */
 const MAX_SPEC_BYTES = 8 * 1024 * 1024;
 
-const STATE_META: Record<MatchState, { label: string; cls: string }> = {
-  registered: { label: "등록", cls: "success" },
-  methodMismatch: { label: "메서드 불일치", cls: "warning" },
+const VERDICT_META: Record<RowVerdict, { label: string; cls: string }> = {
+  same: { label: "일치", cls: "success" },
+  attrDiff: { label: "속성 차이", cls: "warning" },
   unregistered: { label: "미등록", cls: "neutral" },
 };
 
-const CHIPS: Array<[MatchState | "all", string]> = [
+const CHIPS: Array<[RowVerdict | "all", string]> = [
   ["all", "전체"],
-  ["registered", "등록"],
-  ["methodMismatch", "메서드 불일치"],
+  ["same", "일치"],
+  ["attrDiff", "속성 차이"],
   ["unregistered", "미등록"],
 ];
 
@@ -78,12 +85,12 @@ export default function ImportScreen() {
   const [over, setOver] = useState(false);
 
   const counts = useMemo(() => {
-    const c: Record<MatchState, number> = {
-      registered: 0,
-      methodMismatch: 0,
+    const c: Record<RowVerdict, number> = {
+      same: 0,
+      attrDiff: 0,
       unregistered: 0,
     };
-    for (const r of rows) c[r.state] += 1;
+    for (const r of rows) c[rowVerdict(r)] += 1;
     return c;
   }, [rows]);
 
@@ -135,8 +142,12 @@ export default function ImportScreen() {
           <p className="page-sub">
             OAS 3.0 스펙의 API 목록을 {envLabel} 서버의 선택한 service 와 대조합니다. 파일을
             첨부하지 않으면 고른 service 의 <span className="font-mono">spec_url</span> 을
-            읽습니다. 등록된 API 는 스펙을 적용한 본문과의 차이를 먼저 보여 주고(같으면 바로
-            상세로), 미등록 API 는 값이 채워진 신규 등록 화면으로 이어집니다.
+            읽습니다. 등록돼 있고 <span className="font-mono">name</span> ·{" "}
+            <span className="font-mono">uri</span> ·{" "}
+            <span className="font-mono">proxy-rewrite.uri</span> ·{" "}
+            <span className="font-mono">desc</span> 까지 스펙과 같으면{" "}
+            <b>일치</b>, 값이 다르면 <b>속성 차이</b> 로 표시하고 무엇을 적용할지 고르는 화면으로,
+            미등록 API 는 값이 채워진 신규 등록 화면으로 이어집니다.
           </p>
         </div>
         <div className="page-actions">
@@ -338,8 +349,8 @@ export default function ImportScreen() {
               <div style={{ display: "flex", gap: 28 }}>
                 {(
                   [
-                    ["등록", counts.registered, "var(--green-700)"],
-                    ["메서드 불일치", counts.methodMismatch, "var(--yellow-700)"],
+                    ["일치", counts.same, "var(--green-700)"],
+                    ["속성 차이", counts.attrDiff, "var(--yellow-700)"],
                     ["미등록", counts.unregistered, "var(--gray-700)"],
                   ] as Array<[string, number, string]>
                 ).map(([label, n, color]) => (
@@ -389,7 +400,7 @@ export default function ImportScreen() {
                 onClick={() => setChip(k)}
               >
                 {label}
-                {k !== "all" && ` (${counts[k as MatchState]})`}
+                {k !== "all" && ` (${counts[k as RowVerdict]})`}
               </div>
             ))}
             <div style={{ flex: 1 }} />
@@ -509,17 +520,22 @@ interface RowProps {
 }
 
 function Row({ row, onOpen, onCreate }: RowProps) {
-  const meta = STATE_META[row.state];
-  const registered = row.state !== "unregistered";
+  const verdict = rowVerdict(row);
+  const meta = VERDICT_META[verdict];
+  const registered = verdict !== "unregistered";
+  // 어느 필드가 스펙과 다른지 — 판정만 보여 주면 눌러 봐야 알 수 있다.
+  const changed = registered ? changedKeys(row, attrsOfRow(row)) : [];
 
   return (
     <tr
       onClick={() => (registered ? void onOpen(row) : onCreate(row))}
       style={{ cursor: "pointer" }}
       title={
-        registered
-          ? "클릭하면 스펙을 적용한 본문과 게이트웨이에 저장된 본문을 비교합니다 (같으면 상세로 바로 이동합니다)"
-          : "클릭하면 값이 채워진 신규 Route 등록 화면으로 이동합니다"
+        verdict === "attrDiff"
+          ? "클릭하면 스펙을 적용한 본문과 게이트웨이에 저장된 본문을 비교해 적용할 것을 고릅니다"
+          : registered
+            ? "스펙과 같습니다. 클릭하면 이 route 상세로 이동합니다"
+            : "클릭하면 값이 채워진 신규 Route 등록 화면으로 이동합니다"
       }
     >
       <td style={{ padding: ROW_H }}>
@@ -542,6 +558,14 @@ function Row({ row, onOpen, onCreate }: RowProps) {
           <span className="dot" />
           {meta.label}
         </span>
+        {changed.length > 0 && (
+          <div
+            className="text-xs font-mono"
+            style={{ marginTop: 4, color: "var(--yellow-800)", wordBreak: "break-all" }}
+          >
+            {changed.join(" · ")}
+          </div>
+        )}
         {row.wildcard && registered && (
           <div className="text-xs muted" style={{ marginTop: 4 }}>
             와일드카드 일치

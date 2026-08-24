@@ -767,12 +767,18 @@ pub struct CompareRow {
     pub method: String,
     pub operation_id: String,
     pub summary: String,
-    /// `registered` · `methodMismatch` · `unregistered`
+    /// `registered` · `unregistered`
     pub state: String,
     /// 매칭된 route 의 id. 미등록이면 빈 문자열
     pub route_id: String,
+    /// 아래 네 값은 **매칭된 route 에 지금 저장돼 있는 값**이다.
+    /// 프런트가 `suggested_*` 와 대조해 "등록돼 있지만 스펙과 값이 다르다"를 판정한다
+    /// (`lib/importDiff.ts`). 캐시의 `RouteView` 를 그대로 옮기므로 `route_cached` 로
+    /// 다시 읽어 만드는 diff 화면의 기준값과 어긋날 자리가 없다.
     pub route_name: String,
     pub route_uri: String,
+    pub route_desc: String,
+    pub route_rewrite: String,
     pub route_status: i64,
     /// 정확 일치가 아니라 와일드카드(`/a/*`) 로 걸렸는가
     pub wildcard: bool,
@@ -788,7 +794,6 @@ pub struct CompareRow {
 }
 
 pub const REGISTERED: &str = "registered";
-pub const METHOD_MISMATCH: &str = "methodMismatch";
 pub const UNREGISTERED: &str = "unregistered";
 
 /// 파싱한 오퍼레이션을 캐시에 적재한다 (이전 문서는 버린다).
@@ -818,30 +823,26 @@ pub fn load_oas_ops(conn: &Connection, ops: &[OasOp]) -> AppResult<()> {
 }
 
 /// 오퍼레이션 하나에 걸린 라우트 후보. `compare` 가 이 중 최선 하나만 남긴다.
+///
+/// **이 메서드를 받는 라우트만 후보가 된다** — uri 만 같고 메서드가 다른 라우트는 이 API 를
+/// 처리하지 않으므로 (path, method) 단위로 보면 이 API 는 등록돼 있지 않다.
+///
+/// `view` 는 `RouteView` 의 JSON 이다. 열로 하나씩 실어 오는 대신 통째로 들고 있다가
+/// **이긴 후보만** 파싱한다 — `route_cached` 와 같은 값을 보게 되므로 표의 판정과
+/// diff 화면의 기준값이 어긋날 수 없다.
 struct Cand {
-    route_id: String,
-    route_name: String,
-    route_uri: String,
-    route_status: i64,
+    view: String,
     wildcard: bool,
-    method_ok: bool,
-}
-
-impl Cand {
-    /// 후보 순위 — 메서드가 맞는 쪽을 먼저, 같으면 정확 일치를 먼저.
-    ///
-    /// 메서드를 정확 일치보다 우선하는 이유: uri 만 같고 메서드가 다른 라우트와,
-    /// 와일드카드지만 메서드가 맞는 라우트가 함께 있으면 실제 호출은 후자로 흘러간다.
-    /// 그 상황에서 "등록됨"이 정직한 답이다.
-    fn score(&self) -> i32 {
-        (if self.method_ok { 100 } else { 0 }) + (if self.wildcard { 0 } else { 10 })
-    }
 }
 
 /// 적재된 오퍼레이션을 선택한 service 안의 라우트와 비교한다.
 ///
 /// 조인 한 번으로 (오퍼레이션 × 후보 라우트) 쌍을 전부 뽑고 순위 결정만 Rust 에서 한다.
 /// SQL 안에서 순위까지 매기면 읽기 어려워지고, 후보 수는 오퍼레이션당 한두 개라 이 편이 낫다.
+///
+/// 판정은 `registered` · `unregistered` **둘**이다. 등록된 건이 스펙과 값까지 같은지는
+/// 여기서 정하지 않는다 — `route_*` (지금 저장된 값) 과 `suggested_*` (스펙 후보) 를 함께
+/// 실어 보내고, 그 대조는 프런트의 `lib/importDiff.ts` 한 곳에서만 한다.
 pub fn compare(
     conn: &Connection,
     env: &str,
@@ -882,7 +883,7 @@ pub fn compare(
     let mut stmt = conn
         .prepare(
             "SELECT o.seq, o.path, o.full_path, o.method, o.operation_id, o.summary,
-                    r.id, r.name, r.uri, r.status, ru.wildcard,
+                    r.view, ru.wildcard,
                     o.suggested_uri, o.suggested_name,
                     EXISTS(SELECT 1 FROM route_methods m
                             WHERE m.env = ?1 AND m.route_id = r.id AND m.method = o.method),
@@ -910,21 +911,20 @@ pub fn compare(
 
     while let Some(row) = rows.next().map_err(sql_err)? {
         let seq: i64 = row.get(0).map_err(sql_err)?;
-        let route_id: Option<String> = row.get(6).map_err(sql_err)?;
+        // LEFT JOIN 이므로 걸린 라우트가 없으면 NULL 이다.
+        let view: Option<String> = row.get(6).map_err(sql_err)?;
 
-        let cand = match route_id {
-            Some(id) if !id.is_empty() => {
-                let method_count: i64 = row.get(14).map_err(sql_err)?;
-                let method_hit: bool = row.get(13).map_err(sql_err)?;
-                Some(Cand {
-                    route_id: id,
-                    route_name: row.get(7).map_err(sql_err)?,
-                    route_uri: row.get(8).map_err(sql_err)?,
-                    route_status: row.get(9).map_err(sql_err)?,
-                    wildcard: row.get::<_, i64>(10).map_err(sql_err)? != 0,
-                    // methods 키가 없는 라우트는 모든 메서드를 허용한다 (APISIX 규칙).
-                    method_ok: method_count == 0 || method_hit,
-                })
+        let cand = match view {
+            Some(v) if !v.is_empty() => {
+                let method_count: i64 = row.get(11).map_err(sql_err)?;
+                let method_hit: bool = row.get(10).map_err(sql_err)?;
+                // methods 키가 없는 라우트는 모든 메서드를 허용한다 (APISIX 규칙).
+                // 그 외에는 이 메서드를 받는 라우트만 후보다 (`Cand` 주석 참조).
+                if method_count == 0 || method_hit {
+                    Some(Cand { view: v, wildcard: row.get::<_, i64>(7).map_err(sql_err)? != 0 })
+                } else {
+                    None
+                }
             }
             _ => None,
         };
@@ -942,10 +942,12 @@ pub fn compare(
                     route_id: String::new(),
                     route_name: String::new(),
                     route_uri: String::new(),
+                    route_desc: String::new(),
+                    route_rewrite: String::new(),
                     route_status: 0,
                     wildcard: false,
-                    suggested_uri: row.get(11).map_err(sql_err)?,
-                    suggested_name: row.get(12).map_err(sql_err)?,
+                    suggested_uri: row.get(8).map_err(sql_err)?,
+                    suggested_name: row.get(9).map_err(sql_err)?,
                     // 접두사를 붙이지 않은 원본 path 가 곧 rewrite 후보다.
                     suggested_rewrite: row.get(1).map_err(sql_err)?,
                 },
@@ -955,25 +957,28 @@ pub fn compare(
 
         if let Some(c) = cand {
             let slot = &mut acc.last_mut().expect("행 하나는 이미 push 되어 있다").1;
-            if slot.as_ref().map(|best| c.score() > best.score()).unwrap_or(true) {
+            // 후보 순위는 정확 일치 우선이다 — 메서드는 이미 후보 조건에 들어가 있다.
+            if slot.as_ref().map(|best| best.wildcard && !c.wildcard).unwrap_or(true) {
                 *slot = Some(c);
             }
         }
     }
 
-    Ok(acc
-        .into_iter()
-        .map(|(mut row, best)| {
-            if let Some(c) = best {
-                row.state =
-                    if c.method_ok { REGISTERED.to_string() } else { METHOD_MISMATCH.to_string() };
-                row.route_id = c.route_id;
-                row.route_name = c.route_name;
-                row.route_uri = c.route_uri;
-                row.route_status = c.route_status;
-                row.wildcard = c.wildcard;
-            }
-            row
-        })
-        .collect())
+    let mut out = Vec::with_capacity(acc.len());
+    for (mut row, best) in acc {
+        if let Some(c) = best {
+            // 이긴 후보만 파싱한다 (`Cand` 주석 참조).
+            let r: RouteView = serde_json::from_str(&c.view)?;
+            row.state = REGISTERED.to_string();
+            row.route_id = r.id;
+            row.route_name = r.name;
+            row.route_uri = r.uri;
+            row.route_desc = r.desc;
+            row.route_rewrite = r.rewrite;
+            row.route_status = r.status;
+            row.wildcard = c.wildcard;
+        }
+        out.push(row);
+    }
+    Ok(out)
 }

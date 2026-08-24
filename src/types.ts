@@ -258,7 +258,14 @@ export interface OasDoc {
   warning?: string;
 }
 
-export type MatchState = "registered" | "methodMismatch" | "unregistered";
+/**
+ * Rust 의 판정 — 이 API (path, method) 를 처리하는 route 가 있는가.
+ *
+ * uri 는 맞지만 그 메서드를 받지 않는 route 는 이 API 의 대상이 아니므로 `unregistered` 다
+ * (`db::compare`). 등록된 건이 스펙과 **값까지** 같은지는 프런트가 판정한다 —
+ * `lib/importDiff.ts` 의 `RowVerdict`.
+ */
+export type MatchState = "registered" | "unregistered";
 
 /** 스펙 오퍼레이션 한 건의 등록 여부 판정. */
 export interface CompareRow {
@@ -272,8 +279,15 @@ export interface CompareRow {
   state: MatchState;
   /** 매칭된 route 의 id. 미등록이면 빈 문자열 */
   routeId: string;
+  /**
+   * 대상 route 에 **지금 저장돼 있는** 값 — `suggested*` 와 대조해 "등록됐지만 스펙과 값이
+   * 다르다"를 판정한다 (`lib/importDiff.ts`). Rust 가 캐시의 `RouteView` 를 그대로 옮긴
+   * 값이라, diff 화면이 `route_cached` 로 다시 읽어 만드는 기준값과 어긋나지 않는다.
+   */
   routeName: string;
   routeUri: string;
+  routeDesc: string;
+  routeRewrite: string;
   routeStatus: number;
   /** 정확 일치가 아니라 와일드카드(`/a/*`)로 걸렸는가 */
   wildcard: boolean;

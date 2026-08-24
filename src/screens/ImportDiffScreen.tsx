@@ -5,8 +5,9 @@
  * 곧바로 상세를 연다 (`store.openRouteFromImport`).
  *
  * 두 개의 카드가 있다:
- *   1. 변경 사항 선택 — 필드별로 무엇을 적용할지 고른다. **기본은 전부 해제**다.
- *   2. 요청 본문 — 고른 것을 반영한 본문과 기존 본문의 줄 단위 diff. 체크를 켤 때마다 바뀐다.
+ *   1. 변경 사항 선택 — 필드별로 무엇을 적용할지 고른다. **차이가 있는 항목은 처음부터 모두
+ *      선택돼 있다** — 여기까지 온 이유가 "스펙대로 맞추겠다" 라서 빼고 싶은 것만 해제한다.
+ *   2. 요청 본문 — 고른 것을 반영한 본문과 기존 본문의 줄 단위 diff. 체크를 끌 때마다 바뀐다.
  *
  * 저장은 `store.save()` 를 그대로 부른다 — Import 전용 저장 경로를 만들지 않으므로
  * 플러그인 보존 머지(`routes::apply_route_form`)가 그대로 적용되고, 저장 후 캐시 재동기화와
@@ -26,7 +27,6 @@ import {
   type DiffLine,
   type DiffSelection,
   type FlagKey,
-  type MethodChoice,
 } from "../lib/importDiff";
 import { useStore } from "../store";
 
@@ -114,7 +114,8 @@ export default function ImportDiffScreen() {
           </h2>
           <p className="page-sub" style={{ fontSize: 13 }}>
             대상 route <span className="font-mono">{row.routeName || row.routeId}</span> — 스펙과
-            다른 항목 {changed}건. 적용할 것을 고르고 저장을 누르면 게이트웨이에 반영됩니다.
+            다른 항목 {changed}건이 모두 선택돼 있습니다. 그대로 두고 싶은 것을 해제한 뒤 저장을
+            누르면 게이트웨이에 반영됩니다.
           </p>
           <p
             className="page-sub selectable"
@@ -149,7 +150,8 @@ export default function ImportDiffScreen() {
           <div style={{ minWidth: 0 }}>
             <h5 className="h5">변경 사항 선택</h5>
             <div className="text-sm muted" style={{ marginTop: 2 }}>
-              고른 항목만 요청 본문에 반영됩니다. 기본값은 아무것도 적용하지 않는 것입니다.
+              고른 항목만 요청 본문에 반영됩니다. 스펙과 다른 항목은 처음부터 모두 선택돼 있으니,
+              그대로 두고 싶은 것만 해제하세요.
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flex: "0 0 auto" }}>
@@ -178,16 +180,18 @@ export default function ImportDiffScreen() {
                 field={f}
                 sel={sel}
                 onToggle={(k, on) => setDiffSel({ [k]: on })}
-                onMethod={(c) => setDiffSel({ methods: c })}
               />
             ))}
           </tbody>
         </table>
 
         <div className="text-xs muted" style={{ marginTop: 12, lineHeight: "18px" }}>
-          <span className="font-mono">status</span> · <span className="font-mono">service_id</span>{" "}
-          · <span className="font-mono">allowed_groups</span> 는 스펙에 없는 값이라 이 화면에서
-          바꾸지 않습니다 — 게이트웨이에 저장된 값이 그대로 유지됩니다.
+          <span className="font-mono">methods</span> · <span className="font-mono">status</span> ·{" "}
+          <span className="font-mono">service_id</span> ·{" "}
+          <span className="font-mono">allowed_groups</span> 는 이 화면에서 바꾸지 않습니다 —
+          게이트웨이에 저장된 값이 그대로 유지됩니다. (
+          <span className="font-mono">{row.method}</span> 는 이 route 에 이미 올라와 있어서 이 API
+          가 '등록' 으로 판정됐고, route 에 남는 다른 메서드는 옆 API 의 몫입니다.)
         </div>
       </div>
 
@@ -253,15 +257,11 @@ interface FieldRowProps {
   field: DiffField;
   sel: DiffSelection;
   onToggle: (key: FlagKey, on: boolean) => void;
-  onMethod: (choice: MethodChoice) => void;
 }
 
 const ROW_PAD = "12px 16px";
 
-function FieldRow({ field, sel, onToggle, onMethod }: FieldRowProps) {
-  // 판별 유니온이 아니라 키 하나로 갈리므로 여기서 좁혀 둔다 — 아래에서 두 번 분기하지 않는다.
-  const flagKey: FlagKey | null = field.key === "methods" ? null : field.key;
-
+function FieldRow({ field, sel, onToggle }: FieldRowProps) {
   return (
     <tr>
       <td style={{ padding: ROW_PAD, verticalAlign: "top" }}>
@@ -310,39 +310,6 @@ function FieldRow({ field, sel, onToggle, onMethod }: FieldRowProps) {
       <td style={{ padding: ROW_PAD, verticalAlign: "top" }}>
         {field.same ? (
           <span className="text-xs muted">—</span>
-        ) : flagKey === null ? (
-          // methods 만 3지 선택이다 — 같은 route 가 스펙의 다른 API 도 처리하고 있을 수 있어
-          // '추가' 와 '교체' 를 구별해야 한다 (lib/importDiff 의 diffFields 주석).
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {(
-              [
-                ["keep", "기존 유지"],
-                ["add", `이 메서드 추가 (+ ${field.next})`],
-                ["replace", `스펙대로 교체 (${field.next} 만)`],
-              ] as Array<[MethodChoice, string]>
-            ).map(([k, label]) => (
-              <label
-                key={k}
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 8,
-                  cursor: "pointer",
-                  font: "400 12px/18px var(--font-sans)",
-                  color: k === "replace" ? "var(--red-700)" : "var(--gray-700)",
-                }}
-              >
-                <input
-                  type="radio"
-                  name="diff-methods"
-                  checked={sel.methods === k}
-                  onChange={() => onMethod(k)}
-                  style={{ marginTop: 2 }}
-                />
-                <span>{label}</span>
-              </label>
-            ))}
-          </div>
         ) : (
           <label
             style={{
@@ -356,8 +323,8 @@ function FieldRow({ field, sel, onToggle, onMethod }: FieldRowProps) {
           >
             <input
               type="checkbox"
-              checked={sel[flagKey]}
-              onChange={(e) => onToggle(flagKey, e.target.checked)}
+              checked={sel[field.key]}
+              onChange={(e) => onToggle(field.key, e.target.checked)}
             />
             <span>스펙 값 적용</span>
           </label>

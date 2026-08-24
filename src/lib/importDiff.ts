@@ -1,5 +1,10 @@
 /**
- * Import 비교 결과에서 **등록된 API 한 건**을 눌렀을 때의 "스펙 적용본 vs 게이트웨이 저장분".
+ * Import 비교 결과의 "스펙 적용본 vs 게이트웨이 저장분".
+ *
+ * 두 곳이 같은 함수를 쓴다:
+ *   · 비교 결과 표 — 등록된 건이 스펙과 값까지 같은지 (`rowVerdict` · `changedKeys`)
+ *   · diff 화면    — 필드별 차이와 무엇을 적용할지 (`diffFields` · `applySelection`)
+ * 두 판정이 갈리면 표에는 `일치` 인데 눌러 보니 diff 가 있는(또는 그 반대) 일이 벌어진다.
  *
  * # 무엇을 비교하는가
  *
@@ -7,55 +12,96 @@
  * (`oas::suggested_name` · `oas::to_apisix_uri`). 여기서 uri·이름 규칙을 다시 구현하면
  * 반드시 어긋난다 — `types.ts` 의 `routeFormFromOas` 주석과 같은 이유다.
  *
- * 기존 쪽은 `routeToForm(RouteView)` 이고, 양쪽 모두 최종적으로 `design.routeJson` 이라는
- * **같은 직렬화 함수**를 통과한다. 그래서 두 본문의 키 순서가 같고 줄 단위 diff 가 깨끗하다.
+ * 기존 쪽(`RouteAttrs`)은 두 경로로 들어온다. 표는 `CompareRow` 의 `route*` 값
+ * (Rust 가 캐시의 `RouteView` 를 그대로 옮긴 것), diff 화면은 `routeToForm(RouteView)` 다.
+ * 같은 캐시의 같은 값이라 두 경로가 어긋나지 않는다.
+ *
+ * diff 화면의 두 본문은 `design.routeJson` 이라는 **같은 직렬화 함수**를 통과한다.
+ * 그래서 키 순서가 같고 줄 단위 diff 가 깨끗하다.
  *
  * # API 의 단위는 (path, method) 다
  *
  * `GET /test` 와 `POST /test` 는 서로 다른 API 이고 각각 따로 처리한다 (`CompareRow` 가 이미
- * 그 단위다). 다만 게이트웨이의 route 객체 하나가 두 API 를 함께 처리할 수 있으므로,
- * `methods` 는 **포함 여부**로 판정한다 — "이 API 가 이 route 에 올라와 있는가". route 에
- * 남는 다른 메서드는 옆 API 의 몫이지 이 API 의 차이가 아니다. (게이트웨이가 `methods` 키를
- * 아예 갖고 있지 않으면 APISIX 는 전 메서드를 허용하므로 이것도 '올라와 있음' 이다 —
- * `db::compare` 의 `method_ok` 와 같은 규칙이다.)
+ * 그 단위다). 그래서 `methods` 는 이 화면의 비교 대상이 **아니다** — 이 메서드를 받지 않는
+ * route 는 애초에 이 API 의 대상 route 가 아니라 `미등록` 으로 판정된다 (`db::compare`).
+ * 대상 route 에 남는 다른 메서드는 옆 API 의 몫이다.
  *
  * # 손대지 않는 값
  *
- * `status` · `service_id` · `allowed_groups`(+`groupsLocation`) 는 스펙에 없는 값이라
- * 후보를 만들지 않는다. 두 본문에 똑같이 실려 diff 에서 조용히 지나간다.
+ * `methods` · `status` · `service_id` · `allowed_groups`(+`groupsLocation`) 는 스펙에 없거나
+ * 이 API 의 차이가 아니라 후보를 만들지 않는다. 두 본문에 똑같이 실려 diff 에서 조용히 지나간다.
  */
 
-import { sortMethods } from "./design";
 import { specDesc } from "../types";
 import type { CompareRow, RouteFormState } from "../types";
 
-/** `methods` 만 3지 선택이다 — 왜인지는 아래 `diffFields` 주석 참조. */
-export type MethodChoice = "keep" | "add" | "replace";
-
-export interface DiffSelection {
-  name: boolean;
-  uri: boolean;
-  rewrite: boolean;
-  desc: boolean;
-  methods: MethodChoice;
-}
-
-/** 체크박스로 다루는 키 — `methods` 만 3지 선택이라 빠져 있다. */
+/** 스펙과 대조하는 네 필드. 체크박스 하나가 한 필드다. */
 export type FlagKey = "name" | "uri" | "rewrite" | "desc";
 
-export type DiffKey = keyof DiffSelection;
+export const FLAG_KEYS: FlagKey[] = ["name", "uri", "rewrite", "desc"];
 
-/** 기본값 — **아무것도 적용하지 않는다.** */
+export type DiffSelection = Record<FlagKey, boolean>;
+
+export type DiffKey = FlagKey;
+
+/** **아무것도 적용하지 않는다** — '전부 해제' 버튼과 화면을 벗어날 때의 초기값. */
 export const NO_SELECTION: DiffSelection = {
   name: false,
   uri: false,
   rewrite: false,
   desc: false,
-  methods: "keep",
 };
 
+/**
+ * 대조에 쓰는 route 속성값.
+ *
+ * `RouteFormState` 가 구조적으로 이 모양을 만족하므로 diff 화면은 폼을 그대로 넘긴다.
+ * 비교 결과 표는 `attrsOfRow` 로 `CompareRow` 에서 만든다.
+ */
+export interface RouteAttrs {
+  name: string;
+  uri: string;
+  rewrite: string;
+  desc: string;
+}
+
+/** 대상 route 에 **지금 저장돼 있는** 값 (Rust 가 캐시에서 실어 보낸 것). */
+export const attrsOfRow = (row: CompareRow): RouteAttrs => ({
+  name: row.routeName,
+  uri: row.routeUri,
+  rewrite: row.routeRewrite,
+  desc: row.routeDesc,
+});
+
+/** 스펙이 제안하는 값. `desc` 만 여기서 만들고 나머지는 Rust 가 계산한 것이다. */
+export const specAttrs = (row: CompareRow): RouteAttrs => ({
+  name: row.suggestedName,
+  uri: row.suggestedUri,
+  rewrite: row.suggestedRewrite,
+  desc: specDesc(row),
+});
+
+/** 스펙과 다른 필드. 표의 판정과 diff 화면이 **이 한 함수**만 본다. */
+export const changedKeys = (row: CompareRow, cur: RouteAttrs): FlagKey[] => {
+  const next = specAttrs(row);
+  return FLAG_KEYS.filter((k) => cur[k] !== next[k]);
+};
+
+/**
+ * 비교 결과 표의 판정.
+ *
+ * Rust 의 `state`(등록/미등록) 위에 '속성 차이' 를 얹은 것이다. 등록됐다고만 알려 주면
+ * "그래서 스펙과 같은가"를 행마다 눌러 봐야 알 수 있어서, 그 답을 표에서 바로 보여 준다.
+ */
+export type RowVerdict = "same" | "attrDiff" | "unregistered";
+
+export function rowVerdict(row: CompareRow): RowVerdict {
+  if (row.state === "unregistered") return "unregistered";
+  return changedKeys(row, attrsOfRow(row)).length > 0 ? "attrDiff" : "same";
+}
+
 export interface DiffField {
-  key: FlagKey | "methods";
+  key: FlagKey;
   /** 요청 본문에서의 자리 (`plugins.proxy-rewrite.uri` 처럼 실제 경로로 적는다) */
   label: string;
   current: string;
@@ -71,15 +117,11 @@ const NONE = "(없음)";
 
 const show = (v: string): string => (v.trim() === "" ? NONE : v);
 
-/** 이 API 가 route 에 올라와 있는가 — `db::compare` 의 `method_ok` 와 같은 규칙. */
-export const methodOnRoute = (base: RouteFormState, method: string): boolean =>
-  base.methods.length === 0 || base.methods.includes(method);
-
 /**
  * 같은 route 를 가리키는 **다른** 스펙 API 들.
  *
- * 게이트웨이 route 하나가 여러 스펙 API 를 처리하고 있으면 uri 를 좁히거나 methods 를
- * 교체하는 순간 그 API 들이 끊긴다. 경고를 붙이기 위해 세어 둔다.
+ * 게이트웨이 route 하나가 여러 스펙 API 를 처리하고 있으면 uri 를 좁히는 순간 그 API 들이
+ * 끊긴다. 경고를 붙이기 위해 세어 둔다.
  */
 export function siblingOps(row: CompareRow, rows: CompareRow[]): CompareRow[] {
   if (!row.routeId) return [];
@@ -94,24 +136,16 @@ function opsLabel(ops: CompareRow[]): string {
   return ops.length > 3 ? `${head} 외 ${ops.length - 3}건` : head;
 }
 
-/**
- * 필드별 차이.
- *
- * `methods` 만 체크박스가 아니라 3지 선택인 이유: (path, method) = API 라는 원칙을 그대로
- * 따르면 `GET /test` 의 후보는 `["GET"]` 인데, 같은 route 가 스펙의 `POST /test` 도 처리하고
- * 있으면 그걸 그대로 덮어쓰는 순간 옆 API 가 조용히 끊긴다. 그래서 '이 메서드 추가'(옆 API 를
- * 지키면서 이 API 를 올린다) 와 '스펙대로 교체'(정말로 이 메서드만 남긴다) 를 나눠 두고,
- * 교체 쪽에는 무엇을 잃는지 경고를 붙인다.
- */
+/** 필드별 차이 — diff 화면의 표와 '적용 후' 본문이 이것을 쓴다. */
 export function diffFields(
   row: CompareRow,
-  base: RouteFormState,
+  cur: RouteAttrs,
   rows: CompareRow[],
 ): DiffField[] {
   const siblings = siblingOps(row, rows);
-  const nextDesc = specDesc(row);
+  const next = specAttrs(row);
 
-  const uriSame = base.uri === row.suggestedUri;
+  const uriSame = cur.uri === next.uri;
   // uri 가 달라도 '등록' 으로 판정됐다는 것은 현재 uri 가 이미 이 경로를 매칭한다는 뜻이다.
   // 그 사실을 말해 주지 않으면 `:petId` 를 쓰는 멀쩡한 route 가 전부 '고쳐야 할 것' 처럼 보인다.
   const uriNote = uriSame
@@ -121,33 +155,27 @@ export function diffFields(
       : "표기 차이 — 현재 uri 도 이 경로에 매칭됩니다 (그래서 '등록' 으로 판정됐습니다).";
 
   const uriWarns: string[] = [];
-  if (base.uri.includes(",")) {
-    const n = base.uri.split(",").filter((s) => s.trim()).length;
+  if (cur.uri.includes(",")) {
+    const n = cur.uri.split(",").filter((s) => s.trim()).length;
     uriWarns.push(`현재 route 는 uri 를 ${n}개 갖고 있습니다 (uris 배열). 적용하면 하나로 줄어듭니다.`);
   }
   if (!uriSame && siblings.length > 0) {
     uriWarns.push(`이 route 는 스펙의 다른 API (${opsLabel(siblings)}) 도 매칭하고 있습니다. uri 를 바꾸면 그 매칭이 깨질 수 있습니다.`);
   }
 
-  const methodsSame = methodOnRoute(base, row.method);
-  const methodsWarn =
-    siblings.length > 0
-      ? `'스펙대로 교체' 를 고르면 이 route 가 처리하던 다른 API (${opsLabel(siblings)}) 가 게이트웨이에서 끊깁니다.`
-      : undefined;
-
-  const fields: DiffField[] = [
+  return [
     {
       key: "name",
       label: "name",
-      current: show(base.name),
-      next: show(row.suggestedName),
-      same: base.name === row.suggestedName,
+      current: show(cur.name),
+      next: show(next.name),
+      same: cur.name === next.name,
     },
     {
       key: "uri",
       label: "uri",
-      current: show(base.uri),
-      next: show(row.suggestedUri),
+      current: show(cur.uri),
+      next: show(next.uri),
       same: uriSame,
       note: uriNote,
       warn: uriWarns.length > 0 ? uriWarns.join(" ") : undefined,
@@ -155,87 +183,60 @@ export function diffFields(
     {
       key: "rewrite",
       label: "plugins.proxy-rewrite.uri",
-      current: show(base.rewrite),
-      next: show(row.suggestedRewrite),
-      same: base.rewrite === row.suggestedRewrite,
+      current: show(cur.rewrite),
+      next: show(next.rewrite),
+      same: cur.rewrite === next.rewrite,
       note:
-        base.rewrite.trim() === "" && row.suggestedRewrite.trim() !== ""
+        cur.rewrite.trim() === "" && next.rewrite.trim() !== ""
           ? "현재 proxy-rewrite 가 없습니다 — 적용하면 새로 추가됩니다."
           : undefined,
     },
     {
-      key: "methods",
-      label: "methods",
-      current:
-        base.methods.length > 0
-          ? base.methods.join(", ")
-          : "(없음 — APISIX 가 전 메서드를 허용합니다)",
-      next: row.method,
-      same: methodsSame,
-      note: methodsSame
-        ? undefined
-        : "이 API 의 메서드가 route 에 올라와 있지 않습니다 ('메서드 불일치').",
-      warn: methodsWarn,
-    },
-    {
       key: "desc",
       label: "desc",
-      current: show(base.desc),
-      next: show(nextDesc),
-      same: base.desc === nextDesc,
+      current: show(cur.desc),
+      next: show(next.desc),
+      same: cur.desc === next.desc,
     },
   ];
-
-  return fields;
 }
 
 export const hasDiff = (fields: DiffField[]): boolean => fields.some((f) => !f.same);
 
 /** 선택이 하나라도 있는가 — 없으면 저장할 것이 없다 (빈 PUT 을 보내지 않는다). */
-export const hasSelection = (sel: DiffSelection): boolean =>
-  sel.name || sel.uri || sel.rewrite || sel.desc || sel.methods !== "keep";
+export const hasSelection = (sel: DiffSelection): boolean => FLAG_KEYS.some((k) => sel[k]);
 
 /**
  * "차이 전부 선택".
  *
- * `methods` 는 **`add`** 를 고른다 — 이 API 를 올리면서 옆 API 를 지키는 쪽이고,
- * `replace` 는 무엇을 잃는지 읽고 나서 고르는 선택지다.
+ * diff 화면에 처음 들어갈 때의 기본값이기도 하다 (`store.openRouteFromImport`) —
+ * 이 화면까지 온 이유가 "스펙대로 맞추겠다" 라서, 빼고 싶은 것만 해제하는 편이 짧다.
+ * 무엇을 잃는지에 대한 경고는 해당 행에 그대로 남는다.
  */
 export function allChanges(fields: DiffField[]): DiffSelection {
   const changed = (k: DiffKey): boolean => fields.some((f) => f.key === k && !f.same);
-  return {
-    name: changed("name"),
-    uri: changed("uri"),
-    rewrite: changed("rewrite"),
-    desc: changed("desc"),
-    methods: changed("methods") ? "add" : "keep",
-  };
+  return { name: changed("name"), uri: changed("uri"), rewrite: changed("rewrite"), desc: changed("desc") };
 }
 
 /**
  * 고른 것만 기존 폼에 얹는다.
  *
- * `...base` 로 시작하므로 `id` · `serviceId` · `status` · `groups` · `groupsLocation` 은
- * 그대로 남는다 — 결과가 곧 `store.save()` 가 그대로 쓰는 `RouteFormState` 다.
+ * `...base` 로 시작하므로 `id` · `methods` · `serviceId` · `status` · `groups` ·
+ * `groupsLocation` 은 그대로 남는다 — 결과가 곧 `store.save()` 가 그대로 쓰는
+ * `RouteFormState` 다.
  */
 export function applySelection(
   base: RouteFormState,
   row: CompareRow,
   sel: DiffSelection,
 ): RouteFormState {
+  const next = specAttrs(row);
   return {
     ...base,
-    name: sel.name ? row.suggestedName : base.name,
-    uri: sel.uri ? row.suggestedUri : base.uri,
-    rewrite: sel.rewrite ? row.suggestedRewrite : base.rewrite,
-    desc: sel.desc ? specDesc(row) : base.desc,
-    methods:
-      sel.methods === "add"
-        ? // 표준 외 메서드를 떨어뜨리지 않고 표준 순서로 정렬한다 (design.sortMethods).
-          sortMethods([...base.methods, row.method])
-        : sel.methods === "replace"
-          ? [row.method]
-          : [...base.methods],
+    name: sel.name ? next.name : base.name,
+    uri: sel.uri ? next.uri : base.uri,
+    rewrite: sel.rewrite ? next.rewrite : base.rewrite,
+    desc: sel.desc ? next.desc : base.desc,
   };
 }
 
