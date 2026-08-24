@@ -12,6 +12,7 @@ import SidePanel from "./components/SidePanel";
 import TitleBar from "./components/TitleBar";
 import Toast from "./components/Toast";
 import Dashboard from "./screens/Dashboard";
+import ImportDiffScreen from "./screens/ImportDiffScreen";
 import ImportScreen from "./screens/ImportScreen";
 import ListScreen from "./screens/ListScreen";
 import LockedScreen from "./screens/LockedScreen";
@@ -71,6 +72,9 @@ export default function App() {
   }, []);
 
   const isImport = section === "routes" && view === "import";
+  // Import 비교 결과 → 등록된 API 를 눌렀을 때의 중간 단계. 상세(EditScreen)와 같은 섹션에
+  // 있으므로 아래 isEdit 에서 명시적으로 빼 준다.
+  const isDiff = section === "routes" && view === "diff";
   // 목록 화면은 섹션마다 다르지만 편집 화면(EditScreen)은 네 형태가 공유한다 —
   // 저장·취소·삭제 헤더를 네 번 복붙하지 않기 위해서다.
   const EDITABLE: Section[] = ["routes", "consumers", "upstreams", "services"];
@@ -78,7 +82,7 @@ export default function App() {
   const isList = (section === "routes" || section === "consumers") && view === "list";
   const isUpstreams = section === "upstreams" && view === "list";
   const isServices = section === "services" && view === "list";
-  const isEdit = editable && view !== "list" && !isImport;
+  const isEdit = editable && view !== "list" && !isImport && !isDiff;
 
   return (
     <div
@@ -114,6 +118,7 @@ export default function App() {
               {isUpstreams && <UpstreamsScreen />}
               {isServices && <ServicesScreen />}
               {isImport && <ImportScreen />}
+              {isDiff && <ImportDiffScreen />}
               {isEdit && <EditScreen />}
             </>
           )}

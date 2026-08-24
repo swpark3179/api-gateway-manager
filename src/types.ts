@@ -2,8 +2,14 @@
 
 export type EnvKey = "dev" | "prod";
 export type Section = "dash" | "routes" | "consumers" | "upstreams" | "services" | "settings";
-/** `import` 는 Route 섹션 전용 — OAS 스펙 비교 화면 (ImportScreen). */
-export type View = "list" | "detail" | "create" | "import";
+/**
+ * `import` · `diff` 는 Route 섹션 전용이다.
+ *   import  OAS 스펙 비교 화면 (ImportScreen)
+ *   diff    비교 결과에서 등록된 API 를 눌렀을 때의 중간 단계 — 스펙 적용본과 저장분의 차이를
+ *           보여 주고 무엇을 적용할지 고르게 한다 (ImportDiffScreen). 차이가 없으면 이 단계를
+ *           건너뛰고 바로 `detail` 로 간다.
+ */
+export type View = "list" | "detail" | "create" | "import" | "diff";
 export type Tab = "form" | "json" | "jwt";
 export type Kind = "route" | "consumer" | "service" | "upstream";
 
@@ -479,10 +485,21 @@ export const routeFormFromOas = (row: CompareRow, serviceId: string): RouteFormS
   name: row.suggestedName,
   uri: row.suggestedUri,
   rewrite: row.suggestedRewrite,
-  // APISIX 의 desc 는 길이 제한이 있어 요약을 잘라 넣는다.
-  desc: row.summary.trim().slice(0, 255),
+  desc: specDesc(row),
   methods: [row.method],
 });
+
+/** APISIX 의 `desc` 길이 제한. */
+export const MAX_DESC_LEN = 255;
+
+/**
+ * 스펙 요약 → `desc` 후보.
+ *
+ * 신규 등록 프리필(`routeFormFromOas`)과 기존 API 와의 diff(`lib/importDiff`)가 **같은 값**을
+ * 써야 한다. 두 곳에서 각자 자르면 "신규로 만든 값" 과 "적용하겠다고 보여 준 값" 이 달라진다.
+ */
+export const specDesc = (row: CompareRow): string =>
+  row.summary.trim().slice(0, MAX_DESC_LEN);
 
 /** 요구된 기본 timeout — connect 10 · send 10 · read 60 (초). */
 export const DEFAULT_TIMEOUT = { connect: "10", send: "10", read: "60" };
