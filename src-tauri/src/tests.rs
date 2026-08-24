@@ -761,7 +761,7 @@ mod compare {
     }
 
     #[test]
-    fn marks_registered_mismatch_and_unregistered() {
+    fn marks_registered_and_unregistered() {
         let c = conn();
         db::sync_routes(
             &c,
@@ -794,8 +794,11 @@ mod compare {
         assert_eq!(rows[0].route_id, "1");
         assert!(!rows[0].wildcard);
 
-        assert_eq!(rows[1].state, db::METHOD_MISMATCH);
-        assert_eq!(rows[1].route_id, "1", "메서드를 추가할 대상 라우트를 가리켜야 한다");
+        // (path, method) 가 API 의 단위다. uri 만 같고 이 메서드를 받지 않는 라우트는 이 API 를
+        // 처리하지 않으므로 미등록이다 — 메서드를 끼워 넣을 대상으로 가리키지 않는다.
+        assert_eq!(rows[1].state, db::UNREGISTERED);
+        assert_eq!(rows[1].route_id, "");
+        assert_eq!(rows[1].suggested_uri, "/pets", "신규 등록 후보는 그대로 준다");
 
         assert_eq!(rows[2].state, db::REGISTERED);
         assert_eq!(rows[2].route_id, "2");
@@ -875,6 +878,47 @@ mod compare {
         let rows = db::compare(&c, "dev", "svc", "").unwrap();
         assert_eq!(rows[0].state, db::REGISTERED);
         assert_eq!(rows[1].state, db::REGISTERED);
+    }
+
+    /// 등록된 건은 **지금 저장된 값**도 같이 실어 보낸다 — 프런트가 `suggested_*` 와 대조해
+    /// "등록돼 있지만 스펙과 값이 다르다"를 판정한다 (`lib/importDiff.ts`).
+    #[test]
+    fn carries_current_route_values_for_registered_rows() {
+        let c = conn();
+        let r = RouteView::from_value(&json!({
+            "id": "1",
+            "name": "주문 목록 조회",
+            "uri": "/v1/orders",
+            "desc": "예전 설명",
+            "status": 0,
+            "service_id": "svc",
+            "methods": ["GET"],
+            "plugins": { "proxy-rewrite": { "uri": "/legacy/orders" } },
+        }));
+        db::sync_routes(&c, "dev", &[r]).unwrap();
+        db::load_oas_ops(
+            &c,
+            &[OasOp {
+                path: "/orders".into(),
+                method: "GET".into(),
+                operation_id: "listOrders".into(),
+                summary: "주문 목록".into(),
+                tags: vec![],
+            }],
+        )
+        .unwrap();
+
+        let rows = db::compare(&c, "dev", "svc", "/v1").unwrap();
+        let row = &rows[0];
+        assert_eq!(row.state, db::REGISTERED);
+        assert_eq!(row.route_name, "주문 목록 조회");
+        assert_eq!(row.route_uri, "/v1/orders");
+        assert_eq!(row.route_desc, "예전 설명");
+        assert_eq!(row.route_rewrite, "/legacy/orders");
+        assert_eq!(row.route_status, 0);
+        // 스펙 후보는 그대로 — 두 쪽이 다르다는 판정은 프런트가 한다.
+        assert_eq!(row.suggested_name, "V1/orders");
+        assert_eq!(row.suggested_rewrite, "/orders");
     }
 
     /// 신규 등록 폼의 프리필 세 값은 전부 Rust 가 계산한다 (프런트에서 다시 만들지 않는다).

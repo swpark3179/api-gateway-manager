@@ -32,7 +32,9 @@ import {
   applySelection,
   diffFields,
   hasDiff,
+  rowVerdict,
   type DiffSelection,
+  type RowVerdict,
 } from "./lib/importDiff";
 import {
   ALL_ROUTES,
@@ -58,7 +60,6 @@ import {
   type ImportSource,
   type JwtResult,
   type Kind,
-  type MatchState,
   type OasDoc,
   type RouteCounts,
   type RouteFormState,
@@ -132,7 +133,7 @@ interface AppState {
   importNoProxy: boolean;
   importBusy: boolean;
   importError: AppError | null;
-  importChip: MatchState | "all";
+  importChip: RowVerdict | "all";
   importQ: string;
   /**
    * 첨부한 스펙 파일 이름. **빈 문자열이면 "파일 미첨부" 모드**다.
@@ -233,7 +234,7 @@ interface AppState {
   setImportService: (id: string) => void;
   setImportPrefix: (prefix: string) => void;
   setImportNoProxy: (v: boolean) => void;
-  setImportChip: (chip: MatchState | "all") => void;
+  setImportChip: (chip: RowVerdict | "all") => void;
   setImportQ: (q: string) => void;
   /** 첨부 파일 초기화(`×`). 선택된 service 가 있으면 그 spec_url 로 되돌아간다 */
   clearImportFile: () => Promise<void>;
@@ -341,7 +342,7 @@ const IMPORT_RESET = {
   importRows: [] as CompareRow[],
   importError: null,
   importBusy: false,
-  importChip: "all" as MatchState | "all",
+  importChip: "all" as RowVerdict | "all",
   importQ: "",
   importFileName: "",
   importReturn: false,
@@ -844,10 +845,11 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   /**
-   * 비교 결과의 '등록' · '메서드 불일치' 행 클릭.
+   * 비교 결과의 등록된 행 클릭 (`일치` · `속성 차이`).
    *
    * 상세로 곧장 보내지 않고 **스펙 적용본과 저장분을 먼저 비교한다.** 차이가 없으면 그 단계를
-   * 보여 줄 이유가 없으므로 지금까지와 똑같이 상세를 연다.
+   * 보여 줄 이유가 없으므로 지금까지와 똑같이 상세를 연다 (표의 `일치` 판정과 같은 갈림길이다 —
+   * 양쪽 모두 `lib/importDiff` 의 같은 비교를 본다).
    */
   async openRouteFromImport(row) {
     const { env, importRows } = get();
@@ -868,22 +870,26 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     const base = routeToForm(route);
-    if (!hasDiff(diffFields(row, base, importRows))) {
+    const fields = diffFields(row, base, importRows);
+    if (!hasDiff(fields)) {
       set({ section: "routes", ...DIFF_RESET });
       showRoute(set, route);
       get().flash("스펙과 동일합니다.");
       return;
     }
 
-    // 선택이 아직 없으므로 `form` 은 기존 그대로다 — 화면의 '적용 후' 미리보기가
-    // 처음에는 기존과 같아 보이고, 체크를 켤 때마다 달라진다.
+    // **차이가 있는 항목은 처음부터 모두 선택해 둔다.** 이 화면까지 온 이유가 "스펙대로
+    // 맞추겠다" 라서, 빼고 싶은 것만 해제하는 편이 짧다. 그래서 `form` 은 처음부터 적용본이고
+    // 화면의 '적용 후' 미리보기도 처음부터 그것을 보여 준다.
+    const sel = allChanges(fields);
+    const form = applySelection(base, row, sel);
     set({
       section: "routes",
       view: "diff",
       selId: route.id,
       tab: "form",
-      form: base,
-      jsonDraft: jsonText(base),
+      form,
+      jsonDraft: jsonText(form),
       jsonErr: "",
       jsonOk: "",
       groupDraft: "",
@@ -893,7 +899,7 @@ export const useStore = create<AppState>((set, get) => ({
       diffRow: row,
       diffBase: base,
       diffRoute: route,
-      diffSel: NO_SELECTION,
+      diffSel: sel,
     });
   },
 
@@ -1625,14 +1631,19 @@ export function filterConsumers(items: ConsumerView[], chip: string, q: string):
   return out;
 }
 
-/** Import 비교 결과 필터 — 상태 chip + 검색어. 건수가 적어 클라이언트에서 처리한다. */
+/**
+ * Import 비교 결과 필터 — 판정 chip + 검색어. 건수가 적어 클라이언트에서 처리한다.
+ *
+ * chip 은 Rust 의 `state` 가 아니라 화면 판정(`rowVerdict`)이다 — 등록된 건이 스펙과 값까지
+ * 같은지가 표의 축이기 때문이다.
+ */
 export function filterCompareRows(
   rows: CompareRow[],
-  chip: MatchState | "all",
+  chip: RowVerdict | "all",
   q: string,
 ): CompareRow[] {
   let out = rows;
-  if (chip !== "all") out = out.filter((r) => r.state === chip);
+  if (chip !== "all") out = out.filter((r) => rowVerdict(r) === chip);
   const needle = q.trim().toLowerCase();
   if (needle) {
     out = out.filter((r) =>
