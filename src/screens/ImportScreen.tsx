@@ -3,7 +3,10 @@
  *
  * 두 단계가 한 화면에 있다:
  *   1. 스펙 불러오기 — 드래그&드롭 또는 파일 선택 + service · 경로 접두사
- *   2. 비교 결과 — 등록 / 메서드 불일치 / 미등록. 행을 누르면 상세 또는 신규 폼으로 간다.
+ *   2. 비교 결과 — 등록 / 메서드 불일치 / 미등록.
+ *      · 등록 · 메서드 불일치 → 스펙 적용본과의 차이를 먼저 본다 (ImportDiffScreen).
+ *        차이가 없으면 그 단계를 건너뛰고 상세로 간다.
+ *      · 미등록 → 값이 채워진 신규 Route 폼.
  *
  * # 스펙을 어디서 읽는가 — 두 모드
  *
@@ -132,8 +135,8 @@ export default function ImportScreen() {
           <p className="page-sub">
             OAS 3.0 스펙의 API 목록을 {envLabel} 서버의 선택한 service 와 대조합니다. 파일을
             첨부하지 않으면 고른 service 의 <span className="font-mono">spec_url</span> 을
-            읽습니다. 등록된 API 는 상세로, 미등록 API 는 값이 채워진 신규 등록 화면으로
-            이어집니다.
+            읽습니다. 등록된 API 는 스펙을 적용한 본문과의 차이를 먼저 보여 주고(같으면 바로
+            상세로), 미등록 API 는 값이 채워진 신규 등록 화면으로 이어집니다.
           </p>
         </div>
         <div className="page-actions">
@@ -423,7 +426,12 @@ export default function ImportScreen() {
             </thead>
             <tbody>
               {shown.map((r) => (
-                <Row key={`${r.method} ${r.fullPath}`} row={r} onOpen={openRoute} onCreate={createRoute} />
+                <Row
+                  key={`${r.method} ${r.fullPath}`}
+                  row={r}
+                  onOpen={openRoute}
+                  onCreate={createRoute}
+                />
               ))}
 
               {shown.length === 0 && (
@@ -496,7 +504,7 @@ export default function ImportScreen() {
 
 interface RowProps {
   row: CompareRow;
-  onOpen: (id: string) => Promise<void>;
+  onOpen: (row: CompareRow) => Promise<void>;
   onCreate: (row: CompareRow) => void;
 }
 
@@ -506,11 +514,11 @@ function Row({ row, onOpen, onCreate }: RowProps) {
 
   return (
     <tr
-      onClick={() => (registered ? void onOpen(row.routeId) : onCreate(row))}
+      onClick={() => (registered ? void onOpen(row) : onCreate(row))}
       style={{ cursor: "pointer" }}
       title={
         registered
-          ? "클릭하면 해당 route 상세로 이동합니다"
+          ? "클릭하면 스펙을 적용한 본문과 게이트웨이에 저장된 본문을 비교합니다 (같으면 상세로 바로 이동합니다)"
           : "클릭하면 값이 채워진 신규 Route 등록 화면으로 이동합니다"
       }
     >

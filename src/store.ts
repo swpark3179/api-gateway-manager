@@ -27,6 +27,14 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as api from "./api";
 import { jsonText, jsonToForm, sortMethods } from "./lib/design";
 import {
+  NO_SELECTION,
+  allChanges,
+  applySelection,
+  diffFields,
+  hasDiff,
+  type DiffSelection,
+} from "./lib/importDiff";
+import {
   ALL_ROUTES,
   consumerToForm,
   emptyConsumerForm,
@@ -53,6 +61,7 @@ import {
   type MatchState,
   type OasDoc,
   type RouteCounts,
+  type RouteFormState,
   type RouteScope,
   type RouteView,
   type Section,
@@ -135,6 +144,18 @@ interface AppState {
   /** 상세·신규 화면에서 '목록' 으로 돌아갈 때 비교 결과로 복귀할지 */
   importReturn: boolean;
 
+  // ── Import diff (등록된 API 를 눌렀을 때의 중간 단계) ──
+  //
+  // `form` 은 **선택을 반영한 결과**를 들고 있다. 그래야 저장이 `store.save()` 를 그대로
+  // 탈 수 있다 (Import 전용 저장 경로를 만들지 않는다는 규칙 — README 참조).
+  /** 클릭한 스펙 API 한 건 (path, method) */
+  diffRow: CompareRow | null;
+  /** 게이트웨이에 저장돼 있는 쪽. 비교 기준이라 선택을 바꿔도 변하지 않는다 */
+  diffBase: RouteFormState | null;
+  /** '적용 없이 상세로 이동' 이 쓸 원본 */
+  diffRoute: RouteView | null;
+  diffSel: DiffSelection;
+
   // ── UI ──
   toast: string | null;
   loading: boolean;
@@ -186,8 +207,13 @@ interface AppState {
   openItem: (id: string) => void;
   /** 목록 배열에 없어도 캐시에서 찾아 상세를 연다 */
   openRouteById: (id: string) => Promise<void>;
-  /** 비교 결과 → 기존 route 상세. 돌아올 때 비교 결과로 복귀한다 */
-  openRouteFromImport: (id: string) => Promise<void>;
+  /**
+   * 비교 결과 → 기존 route.
+   *
+   * 스펙 적용본과 저장분이 **같으면** 지금까지처럼 곧바로 상세로 가고, **다르면** diff 화면을
+   * 한 단계 끼운다. 어느 쪽이든 돌아올 때 비교 결과로 복귀한다.
+   */
+  openRouteFromImport: (row: CompareRow) => Promise<void>;
   newItem: () => void;
   /** 대시보드의 '신규 Route 등록' — Route 섹션으로 이동해 services 를 채운 뒤 폼을 연다 */
   newRouteFromDash: () => Promise<void>;
@@ -215,6 +241,14 @@ interface AppState {
   loadSpecForService: (id: string) => Promise<void>;
   /** 비교 결과의 미등록 행 → 정보가 채워진 신규 Route 폼 */
   createRouteFromOas: (row: CompareRow) => void;
+
+  // ── Import diff ──
+  /** 적용할 항목 선택. 바뀔 때마다 `form` 을 다시 만든다 (= 저장될 본문) */
+  setDiffSel: (patch: Partial<DiffSelection>) => void;
+  /** '차이 전부 선택' · '전부 해제' */
+  setDiffAll: (on: boolean) => void;
+  /** 아무것도 적용하지 않고 원래 목적지(상세)로 간다 */
+  skipDiffToDetail: () => void;
 
   patchForm: (patch: Partial<Record<string, unknown>>) => void;
   toggleMethod: (m: string) => void;
@@ -287,6 +321,20 @@ const SECTION_KIND: Partial<Record<Section, Kind>> = {
 
 export const kindOf = (section: Section): Kind | null => SECTION_KIND[section] ?? null;
 
+/**
+ * diff 단계에서 빠져나올 때 초기화되는 상태.
+ *
+ * `IMPORT_RESET` 과 따로 두는 이유: 저장·취소로 **비교 결과로 돌아갈 때는** diff 만 지우고
+ * 스펙(`importDoc`)은 남겨야 한다. 스펙까지 지우면 API 를 하나 처리할 때마다 파일을 다시
+ * 첨부해야 한다.
+ */
+const DIFF_RESET = {
+  diffRow: null,
+  diffBase: null,
+  diffRoute: null,
+  diffSel: NO_SELECTION,
+};
+
 /** Import 화면과 목록/편집 화면 사이를 오갈 때 초기화되는 상태 */
 const IMPORT_RESET = {
   importDoc: null,
@@ -297,6 +345,7 @@ const IMPORT_RESET = {
   importQ: "",
   importFileName: "",
   importReturn: false,
+  ...DIFF_RESET,
 };
 
 /**
@@ -377,6 +426,8 @@ export const useStore = create<AppState>((set, get) => ({
   importChip: "all",
   importQ: "",
   importReturn: false,
+
+  ...DIFF_RESET,
 
   toast: null,
   loading: false,
@@ -792,9 +843,58 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  async openRouteFromImport(id) {
+  /**
+   * 비교 결과의 '등록' · '메서드 불일치' 행 클릭.
+   *
+   * 상세로 곧장 보내지 않고 **스펙 적용본과 저장분을 먼저 비교한다.** 차이가 없으면 그 단계를
+   * 보여 줄 이유가 없으므로 지금까지와 똑같이 상세를 연다.
+   */
+  async openRouteFromImport(row) {
+    const { env, importRows } = get();
     set({ importReturn: true });
-    await get().openRouteById(id);
+
+    let route: RouteView | null;
+    try {
+      route = await api.routeCached(env, row.routeId);
+    } catch (e) {
+      const err = api.toAppError(e);
+      set({ error: err });
+      get().flash(err.message);
+      return;
+    }
+    if (!route) {
+      get().flash("캐시에 없는 라우트입니다. 리프레시 후 다시 시도하세요.");
+      return;
+    }
+
+    const base = routeToForm(route);
+    if (!hasDiff(diffFields(row, base, importRows))) {
+      set({ section: "routes", ...DIFF_RESET });
+      showRoute(set, route);
+      get().flash("스펙과 동일합니다.");
+      return;
+    }
+
+    // 선택이 아직 없으므로 `form` 은 기존 그대로다 — 화면의 '적용 후' 미리보기가
+    // 처음에는 기존과 같아 보이고, 체크를 켤 때마다 달라진다.
+    set({
+      section: "routes",
+      view: "diff",
+      selId: route.id,
+      tab: "form",
+      form: base,
+      jsonDraft: jsonText(base),
+      jsonErr: "",
+      jsonOk: "",
+      groupDraft: "",
+      rawJson: route.raw ? JSON.stringify(route.raw, null, 2) : null,
+      jwt: null,
+      error: null,
+      diffRow: row,
+      diffBase: base,
+      diffRoute: route,
+      diffSel: NO_SELECTION,
+    });
   },
 
   newItem() {
@@ -848,6 +948,7 @@ export const useStore = create<AppState>((set, get) => ({
       rawJson: null,
       jsonErr: "",
       jsonOk: "",
+      ...DIFF_RESET,
     });
   },
 
@@ -1025,7 +1126,36 @@ export const useStore = create<AppState>((set, get) => ({
       jwt: null,
       // 저장하거나 취소하면 비교 결과로 돌아간다.
       importReturn: true,
+      ...DIFF_RESET,
     });
+  },
+
+  // ── Import diff ───────────────────────────────────────────
+  //
+  // 선택이 바뀔 때마다 `form` 을 다시 만든다. 그래야 화면의 '적용 후' 미리보기와 저장 버튼이
+  // **같은 값**을 보고, 저장이 기존 `save()` 경로를 손대지 않고 그대로 탈 수 있다.
+  setDiffSel(patch) {
+    const { diffBase, diffRow, diffSel } = get();
+    if (!diffBase || !diffRow) return;
+    const next = { ...diffSel, ...patch };
+    const form = applySelection(diffBase, diffRow, next);
+    set({ diffSel: next, form, jsonDraft: jsonText(form) });
+  },
+
+  setDiffAll(on) {
+    const { diffBase, diffRow, importRows } = get();
+    if (!diffBase || !diffRow) return;
+    const next = on ? allChanges(diffFields(diffRow, diffBase, importRows)) : NO_SELECTION;
+    const form = applySelection(diffBase, diffRow, next);
+    set({ diffSel: next, form, jsonDraft: jsonText(form) });
+  },
+
+  skipDiffToDetail() {
+    const { diffRoute } = get();
+    if (!diffRoute) return;
+    // 고르던 것은 버린다 — '적용 없이' 이므로 상세는 게이트웨이 값 그대로여야 한다.
+    set(DIFF_RESET);
+    showRoute(set, diffRoute);
   },
 
   // ── 폼 편집 ───────────────────────────────────────────────
@@ -1228,6 +1358,7 @@ export const useStore = create<AppState>((set, get) => ({
         form: null,
         jwt: null,
         importReturn: false,
+        ...DIFF_RESET,
       });
       // 캐시를 갱신한 뒤 비교를 다시 돌리면 방금 만든 API 가 '등록' 으로 바뀐다.
       await get().syncTouched(form.kind);
@@ -1257,7 +1388,7 @@ export const useStore = create<AppState>((set, get) => ({
         await api.routeDelete(env, form.id ?? "", form.name);
       }
       get().flash("삭제되었습니다.");
-      set({ view: "list", selId: null, form: null, jwt: null, importReturn: false });
+      set({ view: "list", selId: null, form: null, jwt: null, importReturn: false, ...DIFF_RESET });
       // 조회 범위로 걸어 둔 컨슈머를 지웠으면 유령 조건이 남지 않게 풀어 준다.
       const scope = get().routeScope;
       if (

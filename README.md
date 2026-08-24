@@ -68,9 +68,11 @@ src/                        프런트엔드 (React 19 + TS + zustand)
 ├─ store.ts                 디자인의 DCLogic 상태 트리를 1:1 이식
 ├─ api.ts                   Rust 커맨드 래퍼 — 게이트웨이 HTTP 의 유일한 통로
 ├─ lib/design.ts            디자인 원본의 순수 헬퍼 (JSON 모양 · 아이콘 · 스타일)
+├─ lib/importDiff.ts        스펙 적용본 vs 저장분 — 필드 차이 · 선택 반영 · 줄 diff
 ├─ styles/                  OPUS-X 토큰 CSS (디자인 원본을 그대로 복사)
 ├─ components/              TitleBar · IconRail · SidePanel · Toast · BootProgress · GroupCombo · MetaList · ErrorBanner
-└─ screens/                 Locked · Dashboard · List · Upstreams · Services · Import · Settings · edit/*
+└─ screens/                 Locked · Dashboard · List · Upstreams · Services · Import ·
+                            ImportDiff · Settings · edit/*
 
 src-tauri/src/
 ├─ lib.rs                   플러그인/커맨드 등록, 창 셋업
@@ -457,7 +459,8 @@ YAML 파서(`serde_norway`)가 JSON 의 상위집합이라 `.json` 스펙도 같
 만든 API 가 `등록` 으로 바뀐다 (캐시를 갱신한 뒤 비교를 다시 돌린다).
 
 이미 등록된 행을 눌러 들어가는 **편집 모드에는 접두사가 개입하지 않는다.** 게이트웨이에 있는
-값을 그대로 읽어 오는 경로(`routeToForm`)라 프리필 규칙이 낄 자리가 없다.
+값을 그대로 읽어 오는 경로(`routeToForm`)라 프리필 규칙이 낄 자리가 없다. 프리필 값들은 폼이
+아니라 **아래 diff 화면**에서 "스펙 적용 시" 후보로만 제시되고, 고른 것만 폼에 얹힌다.
 
 `servers: https://host/v1` · path `/orders/{orderId}/items` 인 경우 세 값은 이렇게 갈린다:
 
@@ -480,6 +483,67 @@ Rust 쪽에는 테스트가 붙어 있다. `name` 은 APISIX 제한(100자)에 �
 | `/pets/{petId}/toys` | `/pets/:petId/toys` | 중간에 `*` 를 넣으면 기본 라우터(`radixtree_uri`)가 매칭하지 못한다. 이 형태는 게이트웨이가 `radixtree_uri_with_parameter` 여야 동작한다 |
 
 어차피 사용자가 저장 전에 검토·수정하는 값이라 "가장 그럴듯한 출발점"을 준다.
+
+### 등록된 API 를 누르면 — 스펙 적용본과의 diff
+
+`등록` · `메서드 불일치` 행을 눌러도 곧바로 상세로 보내지 않는다. 상세 폼은 게이트웨이 값만
+보여 주므로 **스펙이 무엇을 다르게 말하고 있는지**가 어디에도 드러나지 않기 때문이다. 특히
+`메서드 불일치` 는 판정만 있고 "그래서 무엇을 바꿔야 하는가"를 화면이 답하지 않았다.
+
+그래서 한 단계를 끼웠다 (`src/screens/ImportDiffScreen.tsx`, `view: "diff"`):
+
+1. 스펙을 적용한 요청 본문을 **임시로** 만든다 — `routeJson(기존 폼 + 스펙 후보)`.
+2. 게이트웨이에 저장된 본문(`routeJson(routeToForm(route))`)과 비교한다.
+3. **완전히 같으면 이 화면을 띄우지 않는다.** 지금까지처럼 상세로 바로 가고 토스트만 띄운다.
+4. 다르면 필드별로 무엇을 적용할지 고르게 하고, **저장 버튼을 눌러야** 게이트웨이에 반영된다.
+
+양쪽 본문을 **같은 직렬화 함수**(`lib/design.ts` 의 `routeJson`)로 만드는 것이 핵심이다.
+키 순서가 같아야 줄 단위 diff 가 값이 바뀐 줄만 짚는다. 스펙 쪽 후보값은 전부 Rust 가 계산해
+`CompareRow` 에 실어 보낸 것(`suggestedName`·`suggestedUri`·`suggestedRewrite`)을 그대로 쓴다 —
+uri·이름 규칙을 프런트에서 다시 만들지 않는다는 기존 계약 그대로다.
+
+| 필드 | 스펙 후보 | 비고 |
+|---|---|---|
+| `name` | `suggestedName` | |
+| `uri` | `suggestedUri` | 달라도 **현재 uri 는 이미 그 경로에 매칭된다** (그래서 `등록` 이다). `표기 차이` 로 표시해 `:petId` 를 쓰는 멀쩡한 route 가 "고쳐야 할 것" 으로 보이지 않게 한다 |
+| `plugins.proxy-rewrite.uri` | `suggestedRewrite` | |
+| `methods` | 그 행의 메서드 | 아래 절 |
+| `desc` | `summary` (255자) | |
+| `status` · `service_id` · `allowed_groups` | *(없음)* | 스펙에 없는 값이라 **건드리지 않는다.** 두 본문에 똑같이 실려 diff 를 조용히 지나간다 |
+
+**기본 선택은 전부 해제다.** 사람이 붙인 route 이름(`주문 목록 조회`)이 `V1/orders/{orderId}`
+같은 기계 생성값으로 한 번에 덮이는 것이 이 화면이 낼 수 있는 최악의 사고라, 적용은 언제나
+명시적으로 고른 것만 한다.
+
+#### API 의 단위는 (path, method) 다
+
+`GET /test` 와 `POST /test` 는 **서로 다른 API** 이고 각각 따로 처리한다 (`CompareRow` 가 이미
+그 단위다). 그런데 게이트웨이의 route 객체 하나는 두 API 를 함께 처리할 수 있다. 그래서
+`methods` 만 체크박스가 아니라 **3지 선택**이다:
+
+| 선택 | 결과 | 언제 |
+|---|---|---|
+| `기존 유지` | 손대지 않음 | 기본값 |
+| `이 메서드 추가` | `sortMethods([...기존, 이 메서드])` | 그 메서드가 route 에 없을 때 (= `메서드 불일치` 의 정답) |
+| `스펙대로 교체` | `[이 메서드]` | 정말로 이 메서드만 남길 때 |
+
+`methods` 의 "같다" 판정은 **포함 여부**다 — "이 API 가 이 route 에 올라와 있는가". route 에
+남는 다른 메서드는 옆 API 의 몫이지 이 API 의 차이가 아니다 (`db::compare` 의 `method_ok` 와
+같은 규칙이라, 판정 배지와 diff 가 어긋나지 않는다).
+
+같은 route 를 가리키는 다른 스펙 API 가 있으면 `스펙대로 교체` 와 uri 변경에 **무엇을 잃는지**
+경고를 붙인다 — "이 route 가 처리하던 `POST /test` 가 게이트웨이에서 끊깁니다". 조용히
+끊기는 것이 이 화면에서 나올 수 있는 유일한 데이터 손실이다.
+
+#### 저장
+
+고른 것을 반영한 `RouteFormState` 를 그대로 `form` 에 넣어 두고 **기존 `store.save()` 를
+그대로 부른다.** 신규 등록 프리필과 같은 이유로 Import 전용 저장 경로를 만들지 않았다 —
+플러그인 보존 머지(`routes::apply_route_form`)와 저장 후 캐시 재동기화·비교 재실행이 전부
+공짜로 따라온다. 아무것도 고르지 않으면 저장 버튼이 잠긴다 (바뀌지 않는 본문을 PUT 하지 않는다).
+
+줄 단위 diff 는 `lib/importDiff.ts` 의 LCS 40줄이다. 프런트 의존성이 9개뿐이고 오프라인 단일
+exe 로 배포되는 앱이라, 이만한 것을 위해 패키지를 늘리지 않았다.
 
 ### spec_url 과 프록시
 
