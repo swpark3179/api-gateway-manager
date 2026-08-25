@@ -818,7 +818,8 @@ APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에
 | Consumer `username` | 항상 편집 가능 | 상세에서는 읽기 전용 | APISIX 식별자라 바꾸면 다른 consumer 가 됨 |
 | Consumer 좌측 탭 | 전체 / 제휴사 / 내부 시스템 고정 | 실제 `auth-groups` 값별 버킷 + `(그룹 없음)` | `partner`·`internal` 이라는 특정 문자열을 가정한 구분이라 조직마다 맞지 않음 |
 | Consumer 목록 상단 칩 | 권한그룹별 칩 줄 | 없음. 고른 그룹만 해제 칩 하나로 | 좌측 패널이 같은 값을 같은 건수로 이미 보여 준다. 두 번 두면 어느 쪽이 켜져 있는지가 오히려 헷갈린다 |
-| Consumer 목록 첫 열 | `username / key` | `desc / username` (`key` 는 `alg` 자리로) | 목록에서 찾는 것은 식별자가 아니라 설명이다. `alg` 열은 모든 행이 `HS256` 이라 정보가 없었다 |
+| Consumer 목록 열 | `username / key` · `secret` · `alg` · `plugins` | `desc` · `username` 을 **각자의 열**로, + `권한그룹` | 목록에서 찾는 것은 식별자가 아니라 설명이라 desc 를 앞에 둔다. 다만 한 칸에 나란히 두면 둘이 서로의 폭을 가져가 양쪽 다 잘린다. `alg`(늘 `HS256`) · `plugins`(늘 `jwt-auth`) · `secret`(마스킹돼 행마다 같은 모양) · `key` 는 행을 구별해 주지 못해 뺐고, 그 자리를 실제로 확인해야 하는 인가 범위 — 권한그룹 — 이 쓴다 |
+| Route 목록 첫 열 | `name / service_id` | `name` 단독 | 같은 칸의 service_id 가 name 의 폭을 가져갔다. 어느 service 소속인지는 name 접두사 필터와 편집 화면이 답해 준다 |
 | JWT `nbf` | 발급 시각(now) | **로컬 2025-08-01 00:00 고정** | 누를 때마다 토큰이 달라지면 이미 배포된 토큰과 값이 어긋남 |
 | JSON 탭 | 앱 관리 키만 | + `게이트웨이 원본` 읽기 전용 보기 | 그룹 필드가 실제로 어디 있는지 확인해야 할 때가 있음 |
 | JSON 탭 범위 | Route · Consumer | + Upstream · Service, Consumer 는 담당자 `labels` 까지 | 폼에서 고친 값이 JSON 탭에 안 보이면 두 탭이 서로 다른 말을 한다. 표시 전용 사본으로 풀었다 (위 두 절 참조) |

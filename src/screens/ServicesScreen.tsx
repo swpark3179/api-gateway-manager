@@ -15,17 +15,26 @@ import type { ServiceView } from "../types";
 
 const ROW = "12px 16px";
 
-/** 열 폭 — `table-layout: fixed` 라 여기 값이 곧 잘림 기준이다 (ListScreen 의 `ROUTE_COLS` 주석 참조). */
+/** 열 폭 — 잘리면 안 되는 id · name 에는 폭을 주지 않는다 (ListScreen 의 `ROUTE_COLS` 주석 참조). */
 const COLS: Col[] = [
-  { label: "id", width: "10%" },
-  { label: "name", width: "16%" },
-  { label: "upstream", width: "14%" },
-  // 스펙 주소는 이 표에서 가장 긴 값이라 가장 넓게 준다.
-  { label: "spec_url", width: "20%" },
-  { label: "log-key", width: "11%" },
-  { label: "플러그인", width: "13%" },
-  { label: "수정일시", width: "16%" },
+  { label: "id" },
+  { label: "name" },
+  { label: "upstream", width: "160px" },
+  // 스펙 주소는 이 표에서 가장 긴 값(45자면 333px)이지만 어차피 다 담을 수 없다. 등록됐는지를
+  // 알아보는 것이 목적이라 앞부분만 보여 주고 전체는 툴팁에 맡긴다.
+  { label: "spec_url", width: "160px" },
+  { label: "log-key", width: "104px" },
+  { label: "플러그인", width: "124px" },
+  { label: "수정일시", width: "152px" },
 ];
+
+/**
+ * 고정 열 합계(700) + id · name 바닥값 190px (ListScreen 의 `ROUTE_MIN` 주석 참조).
+ *
+ * 바닥값이 route 목록(212px)보다 낮은 이유: service 의 id · name 은 `svc-order` · `order-api`
+ * 처럼 짧다. 열이 일곱이라 여기서 212 를 쓰면 기본 창(표 폭 1088px)에서도 가로 스크롤이 뜬다.
+ */
+const GRID_MIN = 700 + 190 * 2;
 
 function filter(items: ServiceView[], q: string): ServiceView[] {
   const n = q.trim().toLowerCase();
@@ -54,6 +63,7 @@ export default function ServicesScreen() {
       syncTitle="게이트웨이에서 Service 전체 목록을 다시 조회해 로컬 캐시를 갱신합니다"
       onSync={() => void syncServices()}
       columns={COLS}
+      minWidth={GRID_MIN}
       total={shown.length}
       emptyMessage={
         syncedAt === null
@@ -70,8 +80,13 @@ export default function ServicesScreen() {
           <td className="mono" style={{ padding: ROW }}>
             <Cell text={s.id} />
           </td>
-          <td style={{ padding: ROW }}>
-            <CellPair main={s.name || "—"} sub={s.desc} />
+          {/* desc 는 같은 칸에 나란히 두지 않고 툴팁으로 내렸다 — 한 줄에 두면 name 의 폭을
+              가져간다 (`CellPair` 주석 참조). */}
+          <td className="name" style={{ padding: ROW }}>
+            <Cell
+              text={s.name || "—"}
+              title={s.desc ? `${s.name || "—"} · ${s.desc}` : undefined}
+            />
           </td>
           <td style={{ padding: ROW }}>
             <CellPair main={s.upstreamId || "—"} sub={s.upstreamLabel} mono />

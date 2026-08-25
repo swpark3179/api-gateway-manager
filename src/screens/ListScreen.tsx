@@ -2,10 +2,10 @@
 
 import { useMemo } from "react";
 
-import { maskSecret, syncLabel } from "../lib/design";
+import { syncLabel } from "../lib/design";
 import { filterConsumers, kindOf, NO_GROUP, useStore } from "../store";
 import BadgeList from "../components/BadgeList";
-import { Cell, CellPair } from "../components/Cell";
+import { Cell } from "../components/Cell";
 import GroupCombo from "../components/GroupCombo";
 import type { Col } from "../components/MetaList";
 import { ALL_ROUTES, rewriteText, scopeLabel } from "../types";
@@ -15,37 +15,59 @@ const ROW_H = "14px 16px";
 /**
  * 열 폭 — `table-layout: fixed` 라 여기 값이 곧 잘림 기준이다 (MetaList 의 `Col` 주석 참조).
  *
- * 전부 `%` 다. `px` 를 섞어도 소용이 없다 — fixed 레이아웃은 남는 폭을 모든 열에 나눠
- * 주므로 창이 넓어지면 `150px` 로 못 박은 열도 같이 늘어난다 (실측 확인).
+ * 잘리면 안 되는 열(name · uri)에는 폭을 **주지 않는다**. fixed 레이아웃이 남는 폭을
+ * 폭 없는 열들끼리 똑같이 나눠 주므로, 창을 넓히거나 좌측 패널을 접어서 생긴 여유가
+ * 전부 이 두 열로 간다. 나머지는 값의 최대 폭을 실측해 `px` 로 못 박았다 (헤더 라벨이 아니라
+ * **값**이 기준이다 — 값보다 라벨이 길면 라벨을 줄이고 원래 이름은 `title` 로 내린다).
  *
- * 기준은 기본 창 1440 · 패널 펼침(표 폭 1088px)이다. 이때 헤더 라벨과 값이 모두 들어간다
- * (`수정일시` 는 `2026-08-25 14:30` 이 mono 로 약 148px). 창 최소폭 1120(tauri.conf.json)
- * 까지 줄이면 긴 헤더 몇 개가 `…` 로 잘리는데, 그 상태에서 패널을 접으면 다시 다 들어간다.
+ * 기본 창 1440 · 패널 펼침(표 폭 1088px)이면 name · uri 가 각 214px 다. 패널을 접으면
+ * 323px, 1920 최대화면 455px 로 늘어난다 (실측). 반대로 창 최소폭(1120)까지 줄이면
+ * `ROUTE_MIN` 에서 멈추고 가로 스크롤로 넘어간다 — 더 눌러서 토막을 내지 않는다.
  */
 const ROUTE_COLS: Col[] = [
-  { label: "name / service_id", width: "17%" },
-  { label: "uri", width: "14%" },
-  // 뱃지 하나 + `+N` 이 창 최소폭(1120)에서도 들어가는 값이다. 더 줄이면 `+N` 이 잘려
+  { label: "name" },
+  { label: "uri" },
+  // 뱃지 하나(`OPTIONS` 63px) + `+N`(29px) + gap 이 들어가는 값이다. 더 줄이면 `+N` 이 잘려
   // 몇 개가 숨었는지를 알 수 없게 된다 (BadgeList 주석 참조).
-  { label: "methods", width: "15%" },
-  { label: "proxy-rewrite", width: "12%" },
-  { label: "allowed_groups", width: "15%" },
-  { label: "status", width: "11%" },
-  { label: "수정일시", width: "16%" },
+  { label: "methods", width: "128px" },
+  { label: "proxy-rewrite", width: "120px" },
+  // 게이트웨이 키 이름(`allowed_groups`)보다 화면에서 부르는 이름을 쓴다 — 편집 화면의
+  // 카드 제목(`GroupsCard`)·좌측 패널과 같은 말이어야 같은 것으로 읽힌다. 키는 툴팁에 남긴다.
+  { label: "권한그룹", width: "152px", title: "allowed_groups" },
+  { label: "status", width: "108px" },
+  { label: "수정일시", width: "152px" },
 ];
 
+/**
+ * Consumer 열.
+ *
+ * secret · key 는 뺐다. 목록에서 훑을 값이 아니고(마스킹된 secret 은 행마다 같은 모양이다)
+ * 편집 화면에 그대로 있다. 대신 desc 와 username 을 **각자의 열**로 떼어 둘 다 온전히 보이게
+ * 한다 — 한 칸에 나란히 두면 둘이 서로의 폭을 가져간다 (`CellPair` 주석 참조).
+ *
+ * plugins 열도 뺐다. 값이 `jwt-auth` 하나뿐이라 행을 구별해 주지 못한다. 그 자리를 권한그룹이
+ * 쓴다 — 컨슈머 목록에서 실제로 확인해야 하는 것은 인가 범위다.
+ */
 const CONSUMER_COLS: Col[] = [
-  { label: "desc / username", width: "18%" },
-  { label: "secret", width: "11%" },
-  { label: "plugins", width: "11%" },
-  { label: "key", width: "20%" },
-  { label: "auth-groups", width: "14%" },
-  { label: "상태", width: "10%" },
-  { label: "수정일시", width: "16%" },
+  { label: "desc" },
+  { label: "username" },
+  { label: "권한그룹", width: "152px", title: "auth-groups" },
+  { label: "상태", width: "96px" },
+  { label: "수정일시", width: "152px" },
 ];
+
+/**
+ * 표의 최소 폭 — 고정 열 합계 + (잘리면 안 되는 열 × 212px).
+ *
+ * 212px 은 `/api/v1/orders/{orderId}` 정도가 잘리지 않고 들어가는 폭이다. 여기까지 좁아지면
+ * 열을 더 누르지 않고 가로 스크롤로 넘긴다 (app.css 의 `.table-scroll`). 기본 창(표 폭 1088px)
+ * 에서는 둘 다 이 값보다 넓으므로 스크롤바가 뜨지 않는다.
+ */
+const ROUTE_MIN = 660 + 212 * 2;
+const CONSUMER_MIN = 400 + 212 * 2;
 
 interface ReleaseChipProps {
-  /** 어느 축인지 (`consumer` · `auth-groups`) */
+  /** 어느 축인지 (`consumer` · `권한그룹`) */
   label: string;
   value: string;
   title: string;
@@ -75,19 +97,6 @@ function ReleaseChip({ label, value, title, onClear }: ReleaseChipProps) {
       </span>
     </div>
   );
-}
-
-interface Row {
-  id: string;
-  c1: string;
-  c1sub: string;
-  c2: string;
-  tags: string[];
-  c4: string;
-  groups: string[];
-  badge: string;
-  status: string;
-  updated: string;
 }
 
 export default function ListScreen() {
@@ -127,37 +136,8 @@ export default function ListScreen() {
     [allConsumers, chip, q],
   );
 
-  const rows: Row[] = isConsumer
-    ? consumers.map((c) => ({
-        id: c.username,
-        // 사람이 목록에서 찾는 것은 식별자가 아니라 설명이다. username 은 그 아래 줄로 내리되
-        // 사라지게 두지는 않는다 — APISIX 식별자이고 상세 화면의 열쇠다.
-        c1: c.desc || "(설명 없음)",
-        c1sub: c.username,
-        c2: maskSecret(c.secret),
-        tags: c.hasJwtAuth ? ["jwt-auth"] : [],
-        // 예전 자리는 항상 `HS256` 이라 행마다 같은 값이었다. 서브라인에서 밀려난 key 를 넣는다.
-        c4: c.key,
-        groups: c.groups,
-        badge: "success",
-        status: "사용 중",
-        updated: c.updated,
-      }))
-    : routes.map((r) => ({
-        id: r.id,
-        c1: r.name || "(이름 없음)",
-        c1sub: r.serviceId || "—",
-        c2: r.uri,
-        tags: r.methods,
-        // regex_uri 를 그리지 않으면 그 route 만 빈칸으로 보인다 (`rewriteText`).
-        c4: rewriteText(r) || "—",
-        groups: r.groups,
-        badge: r.status === 1 ? "success" : "neutral",
-        status: r.status === 1 ? "1 · 활성" : "0 · 비활성",
-        updated: r.updated,
-      }));
-
   const cols = isConsumer ? CONSUMER_COLS : ROUTE_COLS;
+  const rowCount = isConsumer ? consumers.length : routes.length;
 
   /**
    * 상단 chip 은 Route 의 status 축 전용이다.
@@ -200,7 +180,7 @@ export default function ListScreen() {
     ? chip === "all"
       ? null
       : {
-          label: "auth-groups",
+          label: "권한그룹",
           value: chip === NO_GROUP ? "(그룹 없음)" : chip,
           title: "권한그룹 필터 해제",
           onClear: () => setChip("all"),
@@ -406,55 +386,99 @@ export default function ListScreen() {
         </div>
       )}
 
-      <table className="kw-table one-line">
-        <thead>
-          <tr>
-            {cols.map((c) => (
-              <th key={c.label} style={{ width: c.width }} title={c.label}>
-                {c.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.id} onClick={() => openItem(r.id)} style={{ cursor: "pointer" }}>
-              <td style={{ padding: ROW_H }}>
-                <CellPair main={r.c1} sub={r.c1sub} />
-              </td>
-              <td className="mono" style={{ padding: ROW_H }}>
-                <Cell text={r.c2} />
-              </td>
-              <td style={{ padding: ROW_H }}>
-                <BadgeList items={r.tags} mono />
-              </td>
-              <td className="mono" style={{ padding: ROW_H }}>
-                <Cell text={r.c4} />
-              </td>
-              <td style={{ padding: ROW_H }}>
-                <BadgeList items={r.groups} variant="primary" />
-              </td>
-              <td style={{ padding: ROW_H }}>
-                <span className={"badge " + r.badge}>
-                  <span className="dot" />
-                  {r.status}
-                </span>
-              </td>
-              <td className="mono" style={{ padding: ROW_H }}>
-                <Cell text={r.updated} />
-              </td>
-            </tr>
-          ))}
-
-          {rows.length === 0 && (
+      {/* 표만 감싼다 — 좁은 창에서 가로 스크롤이 나도 위의 제목·검색 줄은 제자리에 있다. */}
+      <div className="table-scroll">
+        <table
+          className="kw-table one-line"
+          style={{ minWidth: isConsumer ? CONSUMER_MIN : ROUTE_MIN }}
+        >
+          <thead>
             <tr>
-              <td colSpan={cols.length} style={{ padding: 0 }}>
-                <div className="state-block">{emptyState}</div>
-              </td>
+              {cols.map((c) => (
+                <th key={c.label} style={{ width: c.width }} title={c.title ?? c.label}>
+                  {c.label}
+                </th>
+              ))}
             </tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          {/* 두 엔티티의 열이 더는 같은 모양이 아니라 행도 각자 그린다 — 한 벌의 `<td>` 에
+              양쪽 값을 끼워 맞추면 열을 하나 옮길 때마다 두 화면을 같이 봐야 한다. */}
+          <tbody>
+            {isConsumer
+              ? consumers.map((c) => (
+                  <tr
+                    key={c.username}
+                    onClick={() => openItem(c.username)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    {/* 사람이 목록에서 찾는 것은 식별자가 아니라 설명이다 — 앞자리에 둔다. */}
+                    <td className="name" style={{ padding: ROW_H }}>
+                      <Cell text={c.desc || "(설명 없음)"} />
+                    </td>
+                    {/* username 은 APISIX 식별자이자 상세 화면의 열쇠라 온전히 보여야 한다. */}
+                    <td className="mono" style={{ padding: ROW_H }}>
+                      <Cell text={c.username} />
+                    </td>
+                    <td style={{ padding: ROW_H }}>
+                      <BadgeList items={c.groups} variant="primary" />
+                    </td>
+                    <td style={{ padding: ROW_H }}>
+                      <span className="badge success">
+                        <span className="dot" />
+                        사용 중
+                      </span>
+                    </td>
+                    <td className="mono" style={{ padding: ROW_H }}>
+                      <Cell text={c.updated} />
+                    </td>
+                  </tr>
+                ))
+              : routes.map((r) => (
+                  <tr
+                    key={r.id}
+                    onClick={() => openItem(r.id)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    {/* service_id 는 뺐다 — 같은 칸에 두면 name 의 폭을 가져간다. 어느 service
+                        소속인지는 name 접두사 필터와 편집 화면이 답해 준다. */}
+                    <td className="name" style={{ padding: ROW_H }}>
+                      <Cell text={r.name || "(이름 없음)"} />
+                    </td>
+                    <td className="mono" style={{ padding: ROW_H }}>
+                      <Cell text={r.uri} />
+                    </td>
+                    <td style={{ padding: ROW_H }}>
+                      <BadgeList items={r.methods} mono />
+                    </td>
+                    {/* regex_uri 를 그리지 않으면 그 route 만 빈칸으로 보인다 (`rewriteText`). */}
+                    <td className="mono" style={{ padding: ROW_H }}>
+                      <Cell text={rewriteText(r) || "—"} />
+                    </td>
+                    <td style={{ padding: ROW_H }}>
+                      <BadgeList items={r.groups} variant="primary" />
+                    </td>
+                    <td style={{ padding: ROW_H }}>
+                      <span className={"badge " + (r.status === 1 ? "success" : "neutral")}>
+                        <span className="dot" />
+                        {r.status === 1 ? "1 · 활성" : "0 · 비활성"}
+                      </span>
+                    </td>
+                    <td className="mono" style={{ padding: ROW_H }}>
+                      <Cell text={r.updated} />
+                    </td>
+                  </tr>
+                ))}
+
+            {rowCount === 0 && (
+              <tr>
+                <td colSpan={cols.length} style={{ padding: 0 }}>
+                  <div className="state-block">{emptyState}</div>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
 
       <div
         style={{
@@ -466,7 +490,7 @@ export default function ListScreen() {
           color: "var(--gray-500)",
         }}
       >
-        <span>총 {isConsumer ? rows.length : routesTotal}건</span>
+        <span>총 {isConsumer ? consumers.length : routesTotal}건</span>
         <span className="selectable">GET {listApiPath}</span>
       </div>
     </div>
