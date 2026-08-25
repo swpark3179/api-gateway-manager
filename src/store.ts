@@ -96,6 +96,14 @@ interface AppState {
    */
   routeScope: RouteScope;
   q: string;
+  /**
+   * Route 목록의 name 접두사 축.
+   *
+   * `q` 와 **다른 축**이라 필드를 따로 둔다. `q` 는 `search` 블롭 어디에나 걸리는 '포함'
+   * 이고, 이쪽은 `name` 이 그 문자열로 **시작**하는가만 본다 (`db::NAME_PREFIX_CLAUSE`).
+   * 사내 route 명 규약(`EP_…`)으로 한 덩어리를 골라내는 용도다.
+   */
+  namePrefix: string;
 
   // ── 편집 ──
   form: FormState | null;
@@ -186,6 +194,8 @@ interface AppState {
   /** 좌측 패널 클릭. 같은 범위를 다시 고르면 전체로 되돌린다. */
   setRouteScope: (scope: RouteScope) => void;
   setQ: (q: string) => void;
+  /** Route 목록의 name 접두사 필터. `setQ` 와 같은 디바운스로 캐시를 다시 조회한다. */
+  setNamePrefix: (v: string) => void;
   /** 대시보드·설정 화면만 게이트웨이를 다시 본다 (목록은 캐시가 진실의 사본이다) */
   refresh: () => Promise<void>;
   /** 캐시만 다시 조회한다 (게이트웨이 호출 없음) */
@@ -290,6 +300,9 @@ interface AppState {
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
 let prefixTimer: ReturnType<typeof setTimeout> | undefined;
+/** 목록의 name 접두사 입력. 검색어와 **다른 축**이라 타이머도 따로 둔다 —
+ *  한쪽을 고치는 중에 다른 쪽의 대기 중인 조회가 취소되면 안 된다. */
+let namePrefixTimer: ReturnType<typeof setTimeout> | undefined;
 
 /**
  * 조회 응답이 뒤늦게 도착해 최신 결과를 덮어쓰는 것을 막는 토큰.
@@ -362,6 +375,7 @@ const LIST_RESET = {
   chip: "all",
   routeScope: ALL_ROUTES,
   q: "",
+  namePrefix: "",
   jsonErr: "",
   jsonOk: "",
   form: null,
@@ -377,15 +391,17 @@ function intText(v: string): boolean {
 }
 
 /**
- * 라우트 조회의 세 축을 한 곳에서 만든다.
+ * 라우트 조회의 **네 축**을 한 곳에서 만든다 (상태 chip · 검색어 · name 접두사 · 조회 범위).
  *
  * 조회하는 곳이 여럿(`queryRoutes` · `syncTouched` · `loadOas`)인데 각자 `get()` 에서 필드를
  * 꺼내면 축이 하나 늘 때 어긋난다. 컨슈머는 username 을 그대로 넘긴다 — 캐시에 없는
  * username 이면 SQL 이 0건으로 답하므로, "필터가 조용히 풀려 전체가 보이는" 쪽보다
  * 안전한 방향으로 실패한다.
  */
-function routeFilter(s: AppState): { chip: string; q: string; scope: RouteScope } {
-  return { chip: s.chip, q: s.q, scope: s.routeScope };
+function routeFilter(
+  s: AppState,
+): { chip: string; q: string; namePrefix: string; scope: RouteScope } {
+  return { chip: s.chip, q: s.q, namePrefix: s.namePrefix, scope: s.routeScope };
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -397,6 +413,7 @@ export const useStore = create<AppState>((set, get) => ({
   chip: "all",
   routeScope: ALL_ROUTES,
   q: "",
+  namePrefix: "",
 
   form: null,
   groupDraft: "",
@@ -622,6 +639,15 @@ export const useStore = create<AppState>((set, get) => ({
     searchTimer = setTimeout(() => void get().queryRoutes(), SEARCH_DEBOUNCE_MS);
   },
 
+  setNamePrefix(v) {
+    // 목록 화면으로 되돌린다 — 상세를 열어 둔 채 필터를 바꾸면 결과가 보이지 않는다
+    // (`setChip` · `setRouteScope` 와 같은 이유).
+    set({ namePrefix: v, view: "list", selId: null });
+    if (get().section !== "routes") return;
+    if (namePrefixTimer) clearTimeout(namePrefixTimer);
+    namePrefixTimer = setTimeout(() => void get().queryRoutes(), SEARCH_DEBOUNCE_MS);
+  },
+
   /**
    * 게이트웨이를 다시 보는 화면만 여기서 처리한다.
    *
@@ -658,11 +684,11 @@ export const useStore = create<AppState>((set, get) => ({
   async queryRoutes() {
     const { env, settings } = get();
     if (!settings?.[env]?.hasToken) return;
-    const { chip, q, scope } = routeFilter(get());
+    const { chip, q, namePrefix, scope } = routeFilter(get());
 
     const token = ++queryToken;
     try {
-      const page = await api.routesQuery(env, chip, q, scope);
+      const page = await api.routesQuery(env, chip, q, namePrefix, scope);
       // 더 최신 요청이 이미 나갔으면 이 응답은 버린다.
       if (token !== queryToken) return;
       set({ routes: page.items, routesTotal: page.total, routeCounts: page.counts, error: null });

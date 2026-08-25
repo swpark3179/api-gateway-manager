@@ -4,7 +4,8 @@ import { useMemo } from "react";
 
 import { maskSecret, syncLabel } from "../lib/design";
 import { filterConsumers, kindOf, NO_GROUP, useStore } from "../store";
-import { ALL_ROUTES, scopeLabel } from "../types";
+import GroupCombo from "../components/GroupCombo";
+import { ALL_ROUTES, rewriteText, scopeLabel } from "../types";
 
 const ROW_H = "14px 16px";
 
@@ -72,6 +73,10 @@ export default function ListScreen() {
   const syncedAt = useStore((s) => s.syncedAt[s.env]);
   const routeScope = useStore((s) => s.routeScope);
   const setRouteScope = useStore((s) => s.setRouteScope);
+  const namePrefix = useStore((s) => s.namePrefix);
+  const setNamePrefix = useStore((s) => s.setNamePrefix);
+  // 접두사 후보는 Service 의 `labels.name_prefix` 다 — 이미 메모리에 있어 새 IPC 가 없다.
+  const services = useStore((s) => s.services);
   // Route 는 내장 SQLite 가 이미 필터링해 준 결과다 (store.ts 모듈 주석 참조).
   const routes = useStore((s) => s.routes);
   const routesTotal = useStore((s) => s.routesTotal);
@@ -109,7 +114,8 @@ export default function ListScreen() {
         c1sub: r.serviceId || "—",
         c2: r.uri,
         tags: r.methods,
-        c4: r.rewrite || "—",
+        // regex_uri 를 그리지 않으면 그 route 만 빈칸으로 보인다 (`rewriteText`).
+        c4: rewriteText(r) || "—",
         groups: r.groups,
         badge: r.status === 1 ? "success" : "neutral",
         status: r.status === 1 ? "1 · 활성" : "0 · 비활성",
@@ -127,6 +133,21 @@ export default function ListScreen() {
    * 화면에 두 번 두면 어느 쪽이 켜져 있는지가 오히려 헷갈린다. 대신 고른 그룹만 아래의
    * 해제 칩으로 남긴다 (Route 의 consumer 칩과 같은 이유 — 그 주석 참조).
    */
+  /**
+   * name 접두사 후보 — Service 에 등록된 `labels.name_prefix` 를 모은다.
+   *
+   * route 명에서 역산하지 않는다. 접두어는 service 단위로 **정해 둔 규약**이고
+   * (`ServiceForm` 의 'name 접두어'), 이름에서 첫 구분자 앞을 잘라 모으면 규약이 아닌
+   * 우연한 조각까지 후보로 올라온다. 규약에 없는 값이 필요하면 직접 입력하면 된다.
+   */
+  const prefixOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(services.map((v) => v.namePrefix.trim()).filter(Boolean)),
+      ).sort(),
+    [services],
+  );
+
   const chipKeys: Array<[string, string]> = useMemo(
     () =>
       isConsumer
@@ -161,6 +182,17 @@ export default function ListScreen() {
         }
       : null;
 
+  // 접두사는 조회 범위와 별개 축이라 해제 칩도 따로 낸다 (둘 다 켜질 수 있다).
+  const prefixRelease: ReleaseChipProps | null =
+    !isConsumer && namePrefix.trim() !== ""
+      ? {
+          label: "name 접두사",
+          value: namePrefix.trim(),
+          title: "name 접두사 필터 해제",
+          onClear: () => setNamePrefix(""),
+        }
+      : null;
+
   const adminBase = settings?.[env]?.adminBase ?? "";
   const listApiPath = `${adminBase}/${isConsumer ? "consumers" : "routes"}`;
 
@@ -169,7 +201,9 @@ export default function ListScreen() {
   // 조건 판정에 조회 범위를 반드시 포함해야 한다 — 빠뜨리면 컨슈머를 골라 0건이 됐을 때
   // "등록된 Route가 없습니다" 가 뜬다.
   const filtered =
-    q.trim() !== "" || chip !== "all" || (!isConsumer && routeScope.kind !== "all");
+    q.trim() !== "" ||
+    chip !== "all" ||
+    (!isConsumer && (routeScope.kind !== "all" || namePrefix.trim() !== ""));
   const emptyState =
     loading || booting ? (
       <>
@@ -251,6 +285,23 @@ export default function ListScreen() {
               Import
             </button>
           )}
+          {!isConsumer && (
+            // 검색어와 **다른 축**이라 검색창과 나란히 둔다 — 하나로 합치면 '포함' 과
+            // '시작' 두 규칙이 한 칸에 섞인다.
+            <div style={{ display: "flex", width: 200, height: 36 }}>
+              <GroupCombo
+                className="text-input font-mono"
+                value={namePrefix}
+                onChange={setNamePrefix}
+                onCommit={setNamePrefix}
+                options={prefixOptions}
+                placeholder="name 접두사"
+                ariaLabel="name 접두사로 필터"
+                // 옆의 검색창 · Import 버튼과 같은 36px 로 맞춘다 (.text-input 기본은 40px).
+                inputStyle={{ height: 36 }}
+              />
+            </div>
+          )}
           <div className="gnb-search" style={{ width: 240, height: 36 }}>
             <svg
               viewBox="0 0 24 24"
@@ -285,7 +336,7 @@ export default function ListScreen() {
         </div>
       </div>
 
-      {(chipKeys.length > 0 || release) && (
+      {(chipKeys.length > 0 || release || prefixRelease) && (
         <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
           {chipKeys.map(([k, label]) => (
             <div
@@ -299,6 +350,7 @@ export default function ListScreen() {
 
           {/* 좌측 패널을 스크롤로 지나친 사용자가 목록이 왜 짧은지 알 수 없으면 안 된다. */}
           {release && <ReleaseChip {...release} />}
+          {prefixRelease && <ReleaseChip {...prefixRelease} />}
         </div>
       )}
 

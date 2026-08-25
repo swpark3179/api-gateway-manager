@@ -406,6 +406,12 @@ pub struct RouteView {
     pub service_id: String,
     /// plugins."proxy-rewrite".uri
     pub rewrite: String,
+    /// plugins."proxy-rewrite".regex_uri — 게이트웨이에 있던 **배열 그대로**.
+    ///
+    /// 쌍이 셋 이상인 route 도 손실 없이 왕복해야 한다. 폼은 첫 쌍만 편집하고 나머지는
+    /// 이 값을 통해 보존된다 (`routes::apply_route_form`).
+    #[serde(default)]
+    pub rewrite_regex: Vec<String>,
     /// 게이트웨이에서 찾아낸 allowed_groups
     pub groups: Vec<String>,
     /// 그 값이 저장돼 있던 위치 — 저장 시 같은 자리에 되쓴다
@@ -424,6 +430,7 @@ impl RouteView {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let rewrite_regex = str_array(plugins.and_then(|p| p.pointer("/proxy-rewrite/regex_uri")));
         // consumer 와 같은 이유로 관대하게 찾는다 — 다른 도구가 등록한 라우트도 그룹이 보여야 한다.
         let (groups, groups_location) = find_groups(v, "shi-auth", "allowed_groups");
 
@@ -444,6 +451,7 @@ impl RouteView {
             status: v.get("status").and_then(Value::as_i64).unwrap_or(1),
             service_id,
             rewrite,
+            rewrite_regex,
             groups,
             groups_location,
             update_time: ts,

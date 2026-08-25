@@ -62,7 +62,10 @@ export interface RouteView {
   methods: string[];
   status: number;
   serviceId: string;
+  /** `plugins.proxy-rewrite.uri` */
   rewrite: string;
+  /** `plugins.proxy-rewrite.regex_uri` — 배열 그대로. 없으면 빈 배열 */
+  rewriteRegex: string[];
   groups: string[];
   groupsLocation: GroupsLocation;
   updateTime: number | null;
@@ -293,6 +296,8 @@ export interface CompareRow {
   routeUri: string;
   routeDesc: string;
   routeRewrite: string;
+  /** 대상 route 의 `proxy-rewrite.regex_uri` (배열 그대로, 없으면 빈 배열) */
+  routeRewriteRegex: string[];
   routeStatus: number;
   /** 정확 일치가 아니라 와일드카드(`/a/*`)로 걸렸는가 */
   wildcard: boolean;
@@ -304,8 +309,18 @@ export interface CompareRow {
    * 접두사에서 파생한 것(`V1/`)이다.
    */
   suggestedName: string;
-  /** 신규 폼의 `proxy-rewrite.uri` 후보 — 접두사를 붙이지 않은 OAS 원본 path */
+  /**
+   * 신규 폼의 `proxy-rewrite.uri` 후보 — 접두사를 붙이지 않은 OAS 원본 path.
+   * **경로 파라미터가 있으면 이 값을 쓰지 않는다** — 아래 `suggestedRewriteRegex` 를 쓴다.
+   */
   suggestedRewrite: string;
+  /**
+   * 신규 폼의 `proxy-rewrite.regex_uri` 후보 `[패턴, 치환]` — 파라미터가 없으면 빈 배열.
+   *
+   * `proxy-rewrite.uri` 는 정적 문자열이라 `{VNDRCD}` 를 치환하지 않는다. 파라미터가 있는
+   * path 를 `uri` 로 채우면 중괄호가 리터럴로 upstream 에 나간다 (`oas::to_rewrite_regex`).
+   */
+  suggestedRewriteRegex: string[];
 }
 
 // ── 대시보드 ─────────────────────────────────────────────────
@@ -386,12 +401,52 @@ export interface RouteFormState {
   desc: string;
   methods: string[];
   serviceId: string;
+  /** `proxy-rewrite.uri` — `rewriteMode === "uri"` 일 때만 저장 본문에 실린다 */
   rewrite: string;
+  /**
+   * 어느 키를 저장할지. 두 값을 **함께 보내지 않는다** — APISIX 는 `uri` 가 있으면
+   * `regex_uri` 를 무시하므로(`proxy-rewrite.lua`), 공존하면 화면과 게이트웨이가 어긋난다.
+   *
+   * 반대쪽 값은 폼 상태에 **남겨 둔다.** 모드를 실수로 눌렀을 때 되돌릴 수 있어야 하고,
+   * 배제는 `routeJson` 과 Rust `apply_route_form` 이 한다.
+   */
+  rewriteMode: RewriteMode;
+  /** `proxy-rewrite.regex_uri` — 배열 그대로. 폼은 첫 쌍만 편집하고 나머지는 보존한다 */
+  rewriteRegex: string[];
   groups: string[];
   status: number;
   /** 조회 때 찾은 저장 위치. 신규면 null → 기본 위치를 쓴다 */
   groupsLocation: GroupsLocation | null;
 }
+
+/** `proxy-rewrite` 를 `uri` 로 쓰는가 `regex_uri` 로 쓰는가. */
+export type RewriteMode = "uri" | "regex";
+
+/**
+ * 저장된 값에서 모드를 되읽는다 — 조회 경로는 모드를 따로 들고 오지 않는다.
+ *
+ * `regex_uri` 는 `minItems = 2` 라, 2개 미만이면 게이트웨이가 애초에 그것을 쓰고 있지 않다.
+ */
+export const rewriteModeOf = (regex: string[]): RewriteMode =>
+  regex.length >= 2 ? "regex" : "uri";
+
+/**
+ * `proxy-rewrite` 를 사람이 읽는 한 줄로 — regex 는 `패턴 → 치환` 이다.
+ *
+ * 목록의 `proxy-rewrite` 열과 Import diff 화면이 **같은 표기**를 써야 한다. 한쪽만
+ * regex 를 그리면 목록에서는 빈칸인데 들어가 보니 값이 있는 일이 생긴다.
+ */
+export const rewriteText = (a: { rewrite: string; rewriteRegex: string[] }): string => {
+  if (a.rewriteRegex.length >= 2) {
+    // 쌍이 셋 이상이면 APISIX 가 앞에서부터 시도한다 — 전부 보여 준다.
+    const pairs: string[] = [];
+    for (let i = 0; i + 1 < a.rewriteRegex.length; i += 2) {
+      pairs.push(`${a.rewriteRegex[i]} → ${a.rewriteRegex[i + 1]}`);
+    }
+    return pairs.join("  ·  ");
+  }
+  return a.rewrite;
+};
 
 export interface ConsumerFormState {
   kind: "consumer";
@@ -460,6 +515,8 @@ export const emptyRouteForm = (serviceId: string): RouteFormState => ({
   methods: ["GET"],
   serviceId,
   rewrite: "",
+  rewriteMode: "uri",
+  rewriteRegex: [],
   groups: [],
   status: 1,
   groupsLocation: null,
@@ -487,6 +544,9 @@ export const routeToForm = (r: RouteView): RouteFormState => ({
   methods: [...r.methods],
   serviceId: r.serviceId,
   rewrite: r.rewrite,
+  // 모드는 게이트웨이 값에서 파생한다 — 별도 필드로 들고 오지 않는다.
+  rewriteMode: rewriteModeOf(r.rewriteRegex),
+  rewriteRegex: [...r.rewriteRegex],
   groups: [...r.groups],
   status: r.status,
   groupsLocation: r.groupsLocation,
@@ -502,9 +562,14 @@ export const routeToForm = (r: RouteView): RouteFormState => ({
  *   name    `V1/orders/{orderId}/items`  접두어 + 접두사를 뗀 원본 path. service 에
  *                                        `labels.name_prefix` 가 있으면 그것이 접두어이고
  *                                        (`EP_orders/{orderId}/items`), 없으면 경로 접두사를
- *                                        대문자로 바꾼 것이다
+ *                                        대문자로 바꾼 것이다. **마지막 세그먼트가 파라미터면
+ *                                        그 세그먼트는 뗀다** (`/Vendor/GRP/{CD}` → `V1/Vendor/GRP`)
  *   uri     `/v1/orders/:orderId/items`  게이트웨이가 매칭하는 표기 (접두사 포함)
  *   rewrite `/orders/{orderId}/items`    upstream 이 아는 경로 (접두사 없음)
+ *
+ * **경로 파라미터가 있으면 `rewrite` 대신 `regex_uri` 를 채운다.** `proxy-rewrite.uri` 는
+ * 정적 문자열이라 `{orderId}` 를 치환하지 못해 중괄호가 그대로 upstream 에 나간다.
+ * 그 판단도 Rust 가 한다 — 파라미터가 없으면 `suggestedRewriteRegex` 가 빈 배열이다.
  *
  * `groupsLocation` 은 null 로 둬서 기존 기본 위치 규칙(shi-auth.allowed_groups)에 맡긴다.
  */
@@ -512,10 +577,24 @@ export const routeFormFromOas = (row: CompareRow, serviceId: string): RouteFormS
   ...emptyRouteForm(serviceId),
   name: row.suggestedName,
   uri: row.suggestedUri,
-  rewrite: row.suggestedRewrite,
+  ...specRewrite(row),
   desc: specDesc(row),
   methods: [row.method],
 });
+
+/**
+ * 스펙이 제안하는 `proxy-rewrite` 세 값 (`rewrite` · `rewriteMode` · `rewriteRegex`).
+ *
+ * 신규 등록 프리필과 diff 화면의 '적용' 이 **같은 값**을 써야 한다. 두 곳에서 각자 모드를
+ * 정하면 "신규로 만든 것" 과 "적용하겠다고 보여 준 것" 이 달라진다 (`specDesc` 와 같은 이유).
+ * 셋을 한 덩어리로 돌려주는 것도 같은 이유다 — 하나만 얹으면 두 키가 공존하는 본문이 된다.
+ */
+export const specRewrite = (
+  row: CompareRow,
+): Pick<RouteFormState, "rewrite" | "rewriteMode" | "rewriteRegex"> =>
+  row.suggestedRewriteRegex.length >= 2
+    ? { rewrite: "", rewriteMode: "regex", rewriteRegex: [...row.suggestedRewriteRegex] }
+    : { rewrite: row.suggestedRewrite, rewriteMode: "uri", rewriteRegex: [] };
 
 /** APISIX 의 `desc` 길이 제한. */
 export const MAX_DESC_LEN = 255;

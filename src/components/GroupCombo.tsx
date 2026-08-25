@@ -46,6 +46,11 @@ export interface GroupComboProps {
   /** 고를 수 있는 그룹. 이미 선택된 값은 호출부에서 걸러 넘긴다. */
   options: string[];
   className?: string;
+  placeholder?: string;
+  /** 라벨이 붙지 않는 자리(목록 상단의 필터 등)에서 쓴다. */
+  ariaLabel?: string;
+  /** 입력칸에 그대로 얹는다 — 툴바처럼 높이를 옆 컨트롤에 맞춰야 하는 자리를 위한 것. */
+  inputStyle?: React.CSSProperties;
 }
 
 export default function GroupCombo({
@@ -54,6 +59,9 @@ export default function GroupCombo({
   onCommit,
   options,
   className,
+  placeholder,
+  ariaLabel,
+  inputStyle,
 }: GroupComboProps) {
   const [open, setOpen] = useState(false);
   const [hi, setHi] = useState(-1);
@@ -167,6 +175,9 @@ export default function GroupCombo({
         aria-expanded={open}
         aria-autocomplete="list"
         aria-controls="group-combo-list"
+        aria-label={ariaLabel}
+        placeholder={placeholder}
+        style={inputStyle}
         value={value}
         onChange={(e) => {
           onChange(e.target.value);

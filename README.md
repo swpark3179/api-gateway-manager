@@ -134,15 +134,17 @@ src-tauri/src/
 
 그래서 저장 직전 원본을 GET 해 와 앱이 관리하는 키만 덮어쓰는 **머지 방식**으로 처리한다:
 
-- Route → `proxy-rewrite.uri`, 그룹 필드(기본 `shi-auth.allowed_groups`)
+- Route → `proxy-rewrite.uri` **또는** `proxy-rewrite.regex_uri` (둘 중 한쪽만 남긴다 — 아래 Import 절 참조), 그룹 필드(기본 `shi-auth.allowed_groups`)
 - Consumer → `jwt-auth.key`, `jwt-auth.secret`, 그룹 필드(기본 `jwt-auth.auth-groups`)
 - Service → `shi-log.key`, `jwt-auth`(**없을 때만** `{}` 추가), `labels.spec_url`
 - Upstream → `name`, `desc`, `nodes`, `timeout` (`checks`·`retries`·`scheme`·`type` 은 보존)
 
 그룹 필드의 실제 위치는 조회 때 찾아낸 자리를 그대로 쓴다 — 아래 절 참조.
 
-같은 플러그인 안의 다른 필드(`proxy-rewrite.headers`, `jwt-auth.algorithm` 등)도 보존된다.
-회귀 테스트: `route_save_preserves_unknown_plugins`, `consumer_save_preserves_jwt_auth_extras`.
+같은 플러그인 안의 다른 필드(`proxy-rewrite.headers` · `proxy-rewrite.scheme` ·
+`jwt-auth.algorithm` 등)도 보존된다.
+회귀 테스트: `route_save_preserves_unknown_plugins`, `rewrite_modes_are_mutually_exclusive`,
+`rewrite_regex_keeps_extra_pairs`, `consumer_save_preserves_jwt_auth_extras`.
 
 **저장 전 GET 이 실패하면 저장 자체를 중단한다.** 빈 객체로 머지를 진행하면 플러그인을
 지키려고 만든 경로가 오히려 전부 날려버리게 되므로, 조용한 실패를 허용하지 않고
@@ -182,7 +184,7 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 
 목록 화면은 게이트웨이를 부르지 않는다. `GET /routes` · `GET /consumers` 결과를
 **메모리 SQLite**(`Connection::open_in_memory()`, `src-tauri/src/db.rs`)에 통째로 넣고,
-검색어·chip·조회 범위 필터를 SQL 로 처리한다. 예전에는 프런트가 배열을 들고 매 키 입력마다
+검색어·chip·name 접두사·조회 범위 필터를 SQL 로 처리한다. 예전에는 프런트가 배열을 들고 매 키 입력마다
 `JSON.stringify(route)` 를 훑었다 — 라우트가 수백 건이면 눈에 띄게 느려지고, Import 의 등록
 여부 판정은 (스펙 오퍼레이션 수) × (라우트 수) 번 비교가 된다. uri 를 정규화해 인덱스로
 만들면 둘이 같이 풀린다.
@@ -193,7 +195,7 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 |---|---|---|
 | `routes_sync` | O | Route 전체 재조회 → 캐시 전면 교체 (건수만 반환) |
 | `consumers_sync` | O | Consumer 전체 재조회 → 캐시 전면 교체 → 목록 반환 |
-| `routes_query` | X | 캐시 조회 (chip · 검색어 · 조회 범위) |
+| `routes_query` | X | 캐시 조회 (chip · 검색어 · name 접두사 · 조회 범위) |
 | `consumers_cached` | X | 캐시의 Consumer 전체 목록 |
 | `route_cached` | X | 캐시에서 단건 (Import 결과 → 상세 이동) |
 | `consumer_access_counts` | X | 컨슈머별 접근 가능 Route 수 (좌측 패널) |
@@ -232,6 +234,27 @@ sync 가 조회 결과를 돌려주지 않는 이유: 조회 축이 셋(chip · 
 대시보드를 열 때마다 같은 전체 목록을 다시 받아 "기동 시 1회 조회"가 무의미해진다.
 version·latency 는 라이브 값이라야 의미가 있어 그대로 호출한다.
 
+### name 접두사는 검색어와 다른 축이다
+
+route 명은 사내 규약(`EP_…` · `V1/…`)을 접두어로 달고 있고, "이 규약에 속한 것만 보기" 는
+검색어로는 표현되지 않는다. 검색어(`q`)는 `search` 블롭 **어디에나** 걸리는 '포함' 이라
+`legacy-EP_orders` 처럼 이름 중간에 우연히 들어간 것까지 잡힌다. 그래서 축을 따로 둔다.
+
+| 축 | 무엇을 보나 | SQL |
+|---|---|---|
+| 검색어 `q` | `RouteView` JSON 전체(소문자) 에 포함되는가 | `instr(search, ?2) > 0` |
+| name 접두사 | `name` 이 그 문자열로 **시작**하는가 | `substr(lower(name), 1, length(?5)) = ?5` |
+
+`LIKE ?5 || '%'` 를 쓰지 않는 이유는 검색어 쪽과 같다 — route 명에 흔한 `_` 가 LIKE 의
+단일문자 와일드카드라 `EP_` 가 `EPX…` 까지 잡는다. 대소문자는 무시한다: 경로 접두사에서
+파생한 접두어는 대문자(`V1/`)지만 service 에 등록한 접두어는 사용자가 쓴 그대로(`ep_`)라,
+고르는 값과 저장된 값의 대소문자가 다를 수 있다.
+
+콤보박스의 후보는 **Service 의 `labels.name_prefix`** 다 (이미 메모리에 있어 새 IPC 가 없다).
+route 명에서 첫 구분자 앞을 잘라 모으지 않는다 — 접두어는 service 단위로 정해 둔 규약이지
+이름에서 역산할 것이 아니고, 역산하면 규약이 아닌 우연한 조각까지 후보로 올라온다.
+규약에 없는 값이 필요하면 직접 입력하면 된다 (콤보박스는 자유 입력을 받는다).
+
 ### 건수는 세 종류다
 
 `store.routes` 는 **현재 조회 결과**이므로 배열 길이로 전체 건수를 세면 검색 중에 숫자가
@@ -239,8 +262,8 @@ version·latency 는 라이브 값이라야 의미가 있어 그대로 호출한
 
 | 값 | 반영하는 조건 | 쓰는 곳 |
 |---|---|---|
-| `routesTotal` | chip + 검색어 + 컨슈머 | 하단 `총 N건` |
-| `routeCounts` | 검색어 + 컨슈머 (chip 제외) | 상단 chip 라벨 |
+| `routesTotal` | chip + 검색어 + name 접두사 + 컨슈머 | 하단 `총 N건` |
+| `routeCounts` | 검색어 + name 접두사 + 컨슈머 (chip 제외) | 상단 chip 라벨 |
 | `access` | **아무것도 반영 안 함** | 좌측 패널 |
 
 좌측 패널이 `routeCounts` 를 쓰면 순환한다 — 컨슈머를 고른 순간 '전체 Route' 행이 그 컨슈머의
@@ -425,7 +448,7 @@ YAML 파서(`serde_norway`)가 JSON 의 상위집합이라 `.json` 스펙도 같
 
 | 판정 | 조건 | 클릭하면 |
 |---|---|---|
-| **일치** | 이 API 를 처리하는 route 가 있고 `name`·`uri`·`proxy-rewrite.uri`·`desc` 가 전부 스펙과 같음 | 그 route 상세 |
+| **일치** | 이 API 를 처리하는 route 가 있고 `name`·`uri`·`proxy-rewrite`·`desc` 가 전부 스펙과 같음 | 그 route 상세 |
 | **속성 차이** | route 는 있지만 위 네 값 중 다른 것이 있음 | 무엇을 적용할지 고르는 diff 화면 |
 | **미등록** | 선택한 service 안에 이 API `(path, method)` 를 처리하는 route 가 없음 | 값이 채워진 신규 등록 화면 |
 
@@ -477,9 +500,9 @@ service 에 `labels.name_prefix` 가 있으면 **이름에 한해** 그쪽이 �
 
 | service 접두어 | OAS path | `name` |
 |---|---|---|
-| `EP_` | `/orders/{orderId}` | `EP_orders/{orderId}` |
-| `EP/` | `/orders/{orderId}` | `EP/orders/{orderId}` |
-| *(없음)* + 경로 접두사 `/v1` | `/orders/{orderId}` | `V1/orders/{orderId}` — 위 규칙 그대로 |
+| `EP_` | `/orders/{orderId}/items` | `EP_orders/{orderId}/items` |
+| `EP/` | `/orders/{orderId}/items` | `EP/orders/{orderId}/items` |
+| *(없음)* + 경로 접두사 `/v1` | `/orders/{orderId}/items` | `V1/orders/{orderId}/items` — 위 규칙 그대로 |
 
 두 지점이 경로 접두사와 다르다.
 
@@ -489,8 +512,25 @@ service 에 `labels.name_prefix` 가 있으면 **이름에 한해** 그쪽이 �
   둘 중 어느 것도 아니면 path 가 곧바로 이어 붙으므로 폼에서 경고만 띄우고 저장은 막지 않는다
   — 규약이지 게이트웨이 제약이 아니다.
 
-`uri` 와 `proxy-rewrite.uri` 는 **바뀌지 않는다.** 이름만의 규약이라 게이트웨이가 매칭하는
+`uri` 와 `proxy-rewrite` 는 **바뀌지 않는다.** 이름만의 규약이라 게이트웨이가 매칭하는
 경로는 계속 경로 접두사를 따른다.
+
+#### 마지막 세그먼트가 파라미터면 이름에서 뗀다
+
+`/Vendor/CMCTB_VENDOR_GRP/{VNDRCD}` 의 uri 는 `/evcp/Vendor/CMCTB_VENDOR_GRP/*` 다 —
+route **하나가 그 파라미터의 모든 값**을 처리한다. 이름에 특정 값처럼 보이는 자리표시자를
+남기는 대신 실제로 매칭하는 구간까지만 적는다 (`oas::name_path`).
+
+| OAS path | `name` (접두사 `EVCP/`) | 왜 |
+|---|---|---|
+| `/Vendor/CMCTB_VENDOR_GRP/{VNDRCD}` | `EVCP/Vendor/CMCTB_VENDOR_GRP` | uri 가 `*` 로 접두 매칭하는 구간과 같다 |
+| `/orders/{orderId}/items` | `EVCP/orders/{orderId}/items` | **중간 파라미터는 그대로.** uri 에서 `:orderId` 는 한 세그먼트만 먹고, 뒤의 `/items` 가 API 를 구분하는 정보다 |
+| `/a/{x}/{y}` | `EVCP/a/{x}` | 뗀 결과가 또 파라미터로 끝나도 **반복해서 떼지 않는다** |
+| `/{id}` | `EVCP/{id}` | 떼면 접두사만 남는다 |
+
+`GET` 과 `POST` 를 각각 등록하면 **두 route 의 `name` 이 같아진다.** APISIX 는 name 유일성을
+요구하지 않아 저장은 되지만 목록에서 구분되지 않으므로, Import 화면이 그 행들을 `이름 중복`
+으로 표시하고 표 위에 안내를 띄운다 (저장을 막지는 않는다 — 등록 화면에서 고치면 된다).
 
 접두어는 프런트에서 다시 만들지 않는다. `db::compare` 가 고른 service 의 `name_prefix` 를
 캐시에서 한 번 읽어 `oas::suggested_name_for` 로 넘기고, 결과는 `CompareRow.suggestedName`
@@ -499,7 +539,7 @@ service 에 `labels.name_prefix` 가 있으면 **이름에 한해** 그쪽이 �
 
 ### 신규 등록 화면 프리필
 
-미등록 행을 누르면 `name`·`uri`·`proxy-rewrite.uri`·`methods`·`service_id`·`desc` 가 채워진
+미등록 행을 누르면 `name`·`uri`·`proxy-rewrite`·`methods`·`service_id`·`desc` 가 채워진
 신규 폼이 열린다. 저장은 **기존 `route_save` 경로를 그대로 탄다** — Import 전용 저장 경로를
 만들지 않았으므로 플러그인 보존 머지가 그대로 적용된다. 저장하면 비교 결과로 돌아오고, 방금
 만든 API 가 `일치` 로 바뀐다 (캐시를 갱신한 뒤 비교를 다시 돌린다).
@@ -514,11 +554,12 @@ service 에 `labels.name_prefix` 가 있으면 **이름에 한해** 그쪽이 �
 |---|---|---|
 | `name` | `V1/orders/{orderId}/items` | route 명 접두사 + **접두사를 뗀 원본 path**. 사람이 읽는 값이라 스펙과 같은 표기를 유지한다. service 에 name 접두어가 있으면 그것이 앞자리를 대신한다 (`EP_orders/{orderId}/items`) |
 | `uri` | `/v1/orders/:orderId/items` | 게이트웨이가 매칭하는 표기 (접두사 포함, 변환 규칙은 아래 표) |
-| `plugins.proxy-rewrite.uri` | `/orders/{orderId}/items` | upstream 이 아는 경로 — **접두사가 붙지 않는다** |
+| `plugins.proxy-rewrite.regex_uri` | `["^/v1/orders/([^/]+)/items", "/orders/$1/items"]` | upstream 이 아는 경로 — **접두사가 붙지 않는다.** path 에 파라미터가 있으면 `uri` 가 아니라 이쪽을 채운다 (아래) |
 
 세 값은 모두 Rust 가 계산해 `CompareRow` 로 내려준다 (`oas::suggested_name_for` ·
-`oas::to_apisix_uri`). 프런트에서 다시 만들지 않는다 — 규칙이 두 곳에 있으면 반드시 어긋나고,
-Rust 쪽에는 테스트가 붙어 있다. `name` 은 APISIX 제한(100자)에 맞춰 char 경계에서 자른다.
+`oas::to_apisix_uri` · `oas::to_rewrite_regex`). 프런트에서 다시 만들지 않는다 — 규칙이 두 곳에
+있으면 반드시 어긋나고, Rust 쪽에는 테스트가 붙어 있다. `name` 은 APISIX 제한(100자)에 맞춰
+char 경계에서 자른다.
 
 `uri` 변환 규칙은 `oas::to_apisix_uri` 한 곳에만 있다:
 
@@ -529,6 +570,51 @@ Rust 쪽에는 테스트가 붙어 있다. `name` 은 APISIX 제한(100자)에 �
 | `/pets/{petId}/toys` | `/pets/:petId/toys` | 중간에 `*` 를 넣으면 기본 라우터(`radixtree_uri`)가 매칭하지 못한다. 이 형태는 게이트웨이가 `radixtree_uri_with_parameter` 여야 동작한다 |
 
 어차피 사용자가 저장 전에 검토·수정하는 값이라 "가장 그럴듯한 출발점"을 준다.
+
+#### 경로 파라미터가 있으면 `uri` 가 아니라 `regex_uri` 다
+
+`plugins.proxy-rewrite.uri` 는 **정적 문자열**이라 `{VNDRCD}` 를 치환하지 않는다. 파라미터가
+있는 path 를 그대로 채우면 중괄호가 **리터럴로 upstream 에 나간다.** 캡처한 세그먼트를 넘기는
+방법은 `regex_uri` 뿐이다 (`oas::to_rewrite_regex`).
+
+```json
+"proxy-rewrite": {
+  "regex_uri": ["^/evcp/Vendor/CMCTB_VENDOR_GRP/(.*)", "/Vendor/CMCTB_VENDOR_GRP/$1"]
+}
+```
+
+패턴은 **uri 가 매칭시킨 요청을 반드시 다시 매칭해야 한다** — 놓치면 rewrite 가 통째로 실패해
+원래 경로가 그대로 나간다. 그래서 세그먼트 분해와 파라미터 판정을 `to_apisix_uri` 와 같은
+`param_name` 으로 하고, 두 문법을 1:1 로 대응시킨다.
+
+| 자리 | `to_apisix_uri` | 패턴 | 왜 |
+|---|---|---|---|
+| 마지막 세그먼트 | `*` (접두 매칭) | `(.*)` | `*` 뒤로는 슬래시를 포함해 뭐든 온다 |
+| 중간 세그먼트 | `:name` | `([^/]+)` | `:name` 은 한 세그먼트만 먹는다 |
+| 리터럴 | 그대로 | 정규식 이스케이프 | `/v1.0/` 의 `.` 를 두면 `/v1X0/` 까지 매칭된다 |
+
+치환값은 **접두사를 붙이지 않은 원본 path** 에서 i번째 파라미터를 `$i` 로 바꾼 것이다
+(`proxy-rewrite.uri` 와 같은 계약 — upstream 이 아는 경로다). 끝에 `$` 앵커를 붙이지 않는다:
+요청은 이미 route 의 `uri` 로 걸러져 들어오고, 마지막 `(.*)` 가 나머지를 삼킨다.
+
+**두 키는 절대 함께 저장되지 않는다.** APISIX 의 proxy-rewrite 는
+`if conf.uri ~= nil then … elseif conf.regex_uri ~= nil then` 이라 `uri` 가 있으면 regex 를
+아예 보지 않는다 (스키마 주석도 *"lower priority than uri property"*). 함께 남기면 화면에는
+regex 가 보이는데 게이트웨이는 uri 로 도는, 눈으로 잡을 수 없는 상태가 된다. 그래서 저장 본문을
+만드는 `routes::apply_route_form` 이 한쪽을 넣을 때 반드시 다른 쪽을 지운다. 폼과 JSON 탭도
+같은 규칙이다 (`design.routeJson`).
+
+`proxy-rewrite` 안의 `scheme` · `headers` 처럼 앱이 모르는 키는 평소대로 보존된다.
+`regex_uri` 쌍이 셋 이상인 route 도 배열 전체를 왕복하므로 폼이 첫 쌍만 편집해도 나머지는
+남는다 (APISIX 는 쌍을 앞에서부터 시도한다).
+
+#### 폼과 JSON 화면
+
+Route 폼의 `plugins · proxy-rewrite` 는 `uri` · `regex_uri` **모드 칩**을 갖는다. regex 모드면
+패턴·치환 두 칸이 나오고, 모드를 바꿔도 반대쪽 값은 폼 상태에 남는다 (실수로 눌렀을 때 되돌릴
+수 있어야 한다) — 저장 본문에서 배제하는 것은 위의 한 곳이다. 조회한 route 의 모드는 값에서
+파생한다 (`regex_uri` 가 2개 이상이면 regex). JSON 탭도 한쪽만 그리고, 손으로 적은 `regex_uri`
+를 `폼에 적용` 으로 되읽는다.
 
 ### 속성 차이 행을 누르면 — 스펙 적용본과의 diff
 
@@ -551,7 +637,7 @@ uri·이름 규칙을 프런트에서 다시 만들지 않는다는 기존 계�
 |---|---|---|
 | `name` | `suggestedName` | |
 | `uri` | `suggestedUri` | 달라도 **현재 uri 는 이미 그 경로에 매칭된다** (그래서 등록으로 판정됐다). `표기 차이` 로 표시해 `:petId` 를 쓰는 멀쩡한 route 가 "고쳐야 할 것" 으로 보이지 않게 한다 |
-| `plugins.proxy-rewrite.uri` | `suggestedRewrite` | |
+| `plugins.proxy-rewrite` | `suggestedRewrite` 또는 `suggestedRewriteRegex` | 체크박스는 **하나**다. 두 키는 나란한 필드가 아니라 서로 갈아 끼우는 관계라, 따로 두면 "uri 만 지우고 regex 는 안 넣는" 선택이 가능해져 rewrite 가 통째로 사라진다. 적용하면 세 값(`rewrite`·`rewriteMode`·`rewriteRegex`)이 함께 얹힌다 |
 | `desc` | `summary` (255자) | |
 | `methods` · `status` · `service_id` · `allowed_groups` | *(없음)* | **건드리지 않는다.** 두 본문에 똑같이 실려 diff 를 조용히 지나간다 |
 
@@ -567,7 +653,19 @@ uri·이름 규칙을 프런트에서 다시 만들지 않는다는 기존 계�
 #### API 의 단위는 (path, method) 다
 
 `GET /test` 와 `POST /test` 는 **서로 다른 API** 이고 각각 따로 처리한다 (`CompareRow` 가 이미
-그 단위다). 그래서 `methods` 는 이 화면의 비교 대상이 **아니다** — 이 메서드를 받지 않는 route
+그 단위다). 그래서 Import 는 (path, method) 마다 route 를 하나씩 만든다 — 같은 uri 를 가진
+route 가 메서드 수만큼 생긴다.
+
+**APISIX 는 그것을 허용한다.** route 의 유일 키는 `id` 이고 `uri` · `name` 에는 유일성 제약이
+없다 (`apisix/schema_def.lua`). `apisix/http/route.lua` 의 `create_radixtree_uri_router` 는
+route 마다 `{paths, methods, priority, …}` 를 **무조건** insert 하고 uri 중복 제거·거부 로직이
+없다. 같은 path 는 lua-resty-radixtree 가 한 노드의 정렬된 리스트에 쌓아 두고, 매칭할 때
+route 별 method 비트마스크를 `bit.band` 로 검사해 거른다. 그래서 `GET` 과 `POST` 가 서로 다른
+upstream 경로·플러그인을 가질 수 있다.
+
+한 가지 조건이 붙는다 — 같은 uri 를 나눠 쓰는 route 는 **모두 `methods` 를 명시해야 한다.**
+한쪽이 비면 APISIX 가 전 메서드를 허용해 priority/삽입 순서에 따라 다른 쪽을 가릴 수 있다.
+Import 프리필은 `methods: [row.method]` 라 이 조건을 이미 만족한다. 그래서 `methods` 는 이 화면의 비교 대상이 **아니다** — 이 메서드를 받지 않는 route
 는 애초에 이 API 의 대상 route 가 아니라 `미등록` 으로 판정된다. 이 화면에 보이는 route 는 이미
 이 메서드를 받는 route 이고, 거기에 남는 다른 메서드는 옆 API 의 몫이다.
 

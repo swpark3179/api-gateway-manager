@@ -16,6 +16,21 @@ export default function RouteForm() {
   if (!form || form.kind !== "route") return null;
 
   const active = form.status === 1;
+  const rewriteMode = form.rewriteMode;
+  const regexFrom = form.rewriteRegex[0] ?? "";
+  const regexTo = form.rewriteRegex[1] ?? "";
+  // 첫 쌍 뒤에 남아 있는 쌍의 수. 폼은 이것을 건드리지 않지만 **들고는 있어야** 저장 시
+  // 보존된다 (배열 통째로 Rust 에 넘어간다).
+  const extraPairs = Math.max(0, Math.floor((form.rewriteRegex.length - 2) / 2));
+
+  /** 첫 쌍의 한 칸만 고친다. 뒤쪽 쌍은 그대로 둔 채 배열을 새로 만든다. */
+  const patchRegex = (i: 0 | 1, v: string) => {
+    const next = [...form.rewriteRegex];
+    // 두 칸이 없는 상태(첫 입력)에서도 [패턴, 치환] 자리가 먼저 생겨야 한다.
+    while (next.length < 2) next.push("");
+    next[i] = v;
+    patch({ rewriteRegex: next });
+  };
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
@@ -78,14 +93,80 @@ export default function RouteForm() {
             </div>
           </div>
 
-          <div>
-            <label className="field-label">plugins · proxy-rewrite.uri</label>
-            <input
-              className="text-input font-mono"
-              value={form.rewrite}
-              onChange={(e) => patch({ rewrite: e.target.value })}
-              placeholder="/orders/*"
-            />
+          <div style={{ gridColumn: "1 / -1" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                marginBottom: 6,
+              }}
+            >
+              <label className="field-label" style={{ marginBottom: 0 }}>
+                plugins · proxy-rewrite
+              </label>
+              {/* 두 키는 나란한 필드가 아니라 **배타적**이다. APISIX 는 uri 가 있으면
+                  regex_uri 를 무시하므로(proxy-rewrite.lua), 한쪽만 저장한다. */}
+              {(["uri", "regex"] as const).map((m) => (
+                <div
+                  key={m}
+                  className={"chip" + (rewriteMode === m ? " on" : "")}
+                  onClick={() => patch({ rewriteMode: m })}
+                  style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}
+                >
+                  {m === "uri" ? "uri" : "regex_uri"}
+                </div>
+              ))}
+            </div>
+
+            {rewriteMode === "uri" ? (
+              <>
+                <input
+                  className="text-input font-mono"
+                  value={form.rewrite}
+                  onChange={(e) => patch({ rewrite: e.target.value })}
+                  placeholder="/orders/*"
+                />
+                <div className="text-xs muted" style={{ marginTop: 6 }}>
+                  정적 문자열입니다 — 경로 파라미터를 upstream 으로 넘기려면{" "}
+                  <span className="font-mono">regex_uri</span> 를 쓰세요.
+                </div>
+              </>
+            ) : (
+              <div style={{ display: "grid", gap: 8 }}>
+                <input
+                  className="text-input font-mono"
+                  value={regexFrom}
+                  onChange={(e) => patchRegex(0, e.target.value)}
+                  placeholder="^/evcp/Vendor/CMCTB_VENDOR_GRP/(.*)"
+                  aria-label="regex_uri 패턴"
+                />
+                <input
+                  className="text-input font-mono"
+                  value={regexTo}
+                  onChange={(e) => patchRegex(1, e.target.value)}
+                  placeholder="/Vendor/CMCTB_VENDOR_GRP/$1"
+                  aria-label="regex_uri 치환값"
+                />
+                <div className="text-xs muted">
+                  요청 경로를 위 패턴으로 매칭해 아래 값으로 바꿔 upstream 에 보냅니다.
+                  캡처는 <span className="font-mono">$1</span> · <span className="font-mono">$2</span>{" "}
+                  로 참조합니다.
+                </div>
+                {extraPairs > 0 && (
+                  <div className="text-xs" style={{ color: "var(--yellow-700)" }}>
+                    이 route 의 <span className="font-mono">regex_uri</span> 는 {extraPairs + 1}쌍입니다
+                    — 폼은 첫 쌍만 편집하고 나머지는 그대로 보존됩니다.
+                  </div>
+                )}
+                {regexTo.trim() !== "" && !regexTo.trim().startsWith("/") && (
+                  <div className="text-xs" style={{ color: "var(--yellow-700)" }}>
+                    치환값이 <span className="font-mono">/</span> 로 시작하지 않습니다. upstream 이
+                    받는 것은 경로이므로 대개 <span className="font-mono">/</span> 로 시작합니다.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div style={{ gridColumn: "1 / -1" }}>

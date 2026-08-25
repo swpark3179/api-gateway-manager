@@ -70,8 +70,13 @@ export const settingsTest = (env: EnvKey, payload: EnvPayload) =>
 export const routesSync = (env: EnvKey) => call<number>("routes_sync", { env });
 
 /** 캐시만 조회한다 — 필터가 바뀔 때마다 게이트웨이를 다시 부르지 않는다. */
-export const routesQuery = (env: EnvKey, chip: string, q: string, scope: RouteScope) =>
-  call<RoutesPage>("routes_query", { env, chip, q, scope });
+export const routesQuery = (
+  env: EnvKey,
+  chip: string,
+  q: string,
+  namePrefix: string,
+  scope: RouteScope,
+) => call<RoutesPage>("routes_query", { env, chip, q, namePrefix, scope });
 
 /** 캐시에서 라우트 한 건. 목록이 필터돼 있어도 상세로 갈 수 있게 해 준다. */
 export const routeCached = (env: EnvKey, id: string) =>
@@ -88,6 +93,8 @@ export const routeSave = (env: EnvKey, f: RouteFormState) =>
       methods: f.methods,
       serviceId: f.serviceId,
       rewrite: f.rewrite,
+      rewriteMode: f.rewriteMode,
+      rewriteRegex: f.rewriteRegex,
       groups: f.groups,
       status: f.status,
       groupsLocation: f.groupsLocation,
