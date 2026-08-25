@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 
-import { Cell, CellPair } from "../components/Cell";
+import { Cell } from "../components/Cell";
 import MetaList from "../components/MetaList";
 import type { Col } from "../components/MetaList";
 import { useStore } from "../store";
@@ -10,16 +10,20 @@ import type { UpstreamView } from "../types";
 
 const ROW = "12px 16px";
 
-/** 열 폭 — `table-layout: fixed` 라 여기 값이 곧 잘림 기준이다 (ListScreen 의 `ROUTE_COLS` 주석 참조). */
+/** 열 폭 — 잘리면 안 되는 id · name 에는 폭을 주지 않는다 (ListScreen 의 `ROUTE_COLS` 주석 참조). */
 const COLS: Col[] = [
-  { label: "id", width: "14%" },
-  { label: "name", width: "18%" },
-  { label: "nodes", width: "20%" },
-  // 값은 `1000 / 1000 / 1000` 로 짧지만 헤더 라벨이 200px 라 그쪽이 기준이 된다.
-  { label: "timeout (connect/send/read)", width: "22%" },
-  { label: "type", width: "10%" },
-  { label: "수정일시", width: "16%" },
+  { label: "id" },
+  { label: "name" },
+  { label: "nodes", width: "176px" },
+  // 값(`1000 / 1000 / 1000` · 131px)이 아니라 헤더 라벨이 200px 라 그쪽이 기준이었다.
+  // 라벨을 줄여 그 차이를 id · name 으로 돌리고, 원래 이름은 툴팁에 남긴다.
+  { label: "timeout", width: "164px", title: "timeout (connect / send / read)" },
+  { label: "type", width: "108px" },
+  { label: "수정일시", width: "152px" },
 ];
+
+/** 고정 열 합계(600) + id · name 바닥값 212px (ListScreen 의 `ROUTE_MIN` 주석 참조). */
+const GRID_MIN = 600 + 212 * 2;
 
 /** 건수가 적어 클라이언트 배열 필터를 쓴다 (MetaList 주석 참조). */
 function filter(items: UpstreamView[], q: string): UpstreamView[] {
@@ -48,6 +52,7 @@ export default function UpstreamsScreen() {
       syncTitle="게이트웨이에서 Upstream 전체 목록을 다시 조회해 로컬 캐시를 갱신합니다 (Service 라벨도 함께 갱신)"
       onSync={() => void syncUpstreams()}
       columns={COLS}
+      minWidth={GRID_MIN}
       total={shown.length}
       emptyMessage={
         syncedAt === null
@@ -64,8 +69,13 @@ export default function UpstreamsScreen() {
           <td className="mono" style={{ padding: ROW }}>
             <Cell text={u.id} />
           </td>
-          <td style={{ padding: ROW }}>
-            <CellPair main={u.name || "—"} sub={u.desc} />
+          {/* desc 는 같은 칸에 나란히 두지 않고 툴팁으로 내렸다 — 한 줄에 두면 name 의 폭을
+              가져간다 (`CellPair` 주석 참조). */}
+          <td className="name" style={{ padding: ROW }}>
+            <Cell
+              text={u.name || "—"}
+              title={u.desc ? `${u.name || "—"} · ${u.desc}` : undefined}
+            />
           </td>
           <td className="mono" style={{ padding: ROW }}>
             {u.nodeLabel ? (

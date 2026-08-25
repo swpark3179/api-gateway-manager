@@ -180,11 +180,32 @@ select.text-input { padding-right: 32px; appearance: auto; }
   white-space: nowrap;
 }
 .cell-line > .t.sub {
-  /* 보조값이 먼저 줄어든다 — 주값을 끝까지 남긴다 */
-  flex: 0 1 auto;
+  /* 보조값이 먼저 줄어든다 — 주값을 끝까지 남긴다.
+     shrink 를 크게 준 것이 핵심이다. 기본값 1 은 주값에도 붙어 있어서 둘이 제 폭에 비례해
+     같이 줄었고, 그래서 폭이 모자라면 주값까지 `…` 가 됐다 (220px 칸에서 주값 152px ·
+     보조값 58px — 실측). 100 이면 보조값이 0 까지 밀린 다음에야 주값이 준다. */
+  flex: 0 100 auto;
   color: var(--gray-500);
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+/* ─── 목록 그리드 가로 스크롤 (screens/*Screen.tsx · components/MetaList.tsx) ───
+   `table-layout: fixed` 는 창이 좁아지면 열을 **무한히** 눌러 준다. 잘리면 안 되는 열
+   (route 의 name · uri, consumer 의 desc · username, upstream · service 의 id · name)까지
+   읽을 수 없는 토막이 되므로, 표에 `min-width` 로 바닥을 깔고 그 아래로는 눌리는 대신
+   가로로 스크롤되게 한다.
+
+   바닥값은 각 화면이 정한다 (`ROUTE_MIN` · `CONSUMER_MIN` · `GRID_MIN` 상수). 기본 창(1440) · 패널 펼침일 때의 표 폭
+   1088px 을 넘지 않게 잡아서 평소에는 스크롤바가 뜨지 않는다.
+
+   표만 감싼다 — 화면 전체를 스크롤시키면 상단 제목·검색·버튼 줄까지 같이 밀린다.
+   padding/margin 은 상쇄 쌍이다. `overflow-x: auto` 는 세로도 auto 로 만들기 때문에
+   여백 없이 감싸면 `.kw-table` 의 box-shadow 가 잘린다. */
+.table-scroll {
+  overflow-x: auto;
+  padding: 4px;
+  margin: -4px;
 }
 
 /* 뱃지 열 — 줄바꿈 금지 (components/BadgeList.tsx) */

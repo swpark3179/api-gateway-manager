@@ -13,10 +13,20 @@
  * 정하면 열마다 두 군데를 맞춰야 한다.
  */
 
+interface CellProps {
+  text: string;
+  /**
+   * 툴팁을 값과 다르게 쓸 때. 잘리면 안 되는 열에서 보조 정보(upstream · service 의 desc)를
+   * 한 줄에 같이 그리는 대신 이쪽으로 내려 보낸다 — 같은 줄에 두면 보조값이 주값의 폭을
+   * 가져간다 (`CellPair` 주석 참조).
+   */
+  title?: string;
+}
+
 /** 한 줄 텍스트 셀 — 넘치면 … 로 자르고 툴팁에 전체를 보여준다. */
-export function Cell({ text }: { text: string }) {
+export function Cell({ text, title }: CellProps) {
   return (
-    <span className="cell-1" title={text}>
+    <span className="cell-1" title={title ?? text}>
       {text}
     </span>
   );
@@ -35,8 +45,12 @@ interface CellPairProps {
  * 주값 + 보조값을 **한 줄에 나란히**.
  *
  * 예전에는 위아래 두 줄로 쌓았는데, 그것만으로 행 높이가 두 배가 된다. 보조값을 버리면
- * 목록에서 service_id 를 훑을 수 없으니 (ListScreen 의 c1sub 주석 참조) 같은 줄로 옮긴다.
- * 폭이 모자라면 보조값부터 `…` 로 줄고, 툴팁에는 둘을 이어 붙여 보여 준다.
+ * 목록에서 그 행을 특정할 수 없으니 같은 줄로 옮긴다. 폭이 모자라면 보조값이 **먼저**
+ * 사라지고(app.css 의 `.cell-line > .t.sub`) 툴팁에는 둘을 이어 붙여 보여 준다.
+ *
+ * 그래도 주값이 잘리면 안 되는 열에는 쓰지 않는다 — 보조값이 0 이 될 때까지는 gap 만큼이라도
+ * 주값의 폭을 가져가고, 값이 짧을 때는 그만큼을 계속 차지한다. 그런 열은 `Cell` 에 보조값을
+ * `title` 로 넘긴다 (`UpstreamsScreen` · `ServicesScreen` 의 name 열).
  */
 export function CellPair({ main, sub, mono }: CellPairProps) {
   return (

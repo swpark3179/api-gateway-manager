@@ -467,12 +467,6 @@ export function methodChips(selected: string[]): string[] {
   return sortMethods([...METHODS, ...selected]);
 }
 
-/** Consumer 목록의 secret 열 표기 — 디자인의 `secret.slice(0,8) + '••••••••'` */
-export function maskSecret(secret: string): string {
-  if (!secret) return "—";
-  return secret.slice(0, 8) + "••••••••";
-}
-
 /**
  * 목록 상단의 마지막 동기화 시각 — `동기화 14:22`.
  *
