@@ -455,7 +455,20 @@ export default function ListScreen() {
                       <Cell text={rewriteText(r) || "—"} />
                     </td>
                     <td style={{ padding: ROW_H }}>
-                      <BadgeList items={r.groups} variant="primary" />
+                      {/* 빈 칸으로 두면 "아무도 접근 못 하는 라우트"(권한그룹 0건)와
+                          "누구나 접근하는 라우트"(권한 플러그인 없음)가 같아 보인다.
+                          목록에서 반드시 구별돼야 하는 차이라 뱃지로 말한다. */}
+                      {r.hasAuth ? (
+                        <BadgeList items={r.groups} variant="primary" />
+                      ) : (
+                        <span
+                          className="badge warning"
+                          title="plugins · shi-auth 가 없습니다 — 권한 검사 없이 호출할 수 있습니다"
+                        >
+                          <span className="dot" />
+                          전체 허용
+                        </span>
+                      )}
                     </td>
                     <td style={{ padding: ROW_H }}>
                       <span className={"badge " + (r.status === 1 ? "success" : "neutral")}>

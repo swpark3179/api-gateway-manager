@@ -96,6 +96,9 @@ export const routeSave = (env: EnvKey, f: RouteFormState) =>
       rewriteMode: f.rewriteMode,
       rewriteRegex: f.rewriteRegex,
       groups: f.groups,
+      // 이 줄을 빠뜨리면 Rust 가 빈 문자열을 "groups" 로 읽어 전체 허용이 무시된다
+      // (누락이 권한을 조용히 푸는 쪽으로 떨어지지 않게 한 기본값이다 — routes.rs 주석).
+      authMode: f.authMode,
       status: f.status,
       groupsLocation: f.groupsLocation,
     },

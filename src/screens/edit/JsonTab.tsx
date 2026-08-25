@@ -36,6 +36,9 @@ export default function JsonTab({ sub }: { sub: string }) {
       ? `plugins.${loc.plugin}.${loc.key}${loc.asCsv ? " (콤마 구분 문자열)" : ""}`
       : `${loc.key} (최상위)${loc.asCsv ? " · 콤마 구분 문자열" : ""}`
     : null;
+  // 전체 허용이면 그 자리에 되쓰는 것이 아니라 **지운다** — 위치 안내가 거짓이 되지 않게
+  // 문구를 갈아 끼운다 (본문에 그룹 필드가 아예 없는 이유이기도 하다).
+  const isPublicRoute = form?.kind === "route" && form.authMode === "public";
 
   return (
     <div className="card-surface" style={{ padding: "20px 22px" }}>
@@ -153,11 +156,30 @@ export default function JsonTab({ sub }: { sub: string }) {
             저장 시 그대로 보존됩니다.
           </>
         )}
-        {locLabel && (
+        {isPublicRoute ? (
           <>
             <br />
-            그룹 필드 위치: <span className="font-mono">{locLabel}</span> — 저장 시 이 자리에
-            그대로 되씁니다.
+            전체 허용 모드입니다 — 그룹 필드를 내보내지 않고, 저장할 때 게이트웨이의{" "}
+            <span className="font-mono">plugins.shi-auth</span> 를 지웁니다. 권한그룹으로 제한하려면
+            폼 편집 탭에서 ‘권한그룹 지정’ 을 고르세요.
+          </>
+        ) : (
+          locLabel && (
+            <>
+              <br />
+              그룹 필드 위치: <span className="font-mono">{locLabel}</span> — 저장 시 이 자리에
+              그대로 되씁니다.
+            </>
+          )
+        )}
+        {!showRaw && form?.kind === "route" && (
+          <>
+            <br />
+            <span className="font-mono">plugins</span> 는 폼을 따라갑니다 — 권한그룹 카드에서
+            ‘전체 허용’ 을 고르면 <span className="font-mono">shi-auth</span> 가 사라지고,{" "}
+            <span className="font-mono">proxy-rewrite</span> 까지 없으면{" "}
+            <span className="font-mono">plugins</span> 키 자체가 없습니다 (저장할 때도 그렇게
+            지워집니다).
           </>
         )}
         {/* 폼에 없는 키는 이 화면에도 없다. "왜 안 보이지" 를 화면에서 답한다. */}

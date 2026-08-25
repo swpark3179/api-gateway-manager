@@ -145,6 +145,21 @@ impl Default for GroupsLocation {
     }
 }
 
+/// Route 의 권한 검사 플러그인.
+///
+/// 그룹 필드의 기본 위치이면서, 폼의 **전체 허용** 모드에서 지우는 대상이다 — 게이트웨이가
+/// 요청을 막는 것은 `allowed_groups` 의 내용이 아니라 이 플러그인이 붙어 있다는 사실이다.
+pub const ROUTE_AUTH_PLUGIN: &str = "shi-auth";
+/// 그 플러그인 안의 기본 키.
+pub const ROUTE_GROUPS_KEY: &str = "allowed_groups";
+
+impl GroupsLocation {
+    /// Route 의 기본 위치. `Default` 는 Consumer 쪽(`jwt-auth.auth-groups`)이라 따로 둔다.
+    pub fn route_default() -> Self {
+        Self { plugin: ROUTE_AUTH_PLUGIN.into(), key: ROUTE_GROUPS_KEY.into(), as_csv: false }
+    }
+}
+
 /// 문자열 배열 · 콤마(공백/세미콜론) 구분 문자열 · 숫자 배열을 모두 문자열 목록으로 받아들인다.
 /// 배열도 문자열도 아니면 None — "이 자리에는 그룹이 없다"는 뜻이다.
 fn to_string_list(v: &Value) -> Option<Vec<String>> {
@@ -259,6 +274,22 @@ pub fn set_groups_at(m: &mut Map<String, Value>, loc: &GroupsLocation, groups: &
     plugin.insert(loc.key.clone(), value);
     plugins.insert(loc.plugin.clone(), Value::Object(plugin));
     m.insert("plugins".into(), Value::Object(plugins));
+}
+
+/// `loc` 가 가리키는 자리가 게이트웨이 원본에 **실제로 있는가**.
+///
+/// `find_groups` 는 아무것도 못 찾아도 기본 위치를 돌려주므로, 값과 위치만으로는
+/// "그룹이 빈 배열이다"(= 아무 컨슈머도 못 들어온다)와 "권한 플러그인이 아예 없다"
+/// (= 누구나 들어온다)를 구별할 수 없다. Route 폼의 전체 허용 모드가 그 구별에 기댄다.
+///
+/// 키가 없어도 **플러그인이 붙어 있으면 있다고 본다.** 게이트웨이가 요청을 막는 것은
+/// 플러그인의 존재이고, `allowed_groups` 가 없는 `shi-auth` 도 여전히 검사를 한다 —
+/// 그것을 "전체 허용"으로 읽으면 저장 한 번으로 권한이 조용히 풀린다.
+pub fn groups_slot_present(v: &Value, loc: &GroupsLocation) -> bool {
+    if loc.plugin.is_empty() {
+        return v.get(&loc.key).is_some();
+    }
+    v.get("plugins").and_then(|p| p.get(&loc.plugin)).is_some()
 }
 
 // ── 담당자 (labels · name{n} / dept{n}) ──────────────────────
@@ -416,10 +447,25 @@ pub struct RouteView {
     pub groups: Vec<String>,
     /// 그 값이 저장돼 있던 위치 — 저장 시 같은 자리에 되쓴다
     pub groups_location: GroupsLocation,
+    /// 권한 검사가 **붙어 있는가** (`groups_slot_present`).
+    ///
+    /// `groups` 가 비어 있는 것만으로는 "아무도 접근 못 하는 라우트"와 "권한 없이 누구나
+    /// 접근하는 라우트"를 구별할 수 없다. 폼의 전체 허용 모드가 이 값에서 파생된다.
+    ///
+    /// 누락 시 기본값을 `true` 로 두는 이유: 이 필드를 모르는 본문(옛 캐시 행 등)을
+    /// `false` 로 읽으면 화면이 멀쩡한 라우트를 "전체 허용"이라 말하고, 저장 한 번으로
+    /// 실제 권한이 풀린다. 안전한 쪽으로 떨어져야 한다.
+    #[serde(default = "yes")]
+    pub has_auth: bool,
     pub update_time: Option<i64>,
     pub updated: String,
     /// 게이트웨이 원본 객체 — JSON 탭의 '게이트웨이 원본' 보기에 그대로 쓴다
     pub raw: Value,
+}
+
+/// `serde(default)` 용 — bool 의 기본값(`false`)이 위험한 자리에 쓴다.
+fn yes() -> bool {
+    true
 }
 
 impl RouteView {
@@ -432,7 +478,9 @@ impl RouteView {
             .to_string();
         let rewrite_regex = str_array(plugins.and_then(|p| p.pointer("/proxy-rewrite/regex_uri")));
         // consumer 와 같은 이유로 관대하게 찾는다 — 다른 도구가 등록한 라우트도 그룹이 보여야 한다.
-        let (groups, groups_location) = find_groups(v, "shi-auth", "allowed_groups");
+        let (groups, groups_location) = find_groups(v, ROUTE_AUTH_PLUGIN, ROUTE_GROUPS_KEY);
+        // 그룹이 비어 있어도 자리가 있으면 권한 검사는 살아 있다 (`groups_slot_present`).
+        let has_auth = groups_slot_present(v, &groups_location);
 
         let service_id = match v.get("service_id") {
             Some(Value::String(s)) => s.clone(),
@@ -454,6 +502,7 @@ impl RouteView {
             rewrite_regex,
             groups,
             groups_location,
+            has_auth,
             update_time: ts,
             updated: fmt_ts(ts),
             raw: v.clone(),

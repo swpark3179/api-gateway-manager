@@ -28,8 +28,9 @@
  *
  * # 손대지 않는 값
  *
- * `methods` · `status` · `service_id` · `allowed_groups`(+`groupsLocation`) 는 스펙에 없거나
- * 이 API 의 차이가 아니라 후보를 만들지 않는다. 두 본문에 똑같이 실려 diff 에서 조용히 지나간다.
+ * `methods` · `status` · `service_id` · 권한 설정(`allowed_groups` + `groupsLocation` +
+ * `authMode`)은 스펙에 없거나 이 API 의 차이가 아니라 후보를 만들지 않는다. 두 본문에 똑같이
+ * 실려 diff 에서 조용히 지나간다 — 전체 허용인 route 는 양쪽 모두 그룹 필드가 없는 모양이다.
  */
 
 import { rewriteText, specDesc, specRewrite } from "../types";
@@ -263,7 +264,7 @@ export function allChanges(fields: DiffField[]): DiffSelection {
  * 고른 것만 기존 폼에 얹는다.
  *
  * `...base` 로 시작하므로 `id` · `methods` · `serviceId` · `status` · `groups` ·
- * `groupsLocation` 은 그대로 남는다 — 결과가 곧 `store.save()` 가 그대로 쓰는
+ * `groupsLocation` · `authMode` 는 그대로 남는다 — 결과가 곧 `store.save()` 가 그대로 쓰는
  * `RouteFormState` 다.
  */
 export function applySelection(

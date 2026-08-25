@@ -132,6 +132,7 @@ fn route_save_preserves_unknown_plugins() {
         rewrite_mode: "uri".into(),
         rewrite_regex: vec![],
         groups: vec!["ops-admin".into(), "order-dev".into()],
+        auth_mode: String::new(),
         status: Some(0),
         groups_location: None,
     };
@@ -176,6 +177,7 @@ fn new_route_is_always_active() {
         rewrite_mode: String::new(),
         rewrite_regex: vec![],
         groups: vec![],
+        auth_mode: String::new(),
         status: None,
         groups_location: None,
     };
@@ -223,6 +225,7 @@ fn rewrite_modes_are_mutually_exclusive() {
         rewrite_mode: mode.into(),
         rewrite_regex: regex.into_iter().map(String::from).collect(),
         groups: vec![],
+        auth_mode: String::new(),
         status: None,
         groups_location: None,
     };
@@ -275,6 +278,7 @@ fn rewrite_regex_keeps_extra_pairs() {
             .map(|s| s.to_string())
             .collect(),
         groups: vec![],
+        auth_mode: String::new(),
         status: None,
         groups_location: None,
     };
@@ -304,6 +308,7 @@ fn blank_regex_pair_removes_the_key() {
         rewrite_mode: "regex".into(),
         rewrite_regex: regex.into_iter().map(String::from).collect(),
         groups: vec![],
+        auth_mode: String::new(),
         status: None,
         groups_location: None,
     };
@@ -329,6 +334,194 @@ fn blank_regex_pair_removes_the_key() {
     assert!(apply_route_form_for_test(base(), &form(vec!["^/a/(.*)", "", "^/c/(.*)", "/d"]), false)
         .pointer("/plugins/proxy-rewrite/regex_uri")
         .is_none());
+}
+
+/// 전체 허용은 "권한그룹 0건" 이 아니라 **권한 플러그인을 떼는 것**이다.
+///
+/// 빈 `allowed_groups` 를 남기면 게이트웨이에서는 정반대(어느 그룹도 못 들어옴)가 된다.
+/// 폼에 남아 있는 그룹 목록도 저장 본문에 실리지 않아야 한다 — 모드가 곧 답이다.
+#[test]
+fn public_route_drops_the_auth_plugin() {
+    use crate::apisix::routes::{apply_route_form_for_test, RouteForm};
+
+    let existing = json!({
+        "id": "42",
+        "name": "health",
+        "uri": "/health",
+        "service_id": "svc",
+        "plugins": {
+            "limit-count": { "count": 100 },
+            "proxy-rewrite": { "uri": "/health", "headers": { "X-Src": "gw" } },
+            "shi-auth": { "allowed_groups": ["ops-admin"], "mode": "strict" }
+        }
+    });
+
+    let form = RouteForm {
+        id: Some("42".into()),
+        name: "health".into(),
+        uri: "/health".into(),
+        desc: String::new(),
+        methods: vec!["GET".into()],
+        service_id: "svc".into(),
+        rewrite: "/health".into(),
+        rewrite_mode: "uri".into(),
+        rewrite_regex: vec![],
+        // 폼에는 그룹이 남아 있다 (모드를 되돌리면 복원되어야 하므로). 저장에는 안 실린다.
+        groups: vec!["ops-admin".into()],
+        auth_mode: "public".into(),
+        status: Some(1),
+        groups_location: None,
+    };
+
+    let body = apply_route_form_for_test(existing, &form, false);
+
+    // 플러그인이 통째로 사라진다 — `mode: strict` 같은 다른 필드째로.
+    assert!(body.pointer("/plugins/shi-auth").is_none());
+    // 빈 껍데기도 남기지 않는다.
+    assert!(body.pointer("/plugins/shi-auth/allowed_groups").is_none());
+    // 최상위로 새는 일도 없어야 한다.
+    assert!(body.get("allowed_groups").is_none());
+    // 나머지 플러그인은 그대로다 — 전체 허용은 권한만 떼는 것이다.
+    assert_eq!(body.pointer("/plugins/limit-count/count").unwrap(), 100);
+    assert_eq!(body.pointer("/plugins/proxy-rewrite/uri").unwrap(), "/health");
+    assert_eq!(body.pointer("/plugins/proxy-rewrite/headers/X-Src").unwrap(), "gw");
+}
+
+/// 권한을 떼고 rewrite 도 없으면 `plugins` 키 자체가 사라진다 (Service 와 같은 규칙).
+#[test]
+fn public_route_without_other_plugins_drops_the_plugins_key() {
+    use crate::apisix::routes::{apply_route_form_for_test, RouteForm};
+
+    let form = RouteForm {
+        id: None,
+        name: "public-ping".into(),
+        uri: "/ping".into(),
+        desc: String::new(),
+        methods: vec!["GET".into()],
+        service_id: "svc".into(),
+        rewrite: String::new(),
+        rewrite_mode: String::new(),
+        rewrite_regex: vec![],
+        groups: vec![],
+        auth_mode: "public".into(),
+        status: None,
+        groups_location: None,
+    };
+
+    let body = apply_route_form_for_test(json!({}), &form, true);
+    assert!(body.get("plugins").is_none(), "빈 plugins 껍데기를 남기지 않는다");
+    assert_eq!(body.get("status").unwrap(), 1);
+}
+
+/// 그룹 값이 비표준 자리에 있었어도 전체 허용은 **그 자리까지** 지운다.
+///
+/// 한쪽만 지우면 남은 자리가 계속 검사를 해서, 화면은 "전체 허용" 인데 호출은 403 이 된다.
+#[test]
+fn public_route_clears_nonstandard_group_fields() {
+    use crate::apisix::models::GroupsLocation;
+    use crate::apisix::routes::{apply_route_form_for_test, RouteForm};
+
+    let form = |loc: GroupsLocation| RouteForm {
+        id: Some("7".into()),
+        name: "r".into(),
+        uri: "/a".into(),
+        desc: String::new(),
+        methods: vec![],
+        service_id: "svc".into(),
+        rewrite: String::new(),
+        rewrite_mode: String::new(),
+        rewrite_regex: vec![],
+        groups: vec!["partner".into()],
+        auth_mode: "public".into(),
+        status: None,
+        groups_location: Some(loc),
+    };
+
+    // (1) 최상위 필드에 있던 경우
+    let base = json!({ "uri": "/a", "groups": ["partner"], "plugins": { "limit-count": {} } });
+    let loc = GroupsLocation { plugin: String::new(), key: "groups".into(), as_csv: false };
+    let body = apply_route_form_for_test(base, &form(loc), false);
+    assert!(body.get("groups").is_none());
+    assert!(body.pointer("/plugins/limit-count").is_some());
+
+    // (2) 다른 플러그인이 그룹 검사를 하고 있던 경우 — shi-auth 와 함께 지운다.
+    let base = json!({
+        "uri": "/a",
+        "plugins": {
+            "shi-auth": {},
+            "other-auth": { "allowed_groups": ["partner"] },
+            "limit-count": {}
+        }
+    });
+    let loc =
+        GroupsLocation { plugin: "other-auth".into(), key: "allowed_groups".into(), as_csv: false };
+    let body = apply_route_form_for_test(base, &form(loc), false);
+    assert!(body.pointer("/plugins/other-auth").is_none());
+    assert!(body.pointer("/plugins/shi-auth").is_none());
+    assert!(body.pointer("/plugins/limit-count").is_some());
+}
+
+/// 그룹 모드는 예전과 똑같다 — 빈 목록이면 **빈 배열을 남긴다**(= 아무도 접근 못 함).
+/// 전체 허용과 구별되지 않으면 폼의 두 모드가 무의미해진다.
+#[test]
+fn groups_mode_keeps_an_empty_allowed_groups() {
+    use crate::apisix::routes::{apply_route_form_for_test, RouteForm};
+
+    let form = RouteForm {
+        id: Some("1".into()),
+        name: "r".into(),
+        uri: "/a".into(),
+        desc: String::new(),
+        methods: vec![],
+        service_id: "svc".into(),
+        rewrite: String::new(),
+        rewrite_mode: String::new(),
+        rewrite_regex: vec![],
+        groups: vec![],
+        auth_mode: "groups".into(),
+        status: None,
+        groups_location: None,
+    };
+
+    let body = apply_route_form_for_test(json!({ "plugins": { "shi-auth": {} } }), &form, false);
+    assert_eq!(body.pointer("/plugins/shi-auth/allowed_groups").unwrap(), &json!([]));
+}
+
+/// `has_auth` 는 "권한 검사가 붙어 있는가" 다 — 그룹이 비었는지와 다른 질문이다.
+#[test]
+fn route_view_tells_public_from_empty_groups() {
+    use crate::apisix::models::RouteView;
+
+    let view = |v: serde_json::Value| RouteView::from_value(&v);
+
+    // (1) 플러그인이 없다 → 전체 허용
+    let r = view(json!({ "id": "1", "uri": "/ping", "plugins": { "limit-count": {} } }));
+    assert!(!r.has_auth);
+    assert!(r.groups.is_empty());
+
+    // (2) plugins 자체가 없어도 같다
+    assert!(!view(json!({ "id": "2", "uri": "/ping" })).has_auth);
+
+    // (3) 붙어 있고 그룹이 비었다 → 아무도 접근 못 함 (전체 허용이 아니다)
+    let r = view(json!({ "id": "3", "uri": "/a", "plugins": { "shi-auth": { "allowed_groups": [] } } }));
+    assert!(r.has_auth);
+    assert!(r.groups.is_empty());
+
+    // (4) 키 없이 플러그인만 붙어 있어도 검사는 살아 있다
+    assert!(view(json!({ "id": "4", "uri": "/a", "plugins": { "shi-auth": {} } })).has_auth);
+
+    // (5) 값이 있으면 당연히 붙어 있다
+    let r = view(json!({
+        "id": "5", "uri": "/a",
+        "plugins": { "shi-auth": { "allowed_groups": ["ops-admin"] } }
+    }));
+    assert!(r.has_auth);
+    assert_eq!(r.groups, vec!["ops-admin"]);
+
+    // (6) 비표준 자리(최상위 필드)도 검사가 붙어 있는 것으로 읽는다
+    let r = view(json!({ "id": "6", "uri": "/a", "groups": ["partner"] }));
+    assert!(r.has_auth);
+    assert_eq!(r.groups_location.plugin, "");
 }
 
 #[test]
