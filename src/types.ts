@@ -143,6 +143,11 @@ export interface ServiceView {
   upstreamId: string;
   /** 게이트웨이 `labels.spec_url`. Import 가 파일 첨부 없이 비교할 때 읽는 주소 */
   specUrl: string;
+  /**
+   * 게이트웨이 `labels.name_prefix`. Import 프리필의 route 명 접두어다.
+   * 비어 있으면 경로 접두사에서 파생하는 기존 규칙으로 떨어진다.
+   */
+  namePrefix: string;
   /** `plugins["shi-log"].key` */
   logKey: string;
   /** `plugins["jwt-auth"]` 가 붙어 있는가 */
@@ -293,7 +298,11 @@ export interface CompareRow {
   wildcard: boolean;
   /** 미등록 건을 신규 생성할 때 채울 uri 후보 (Rust 가 계산한다) */
   suggestedUri: string;
-  /** 신규 폼의 `name` 후보 — `V1/` 같은 접두사 + 접두사를 뗀 원본 path */
+  /**
+   * 신규 폼의 `name` 후보 — 접두어 + 접두사를 뗀 원본 path.
+   * 접두어는 고른 service 의 `labels.name_prefix`(`EP_`)가 있으면 그것, 없으면 경로
+   * 접두사에서 파생한 것(`V1/`)이다.
+   */
   suggestedName: string;
   /** 신규 폼의 `proxy-rewrite.uri` 후보 — 접두사를 붙이지 않은 OAS 원본 path */
   suggestedRewrite: string;
@@ -430,6 +439,8 @@ export interface ServiceFormState {
   upstreamId: string;
   /** `labels.spec_url` 로 저장된다 */
   specUrl: string;
+  /** `labels.name_prefix` 로 저장된다 — Import 프리필의 route 명 접두어 */
+  namePrefix: string;
   /** `plugins["shi-log"].key` */
   logKey: string;
 }
@@ -485,10 +496,13 @@ export const routeToForm = (r: RouteView): RouteFormState => ({
  * Import 의 미등록 행 → 신규 Route 폼.
  *
  * `name` · `uri` · `rewrite` 세 값은 **모두 Rust 가 계산한 것을 그대로 쓴다**
- * (`oas::suggested_name` · `oas::to_apisix_uri`). 규칙이 두 곳에 있으면 반드시 어긋나고,
+ * (`oas::suggested_name_for` · `oas::to_apisix_uri`). 규칙이 두 곳에 있으면 반드시 어긋나고,
  * Rust 쪽에는 테스트가 붙어 있다.
  *
- *   name    `V1/orders/{orderId}/items`  접두사를 대문자로 + 접두사를 뗀 원본 path
+ *   name    `V1/orders/{orderId}/items`  접두어 + 접두사를 뗀 원본 path. service 에
+ *                                        `labels.name_prefix` 가 있으면 그것이 접두어이고
+ *                                        (`EP_orders/{orderId}/items`), 없으면 경로 접두사를
+ *                                        대문자로 바꾼 것이다
  *   uri     `/v1/orders/:orderId/items`  게이트웨이가 매칭하는 표기 (접두사 포함)
  *   rewrite `/orders/{orderId}/items`    upstream 이 아는 경로 (접두사 없음)
  *
@@ -534,6 +548,7 @@ export const emptyServiceForm = (upstreamId: string): ServiceFormState => ({
   desc: "",
   upstreamId,
   specUrl: "",
+  namePrefix: "",
   logKey: "",
 });
 
@@ -568,6 +583,7 @@ export const serviceToForm = (s: ServiceView): ServiceFormState => ({
   desc: s.desc,
   upstreamId: s.upstreamId,
   specUrl: s.specUrl,
+  namePrefix: s.namePrefix,
   logKey: s.logKey,
 });
 

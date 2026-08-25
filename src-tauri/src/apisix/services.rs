@@ -8,6 +8,9 @@
 //! 넣을 수 없다. `labels` 는 값 제약(`^\S+$` · 256바이트)만 지키면 되고 URL 에는 공백이
 //! 없으므로 `labels.spec_url` 에 담는다. (제약 검사는 `models::check_label_constraints`)
 //!
+//! **route 명 접두어(`labels.name_prefix`)도 같은 이유로 같은 자리에 둔다.** Import 프리필의
+//! `name` 규약이 service 단위로 정해져 있어 게이트웨이에 함께 저장돼야 한다.
+//!
 //! # 플러그인
 //!
 //! 이 앱이 관리하는 것은 두 개뿐이다.
@@ -25,7 +28,7 @@ use tauri::{AppHandle, Wry};
 use super::client;
 use super::models::{
     check_label_constraints, extract_list, extract_one, obj, set_label, set_or_remove,
-    strip_server_fields, ServiceView, UpstreamView, SPEC_URL_LABEL,
+    strip_server_fields, ServiceView, UpstreamView, NAME_PREFIX_LABEL, SPEC_URL_LABEL,
 };
 use crate::config::Env;
 use crate::error::{AppError, AppResult, ErrorKind};
@@ -45,6 +48,10 @@ pub struct ServiceForm {
     /// `labels.spec_url` 로 저장된다. 선택 항목이지만 값이 있으면 제약을 검사한다.
     #[serde(default)]
     pub spec_url: String,
+    /// `labels.name_prefix` 로 저장된다 — Import 프리필의 route 명 접두어.
+    /// 선택 항목이지만 값이 있으면 제약을 검사한다.
+    #[serde(default)]
+    pub name_prefix: String,
     /// `plugins["shi-log"].key`
     #[serde(default)]
     pub log_key: String,
@@ -73,6 +80,13 @@ impl ServiceForm {
                 return Err(AppError::config("spec_url 은 http:// 또는 https:// 로 시작해야 합니다.")
                     .with_hint("스펙 조회는 http/https 만 허용합니다."));
             }
+        }
+
+        // 끝문자(`/`·`_`)는 검사하지 않는다 — 접두어를 어떻게 끊을지는 규약이지 제약이 아니고,
+        // 값을 몰래 보정하지도 않는다. 화면이 인라인 경고로 짚어 주되 저장은 통과시킨다.
+        let name_prefix = self.name_prefix.trim();
+        if !name_prefix.is_empty() {
+            check_label_constraints("name 접두어", name_prefix)?;
         }
         Ok(())
     }
@@ -188,8 +202,10 @@ fn apply_service_form(base: Value, f: &ServiceForm) -> Value {
     set_or_remove(&mut m, "desc", f.desc.trim());
     set_or_remove(&mut m, "upstream_id", f.upstream_id.trim());
 
-    // spec_url — 인식하는 라벨 하나만 손대고 나머지(담당자 등)는 남긴다.
+    // spec_url · name_prefix — 인식하는 라벨만 손대고 나머지(담당자 등)는 남긴다.
+    // 빈 값이면 그 키만 지운다 (`set_label`).
     set_label(&mut m, SPEC_URL_LABEL, f.spec_url.trim());
+    set_label(&mut m, NAME_PREFIX_LABEL, f.name_prefix.trim());
 
     // ── plugins 머지 ────────────────────────────────────────
     let mut plugins = obj(m.remove("plugins").unwrap_or(Value::Null));

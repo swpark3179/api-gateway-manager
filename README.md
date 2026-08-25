@@ -470,6 +470,33 @@ diff 가 있는(또는 그 반대) 일이 생기지 않는다.
 접두사를 입력하는 중에 파생 결과를 화면에 같이 보여 준다 — 행을 눌러 보기 전에 어떤 이름이
 채워질지 알 수 있어야 한다.
 
+### service 의 name 접두어가 이긴다
+
+route 명 규약은 실제로는 **service 단위**로 정해져 있고 경로 접두사와 무관하다. 그래서 고른
+service 에 `labels.name_prefix` 가 있으면 **이름에 한해** 그쪽이 이긴다 (`oas::suggested_name_for`).
+
+| service 접두어 | OAS path | `name` |
+|---|---|---|
+| `EP_` | `/orders/{orderId}` | `EP_orders/{orderId}` |
+| `EP/` | `/orders/{orderId}` | `EP/orders/{orderId}` |
+| *(없음)* + 경로 접두사 `/v1` | `/orders/{orderId}` | `V1/orders/{orderId}` — 위 규칙 그대로 |
+
+두 지점이 경로 접두사와 다르다.
+
+- **대문자로 바꾸지 않는다.** 사용자가 Service 화면에서 명시적으로 등록한 값이라 앱이 몰래
+  바꿀 자리가 아니다 (`ep_` 를 넣으면 `ep_` 로 쓴다).
+- **슬래시를 끼워 넣지 않는다.** 접두어가 자기 구분자(`/` 또는 `_`)를 들고 있다. 끝문자가
+  둘 중 어느 것도 아니면 path 가 곧바로 이어 붙으므로 폼에서 경고만 띄우고 저장은 막지 않는다
+  — 규약이지 게이트웨이 제약이 아니다.
+
+`uri` 와 `proxy-rewrite.uri` 는 **바뀌지 않는다.** 이름만의 규약이라 게이트웨이가 매칭하는
+경로는 계속 경로 접두사를 따른다.
+
+접두어는 프런트에서 다시 만들지 않는다. `db::compare` 가 고른 service 의 `name_prefix` 를
+캐시에서 한 번 읽어 `oas::suggested_name_for` 로 넘기고, 결과는 `CompareRow.suggestedName`
+하나로 내려온다 — `uri` 규칙을 Rust 에만 둔 것과 같은 이유다. 캐시에 없는 service 는 빈
+문자열이라 경로 접두사 규칙으로 degrade 한다.
+
 ### 신규 등록 화면 프리필
 
 미등록 행을 누르면 `name`·`uri`·`proxy-rewrite.uri`·`methods`·`service_id`·`desc` 가 채워진
@@ -485,11 +512,11 @@ diff 가 있는(또는 그 반대) 일이 생기지 않는다.
 
 | 필드 | 값 | 무엇인가 |
 |---|---|---|
-| `name` | `V1/orders/{orderId}/items` | route 명 접두사 + **접두사를 뗀 원본 path**. 사람이 읽는 값이라 스펙과 같은 표기를 유지한다 |
+| `name` | `V1/orders/{orderId}/items` | route 명 접두사 + **접두사를 뗀 원본 path**. 사람이 읽는 값이라 스펙과 같은 표기를 유지한다. service 에 name 접두어가 있으면 그것이 앞자리를 대신한다 (`EP_orders/{orderId}/items`) |
 | `uri` | `/v1/orders/:orderId/items` | 게이트웨이가 매칭하는 표기 (접두사 포함, 변환 규칙은 아래 표) |
 | `plugins.proxy-rewrite.uri` | `/orders/{orderId}/items` | upstream 이 아는 경로 — **접두사가 붙지 않는다** |
 
-세 값은 모두 Rust 가 계산해 `CompareRow` 로 내려준다 (`oas::suggested_name` ·
+세 값은 모두 Rust 가 계산해 `CompareRow` 로 내려준다 (`oas::suggested_name_for` ·
 `oas::to_apisix_uri`). 프런트에서 다시 만들지 않는다 — 규칙이 두 곳에 있으면 반드시 어긋나고,
 Rust 쪽에는 테스트가 붙어 있다. `name` 은 APISIX 제한(100자)에 맞춰 char 경계에서 자른다.
 
@@ -585,7 +612,7 @@ Service 폼도 저장 시점에 같은 스킴 제한을 걸어, 나중에 `fetch
 |---|---|---|
 | `type` 이 없다 | 원본에 **없을 때만** `roundrobin` 을 채운다 | 앱이 관리하는 키가 아니다. 여기 적어도 반영되지 않는다 |
 | `plugins."jwt-auth": {}` | 이미 설정이 있으면 그 값을 **유지** | `{}` 로 덮으면 게이트웨이의 jwt-auth 옵션이 사라진다 |
-| `labels` 에 `spec_url` 만 | 나머지 라벨은 보존 | 인식하는 라벨 하나만 손댄다 |
+| `labels` 에 `spec_url` · `name_prefix` 만 | 나머지 라벨은 보존 | 인식하는 라벨만 손댄다 |
 
 노드 `weight` 는 폼에 없지만 **JSON 에는 넣는다.** 빼 두면 `jsonToForm` 이 `nodes` 를 다시
 만들 때 값을 잃고, JSON 탭을 한 번 왕복하는 것만으로 게이트웨이의 `weight: 3` 이 1 로 덮인다
@@ -620,6 +647,12 @@ APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에
 `spec_url` 을 비우면 그 **키만** 지운다 — 담당자(`name{n}`/`dept{n}`) 같은 다른 라벨은
 그대로 남고, 라벨이 하나도 남지 않으면 `labels` 키 자체를 없앤다.
 
+**route 명 접두어(`labels.name_prefix`)도 같은 자리에 같은 규칙으로 둔다.** Import 프리필의
+`name` 규약이 service 의 속성이라 게이트웨이에 함께 저장돼야 다른 PC 에서도 같은 이름이
+만들어진다 (판정 규칙은 위 [service 의 name 접두어가 이긴다](#service-의-name-접두어가-이긴다)).
+접두어는 `EP_` · `EP/` 처럼 공백이 없어 labels 제약을 자연히 통과하고, 폼에서 공백·256바이트를
+저장 전에 짚어 준다.
+
 ### Service 폼
 
 | 필드 | 저장 위치 |
@@ -628,6 +661,7 @@ APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에
 | `upstream_id` (필수) | `upstream_id` — 캐시된 Upstream 목록에서 고르는 셀렉트 |
 | `desc` | `desc` |
 | `spec_url` | `labels.spec_url` |
+| `name 접두어` | `labels.name_prefix` |
 | `log-key` (필수, placeholder `ep`) | `plugins.shi-log.key` |
 
 `plugins.jwt-auth` 는 저장할 때 **없을 때만** `{}` 로 넣는다. 이미 붙어 있으면 그 설정

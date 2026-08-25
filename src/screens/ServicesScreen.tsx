@@ -17,7 +17,7 @@ function filter(items: ServiceView[], q: string): ServiceView[] {
   const n = q.trim().toLowerCase();
   if (!n) return items;
   return items.filter((s) =>
-    [s.id, s.name, s.desc, s.upstreamId, s.specUrl, s.logKey].some((v) =>
+    [s.id, s.name, s.desc, s.upstreamId, s.specUrl, s.namePrefix, s.logKey].some((v) =>
       v.toLowerCase().includes(n),
     ),
   );

@@ -609,6 +609,12 @@ impl UpstreamView {
 /// 넣을 수 없다. `labels` 는 값 제약(`^\S+$` · 256바이트)만 지키면 되고 URL 은 공백이
 /// 없으므로 여기에 담는다. (제약 설명은 위 `Contact` 주석 참조)
 pub const SPEC_URL_LABEL: &str = "spec_url";
+/// service 가 정한 route 명 접두어를 담는 label 키.
+///
+/// Import 가 미등록 API 를 신규 등록 폼으로 넘길 때 `name` 앞에 붙는 값이다. 최상위에 임의
+/// 필드를 넣을 수 없는 것은 `spec_url` 과 같은 사정이고, 접두어는 `EP_` · `EP/` 처럼 공백이
+/// 없으므로 labels 제약을 자연히 통과한다. (조립 규칙은 `oas::suggested_name_for`)
+pub const NAME_PREFIX_LABEL: &str = "name_prefix";
 /// `labels` 값의 바이트 길이 상한 (apisix/schema_def.lua 의 label_value_def).
 pub const MAX_LABEL_BYTES: usize = 256;
 
@@ -621,6 +627,9 @@ pub struct ServiceView {
     pub upstream_id: String,
     /// `labels.spec_url` — Import 화면이 파일 첨부 없이 비교할 때 읽는 주소
     pub spec_url: String,
+    /// `labels.name_prefix` — Import 프리필의 route 명 접두어. 비어 있으면 경로 접두사에서
+    /// 파생하는 기존 규칙으로 떨어진다 (`oas::suggested_name_for`)
+    pub name_prefix: String,
     /// `plugins["shi-log"].key`
     pub log_key: String,
     /// `plugins["jwt-auth"]` 가 붙어 있는가
@@ -679,6 +688,12 @@ impl ServiceView {
             upstream_id,
             spec_url: v
                 .pointer("/labels/spec_url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            name_prefix: v
+                .pointer("/labels/name_prefix")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .trim()
