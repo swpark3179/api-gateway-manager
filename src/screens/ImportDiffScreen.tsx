@@ -188,7 +188,8 @@ export default function ImportDiffScreen() {
         <div className="text-xs muted" style={{ marginTop: 12, lineHeight: "18px" }}>
           <span className="font-mono">methods</span> · <span className="font-mono">status</span> ·{" "}
           <span className="font-mono">service_id</span> ·{" "}
-          <span className="font-mono">allowed_groups</span> 는 이 화면에서 바꾸지 않습니다 —
+          <span className="font-mono">allowed_groups</span>(전체 허용 여부 포함)는 이 화면에서
+          바꾸지 않습니다 —
           게이트웨이에 저장된 값이 그대로 유지됩니다. (
           <span className="font-mono">{row.method}</span> 는 이 route 에 이미 올라와 있어서 이 API
           가 '등록' 으로 판정됐고, route 에 남는 다른 메서드는 옆 API 의 몫입니다.)

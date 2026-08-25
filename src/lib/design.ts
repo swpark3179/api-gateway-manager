@@ -150,6 +150,24 @@ function pickGroups(
 }
 
 /**
+ * 그룹 필드의 자리가 이 본문에 **있는가** — Rust `models::groups_slot_present` 의 사본이다.
+ *
+ * 값이 비었는지가 아니라 자리가 있는지를 본다. Route 의 전체 허용 모드가 그 구별에 기댄다:
+ * `allowed_groups: []` 는 "아무도 접근 못 함", 플러그인이 아예 없는 것이 "누구나 접근" 이다.
+ * 키 없이 플러그인만 붙어 있어도 검사는 살아 있으므로 **플러그인의 존재**로 판단한다.
+ */
+function hasGroupsSlot(
+  o: Record<string, any>,
+  loc: GroupsLocation | null,
+  fallback: GroupsLocation,
+): boolean {
+  const l = loc ?? fallback;
+  if (!l.plugin) return !!o && l.key in o;
+  const p = o?.plugins;
+  return !!p && typeof p === "object" && l.plugin in p;
+}
+
+/**
  * 경로 접두사 → route 명 접두사. `/v1` → `V1/`
  *
  * **표시 전용이다.** 실제로 폼에 채워지는 값은 Rust 가 계산한 `CompareRow.suggestedName`
@@ -204,9 +222,13 @@ export function routeJson(f: RouteFormState): Record<string, unknown> {
     // (저장 시에도 이 값이 유지된다 — 신규는 항상 1)
     status: f.status,
     service_id: f.serviceId,
-    plugins,
   };
-  putGroups(o, f.groupsLocation, ROUTE_LOC, f.groups);
+  // 관리 대상 플러그인이 하나도 없으면 `plugins` 키를 만들지 않는다 — Service 와 같은 규칙이고,
+  // 저장 본문도 그렇게 나간다 (Rust `apply_route_form`). 빈 껍데기를 보여 주면 어긋난다.
+  if (Object.keys(plugins).length > 0) o.plugins = plugins;
+  // 전체 허용은 그룹 필드를 **비우는 것이 아니라 없애는 것**이다. 빈 배열을 남기면
+  // 게이트웨이에서는 정반대(아무도 접근 못 함)가 된다. 저장할 때도 플러그인이 통째로 지워진다.
+  if (f.authMode !== "public") putGroups(o, f.groupsLocation, ROUTE_LOC, f.groups);
   return o;
 }
 
@@ -424,6 +446,8 @@ export function jsonToForm(raw: string, current: FormState): FormState {
       const regex: string[] = Array.isArray(pr.regex_uri)
         ? pr.regex_uri.filter((x: unknown): x is string => typeof x === "string")
         : [];
+      // 그룹 필드의 자리가 있는가 — 모드와 목록이 **같은 판단**에서 나와야 한다.
+      const slot = hasGroupsSlot(o, current.groupsLocation, ROUTE_LOC);
       return {
         ...current,
         uri: o.uri || "",
@@ -434,7 +458,13 @@ export function jsonToForm(raw: string, current: FormState): FormState {
         rewrite: (typeof pr.uri === "string" && pr.uri) || "",
         rewriteMode: rewriteModeOf(regex),
         rewriteRegex: regex,
-        groups: pickGroups(o, current.groupsLocation, ROUTE_LOC),
+        // 자리가 없으면 목록은 **폼에 남긴다** (consumer 의 contacts 와 같은 규칙). 전체 허용
+        // 본문에 그룹 필드가 없는 것은 정상이고, 그때 `[]` 로 덮으면 '권한그룹 지정' 으로
+        // 되돌렸을 때 골라 둔 그룹이 조용히 사라진다.
+        groups: slot ? pickGroups(o, current.groupsLocation, ROUTE_LOC) : current.groups,
+        // 모드도 값에서 파생한다 (rewriteMode 와 같은 규칙) — `routeJson` 이 낸 본문을 그대로
+        // 되읽으면 같은 폼이 나와야 한다. 그룹 필드의 자리가 없으면 전체 허용이다.
+        authMode: slot ? "groups" : "public",
         status: typeof o.status === "number" ? o.status : current.status,
       };
     }

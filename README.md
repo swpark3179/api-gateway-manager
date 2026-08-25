@@ -134,7 +134,8 @@ src-tauri/src/
 
 그래서 저장 직전 원본을 GET 해 와 앱이 관리하는 키만 덮어쓰는 **머지 방식**으로 처리한다:
 
-- Route → `proxy-rewrite.uri` **또는** `proxy-rewrite.regex_uri` (둘 중 한쪽만 남긴다 — 아래 Import 절 참조), 그룹 필드(기본 `shi-auth.allowed_groups`)
+- Route → `proxy-rewrite.uri` **또는** `proxy-rewrite.regex_uri` (둘 중 한쪽만 남긴다 — 아래 Import 절 참조), 그룹 필드(기본 `shi-auth.allowed_groups`).
+  폼이 **전체 허용**이면 그 그룹 필드를 쓰는 대신 권한 플러그인을 **지운다**. 관리 대상이 하나도 안 남으면 `plugins` 키 자체를 지운다 (아래 '권한 없이 접근' 절)
 - Consumer → `jwt-auth.key`, `jwt-auth.secret`, 그룹 필드(기본 `jwt-auth.auth-groups`)
 - Service → `shi-log`(폼의 `log-key` — 빈 값이면 **통째로 삭제**), `jwt-auth`(폼의 토글 — ON 이면 **없을 때만** `{}` 추가, OFF 면 삭제),
   `labels.spec_url` · `labels.name_prefix`. 관리 대상 플러그인이 하나도 안 남으면 `plugins` 키 자체를 지운다
@@ -177,6 +178,49 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 
 - **상세 → JSON 탭 → `게이트웨이 원본`** — Admin API 가 돌려준 객체 그대로 (읽기 전용)
 - 같은 탭 하단과 그룹 편집 카드 제목에 `plugins.jwt-auth.auth_groups` 처럼 **찾아낸 위치**를 표시
+
+### 권한 없이 접근 — Route 의 전체 허용
+
+권한그룹을 하나도 등록하지 않는 것으로는 "누구나 호출할 수 있는 route" 를 만들 수 없다.
+게이트웨이에서 `allowed_groups: []` 는 **정반대**의 뜻이다 — 권한 검사는 그대로 있고 통과할
+그룹이 하나도 없으니 어느 컨슈머도 들어오지 못한다. 검사를 실제로 떼려면
+`plugins.shi-auth` 를 **통째로 지워야** 한다.
+
+그래서 Route 폼의 권한그룹 카드에는 배타적인 두 모드가 있다 (`proxy-rewrite` 의
+`uri`/`regex_uri` 칩과 같은 표기다):
+
+| 모드 | 저장 결과 |
+|---|---|
+| `권한그룹 지정` (기본) | 그룹 목록을 찾아낸 그 자리에 되쓴다. 목록이 비면 `allowed_groups: []` — **아무도** 접근할 수 없는 상태를 그대로 표현한다 |
+| `전체 허용` | `plugins.shi-auth` 를 지운다. 그룹 값이 **비표준 자리**에서 읽혔다면 그 자리(다른 플러그인 · 최상위 필드)도 함께 지운다 — 한쪽만 지우면 남은 자리가 계속 검사를 해서 화면이 거짓말을 한다 |
+| 전체 허용 + `proxy-rewrite` 도 없음 | `plugins` 키 **자체**가 없어진다 — Service 와 같은 규칙이다(빈 껍데기를 남기지 않는다) |
+
+Consumer 에는 이 모드가 없다. 컨슈머의 `auth-groups` 가 비어 있는 것은 "이 계정에 권한이
+없다" 는 뜻이고, 인가를 여는 쪽은 언제나 route 다.
+
+**읽기는 값이 아니라 자리를 본다.** `RouteView.hasAuth`(Rust `models::groups_slot_present`)가
+"권한 검사가 붙어 있는가" 를 따로 들고 온다. 그룹 목록이 비었는지와는 다른 질문이다:
+
+| 게이트웨이 상태 | `hasAuth` | 폼 모드 |
+|---|---|---|
+| `shi-auth.allowed_groups: ["ops-admin"]` | `true` | 권한그룹 지정 |
+| `shi-auth.allowed_groups: []` | `true` | 권한그룹 지정 (그룹 0건 — 아무도 접근 못 함) |
+| `shi-auth: {}` (키 없이 플러그인만) | `true` | 권한그룹 지정 — 플러그인이 붙어 있으면 검사는 살아 있다 |
+| `shi-auth` 없음 | `false` | 전체 허용 |
+
+모드를 `전체 허용` 으로 바꿔도 **골라 둔 그룹 목록은 폼에 남는다** (`rewriteMode` 와 같은
+규칙이다 — 잘못 눌렀을 때 되돌릴 수 있어야 한다). 저장 본문에서 빼는 일은 `routeJson` 과
+Rust 가 하고, JSON 탭을 왕복해도 목록은 유지된다 (`jsonToForm` 은 그룹 필드의 자리가 없는
+본문을 "건드리지 말라" 로 읽는다 — 컨슈머의 담당자 `labels` 와 같은 관례다).
+
+화면에서도 두 상태를 구별한다. 폼은 그룹이 0건이면 "어느 컨슈머도 호출할 수 없다" 고 짚어
+주고, Route 목록의 `권한그룹` 열은 전체 허용인 route 에 `전체 허용` 뱃지를 세운다 — 빈 칸으로
+두면 "아무도 접근 못 함" 과 "누구나 접근" 이 같아 보인다.
+
+회귀 테스트: `public_route_drops_the_auth_plugin`,
+`public_route_without_other_plugins_drops_the_plugins_key`,
+`public_route_clears_nonstandard_group_fields`, `groups_mode_keeps_an_empty_allowed_groups`,
+`route_view_tells_public_from_empty_groups`.
 
 
 ---
@@ -303,6 +347,10 @@ EXISTS (SELECT 1 FROM route_groups rg
   훨씬 나쁘다. `COLLATE NOCASE` 는 ASCII 만 접어서 한글 그룹명에는 효과가 없기도 하다.
 - `allowed_groups` 가 **빈** 라우트는 어떤 컨슈머로도 걸리지 않는다. 화면에서 사라지지 않도록
   패널의 `그룹 제한 없음 (N)` 행을 눌러 그것만 조회할 수 있다.
+- **전체 허용**(권한 플러그인이 없는) 라우트도 그룹이 없으므로 같은 행에 들어간다. 컨슈머를
+  고른 조회에는 나오지 않는다 — 판정이 교집합이라 그렇다. 실제로는 그 컨슈머도 호출할 수
+  있으므로 이 숫자는 "권한그룹으로 걸린 건수" 로 읽어야 한다. 두 상태의 구별은 목록의
+  `권한그룹` 열이 뱃지로 해 준다 (위 '권한 없이 접근' 절).
 
 상단 status chip 과 좌측 패널은 서로 **다른 축**이라 AND 로 겹쳐 적용된다. `store.chip` 하나에
 둘을 담을 수 없어서 조회 범위를 따로 둔다.
@@ -640,7 +688,7 @@ uri·이름 규칙을 프런트에서 다시 만들지 않는다는 기존 계�
 | `uri` | `suggestedUri` | 달라도 **현재 uri 는 이미 그 경로에 매칭된다** (그래서 등록으로 판정됐다). `표기 차이` 로 표시해 `:petId` 를 쓰는 멀쩡한 route 가 "고쳐야 할 것" 으로 보이지 않게 한다 |
 | `plugins.proxy-rewrite` | `suggestedRewrite` 또는 `suggestedRewriteRegex` | 체크박스는 **하나**다. 두 키는 나란한 필드가 아니라 서로 갈아 끼우는 관계라, 따로 두면 "uri 만 지우고 regex 는 안 넣는" 선택이 가능해져 rewrite 가 통째로 사라진다. 적용하면 세 값(`rewrite`·`rewriteMode`·`rewriteRegex`)이 함께 얹힌다 |
 | `desc` | `summary` (255자) | |
-| `methods` · `status` · `service_id` · `allowed_groups` | *(없음)* | **건드리지 않는다.** 두 본문에 똑같이 실려 diff 를 조용히 지나간다 |
+| `methods` · `status` · `service_id` · 권한 설정(`allowed_groups` · 전체 허용 여부) | *(없음)* | **건드리지 않는다.** 두 본문에 똑같이 실려 diff 를 조용히 지나간다 — 전체 허용인 route 는 양쪽 모두 그룹 필드가 없는 모양이다 |
 
 이 네 필드가 표의 `속성 차이` 판정과 **같은 함수**(`changedKeys`)를 쓴다. 판정이 갈리면 표에는
 `일치` 인데 눌러 보니 diff 가 있는 (또는 그 반대) 일이 벌어진다.
@@ -858,6 +906,8 @@ APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에
 | JSON 탭 | 앱 관리 키만 | + `게이트웨이 원본` 읽기 전용 보기 | 그룹 필드가 실제로 어디 있는지 확인해야 할 때가 있음 |
 | JSON 탭 범위 | Route · Consumer | + Upstream · Service, Consumer 는 담당자 `labels` 까지 | 폼에서 고친 값이 JSON 탭에 안 보이면 두 탭이 서로 다른 말을 한다. 표시 전용 사본으로 풀었다 (위 두 절 참조) |
 | 권한그룹 콤보박스 | 항상 아래로 | 공간이 없으면 위로, 남은 높이에 맞춰 조임 | 창 하단에서 열면 본문 스크롤 높이가 늘어 목록이 화면 밖으로 밀렸다 |
+| Route 권한그룹 카드 | 그룹 목록만 | + `권한그룹 지정` / `전체 허용` 모드 칩 | 그룹을 비우는 것으로는 '권한 없이 접근' 을 표현할 수 없다 — 게이트웨이에서 그것은 정반대(아무도 접근 못 함)다. 권한 검사를 떼려면 `plugins.shi-auth` 를 지워야 한다 (위 '권한 없이 접근' 절) |
+| Route 목록 `권한그룹` 열 | 그룹 뱃지만 | + 전체 허용이면 `전체 허용` 뱃지 | 빈 칸으로 두면 "아무도 접근 못 함" 과 "누구나 접근" 이 같아 보인다 |
 | 설정 토글 | 프록시 우회 1개 | + 인증서 검증 건너뛰기 | 사설 인증서 환경 대응 |
 | JWT 안내 문구 | "Authorization 헤더 없이 `Authorization: Bearer …`" | "호출 시 `Authorization: Bearer …`" | 원문이 모순된 문장이라 정정 |
 | Route 목록 헤더 | 검색 + `신규 Route` | + 리프레시 · `Import` 버튼 | 원본에 없던 화면. 목록 캐시를 명시적으로 갱신할 수단과 스펙 대조 진입점이 필요하다 |

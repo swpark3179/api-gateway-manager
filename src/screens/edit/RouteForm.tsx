@@ -1,4 +1,4 @@
-/** Route 폼 탭 — 기본 정보 / methods / allowed_groups / status. */
+/** Route 폼 탭 — 기본 정보 / methods / 권한그룹(또는 전체 허용) / status. */
 
 import { methodChips } from "../../lib/design";
 import { useStore } from "../../store";

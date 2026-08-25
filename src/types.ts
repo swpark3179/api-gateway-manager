@@ -68,6 +68,15 @@ export interface RouteView {
   rewriteRegex: string[];
   groups: string[];
   groupsLocation: GroupsLocation;
+  /**
+   * 권한 검사가 **붙어 있는가** (Rust `models::groups_slot_present`).
+   *
+   * `groups` 가 비어 있는 것만으로는 두 상태를 구별할 수 없다 — 권한 플러그인은 붙어 있지만
+   * 허용 그룹이 없어 **아무도** 접근할 수 없는 라우트와, 플러그인이 아예 없어 **누구나**
+   * 접근할 수 있는 라우트다. 폼의 전체 허용 모드(`RouteFormState.authMode`)가 이 값에서
+   * 파생되고, 목록도 이 값으로 두 상태를 다르게 그린다.
+   */
+  hasAuth: boolean;
   updateTime: number | null;
   updated: string;
   /** 게이트웨이 원본 객체 — JSON 탭의 '게이트웨이 원본' 보기용 */
@@ -414,10 +423,24 @@ export interface RouteFormState {
   /** `proxy-rewrite.regex_uri` — 배열 그대로. 폼은 첫 쌍만 편집하고 나머지는 보존한다 */
   rewriteRegex: string[];
   groups: string[];
+  /**
+   * 권한그룹을 쓰는가(`groups`), 권한 없이 열어 두는가(`public`).
+   *
+   * `groups` + 빈 목록은 "허용 그룹이 하나도 없다" 이고, 게이트웨이에서 그것은 **아무도
+   * 접근할 수 없다**는 뜻이다. 전체 허용은 그 반대라서 목록을 비우는 것으로 표현할 수 없다 —
+   * 권한 플러그인을 **떼야** 한다. 그래서 별개의 모드다 (Rust `routes::apply_route_form`).
+   *
+   * `public` 으로 바꿔도 `groups` 는 **폼에 남긴다.** 모드를 실수로 눌렀을 때 되돌릴 수
+   * 있어야 하고, 배제는 `routeJson` 과 Rust 가 한다 — `rewriteMode` 와 같은 규칙이다.
+   */
+  authMode: RouteAuthMode;
   status: number;
   /** 조회 때 찾은 저장 위치. 신규면 null → 기본 위치를 쓴다 */
   groupsLocation: GroupsLocation | null;
 }
+
+/** 권한그룹으로 제한하는가(`groups`), 권한 없이 누구나 접근하는가(`public`). */
+export type RouteAuthMode = "groups" | "public";
 
 /** `proxy-rewrite` 를 `uri` 로 쓰는가 `regex_uri` 로 쓰는가. */
 export type RewriteMode = "uri" | "regex";
@@ -526,6 +549,9 @@ export const emptyRouteForm = (serviceId: string): RouteFormState => ({
   rewriteMode: "uri",
   rewriteRegex: [],
   groups: [],
+  // 신규 등록은 권한그룹을 쓰는 쪽이 기본이다 — 권한 없이 열어 두는 라우트는 예외이고,
+  // 예외를 기본값으로 두면 아무 말 없이 만든 라우트가 전부 공개된다.
+  authMode: "groups",
   status: 1,
   groupsLocation: null,
 });
@@ -556,6 +582,10 @@ export const routeToForm = (r: RouteView): RouteFormState => ({
   rewriteMode: rewriteModeOf(r.rewriteRegex),
   rewriteRegex: [...r.rewriteRegex],
   groups: [...r.groups],
+  // 기본값이 아니라 **게이트웨이의 실제 상태**에서 파생한다 (Service 의 jwtAuth 와 같은
+  // 이유) — 권한 플러그인이 없는 라우트를 열었다가 저장 한 번으로 되붙으면 안 되고,
+  // 반대로 붙어 있는 라우트가 조용히 공개돼서도 안 된다.
+  authMode: r.hasAuth ? "groups" : "public",
   status: r.status,
   groupsLocation: r.groupsLocation,
 });

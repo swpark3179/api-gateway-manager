@@ -1427,8 +1427,14 @@ export const useStore = create<AppState>((set, get) => ({
       } else {
         const isNew = !form.id;
         await api.routeSave(env, form);
+        // 전체 허용은 "권한그룹 0건" 과 정반대의 일이라(누구나 접근) 저장 결과에 밝힌다.
+        // Service 가 붙은 플러그인을 알려 주는 것과 같은 이유다.
+        const notes = [
+          ...(isNew ? ["status: 1"] : []),
+          ...(form.authMode === "public" ? ["전체 허용 · shi-auth 없음"] : []),
+        ];
         get().flash(
-          isNew ? "Route가 저장되었습니다. (status: 1)" : "Route가 저장되었습니다.",
+          "Route가 저장되었습니다." + (notes.length > 0 ? ` (${notes.join(" · ")})` : ""),
         );
       }
       const { importReturn, importDoc } = get();

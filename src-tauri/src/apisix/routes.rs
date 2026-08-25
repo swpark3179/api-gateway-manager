@@ -7,6 +7,13 @@
 //! 원본을 GET 해 와 **앱이 관리하는 키(`proxy-rewrite.uri` · `proxy-rewrite.regex_uri` ·
 //! `shi-auth.allowed_groups`)만 덮어쓰는** 머지 방식으로 처리한다. `proxy-rewrite` 안의
 //! `scheme` · `headers` 처럼 앱이 모르는 키도 같은 이유로 보존된다.
+//!
+//! # 전체 허용 (`auth_mode = "public"`)
+//!
+//! 권한 없이 누구나 호출할 수 있는 라우트가 필요하다. 그것은 `allowed_groups` 를 빈 배열로
+//! 두는 것으로는 안 된다 — 게이트웨이에서 그 상태는 **정반대**(어느 그룹도 못 들어옴)다.
+//! 권한 검사를 실제로 떼려면 `plugins.shi-auth` 를 통째로 지워야 하고, 그래서 폼은 두 모드를
+//! 가진다: `groups`(그룹 목록을 되쓴다) · `public`(플러그인을 지운다).
 
 use reqwest::Method;
 use serde::Deserialize;
@@ -16,7 +23,7 @@ use tauri::{AppHandle, Wry};
 use super::client;
 use super::models::{
     extract_list, extract_one, obj, set_groups_at, set_or_remove, strip_server_fields,
-    GroupsLocation, RouteView,
+    GroupsLocation, RouteView, ROUTE_AUTH_PLUGIN,
 };
 use crate::config::Env;
 use crate::error::{AppError, AppResult, ErrorKind};
@@ -48,6 +55,13 @@ pub struct RouteForm {
     pub rewrite_regex: Vec<String>,
     #[serde(default)]
     pub groups: Vec<String>,
+    /// `"groups"` | `"public"`. `groups` 는 위 목록을 그룹 필드에 되쓰고, `public`(전체 허용)은
+    /// 권한 플러그인을 **지운다** (`apply_route_form` 주석 참조).
+    ///
+    /// 빈 값은 `"groups"` 로 읽는다 — 이 필드가 없던 시절의 본문도 그대로 받고, 누락이
+    /// 권한을 조용히 풀어 버리는 쪽으로 떨어지지 않는다 (`rewrite_mode` 와 같은 관례).
+    #[serde(default)]
+    pub auth_mode: String,
     /// 디자인상 등록 시 1(활성) 고정. 기존 항목은 원래 status 를 유지한다.
     #[serde(default)]
     pub status: Option<i64>,
@@ -92,6 +106,11 @@ impl RouteForm {
     /// `proxy-rewrite` 를 `regex_uri` 로 쓰는가.
     fn is_regex_rewrite(&self) -> bool {
         self.rewrite_mode.trim() == "regex"
+    }
+
+    /// 권한 없이 접근할 수 있는 라우트인가 (전체 허용).
+    fn is_public_auth(&self) -> bool {
+        self.auth_mode.trim() == "public"
     }
 
     /// 다듬은 `regex_uri` 항목들. **전부 비었으면 빈 벡터**다 (= rewrite 없음).
@@ -169,10 +188,16 @@ pub async fn save(app: &AppHandle<Wry>, env: Env, form: RouteForm) -> AppResult<
     let saved = extract_one(&resp).unwrap_or(body);
     let view = RouteView::from_value(&saved);
 
-    let note = if is_new {
-        format!("라우트 신규 등록 · methods {}", join_or_dash(&form.methods))
+    // 전체 허용은 "권한그룹 0건" 과 전혀 다른 일이다 — 이력에서 구별되어야 한다.
+    let auth = if form.is_public_auth() {
+        "전체 허용".to_string()
     } else {
-        format!("라우트 수정 · allowed_groups {}건", form.groups.len())
+        format!("allowed_groups {}건", form.groups.len())
+    };
+    let note = if is_new {
+        format!("라우트 신규 등록 · methods {} · {auth}", join_or_dash(&form.methods))
+    } else {
+        format!("라우트 수정 · {auth}")
     };
     let target = if view.id.is_empty() {
         "routes".to_string()
@@ -282,17 +307,37 @@ fn apply_route_form(base: Value, f: &RouteForm, is_new: bool) -> Value {
         plugins.insert("proxy-rewrite".into(), Value::Object(pr));
     }
 
-    m.insert("plugins".into(), Value::Object(plugins));
+    // ── 권한그룹 / 전체 허용 ────────────────────────────────
+    //
+    // 그룹 모드는 **조회 때 값이 있던 바로 그 자리에** 되쓴다. 다른 도구가 `auth_groups`
+    // 처럼 다른 표기로 넣어 뒀다면 그 표기를 유지해야 키가 둘로 갈라지지 않는다
+    // (models::find_groups 참조).
+    let loc = f.groups_location.clone().unwrap_or_else(GroupsLocation::route_default);
 
-    // allowed_groups — 조회 때 값이 있던 바로 그 자리에 되쓴다.
-    // 다른 도구가 `auth_groups` 처럼 다른 표기로 넣어 뒀다면 그 표기를 유지해야
-    // 키가 둘로 갈라지지 않는다. (models::find_groups 참조)
-    let loc = f.groups_location.clone().unwrap_or_else(|| GroupsLocation {
-        plugin: "shi-auth".into(),
-        key: "allowed_groups".into(),
-        as_csv: false,
-    });
-    set_groups_at(&mut m, &loc, &f.groups);
+    if f.is_public_auth() {
+        // 전체 허용은 권한 검사를 **떼는** 것이다. 빈 `allowed_groups` 를 남기면
+        // 게이트웨이에서는 정반대(어느 그룹도 못 들어옴)가 되므로 플러그인을 통째로 지운다.
+        //
+        // 지우는 대상이 둘인 이유: 이 앱의 라우트 권한 플러그인은 `shi-auth` 지만, 그룹 값이
+        // 다른 자리(다른 플러그인 · 최상위 필드)에서 읽혔을 수도 있다. 한쪽만 지우면 남은
+        // 자리가 그대로 검사를 계속해 화면이 거짓말을 한다.
+        plugins.remove(ROUTE_AUTH_PLUGIN);
+        if loc.plugin.is_empty() {
+            m.remove(&loc.key);
+        } else {
+            plugins.remove(&loc.plugin);
+        }
+    }
+
+    // 남은 플러그인이 하나도 없으면 키 자체를 없앤다 — Service 와 같은 규칙이다
+    // (`services::apply_service_form`). 빈 껍데기(`plugins: {}`)를 남기지 않는다.
+    if !plugins.is_empty() {
+        m.insert("plugins".into(), Value::Object(plugins));
+    }
+
+    if !f.is_public_auth() {
+        set_groups_at(&mut m, &loc, &f.groups);
+    }
 
     Value::Object(m)
 }
