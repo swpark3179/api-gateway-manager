@@ -7,11 +7,25 @@
 
 import { useMemo, useState } from "react";
 
+import { Cell, CellPair } from "../components/Cell";
 import MetaList from "../components/MetaList";
+import type { Col } from "../components/MetaList";
 import { useStore } from "../store";
 import type { ServiceView } from "../types";
 
 const ROW = "12px 16px";
+
+/** 열 폭 — `table-layout: fixed` 라 여기 값이 곧 잘림 기준이다 (ListScreen 의 `ROUTE_COLS` 주석 참조). */
+const COLS: Col[] = [
+  { label: "id", width: "10%" },
+  { label: "name", width: "16%" },
+  { label: "upstream", width: "14%" },
+  // 스펙 주소는 이 표에서 가장 긴 값이라 가장 넓게 준다.
+  { label: "spec_url", width: "20%" },
+  { label: "log-key", width: "11%" },
+  { label: "플러그인", width: "13%" },
+  { label: "수정일시", width: "16%" },
+];
 
 function filter(items: ServiceView[], q: string): ServiceView[] {
   const n = q.trim().toLowerCase();
@@ -35,12 +49,11 @@ export default function ServicesScreen() {
   return (
     <MetaList
       title="Service"
-      sub="upstream 연결 · jwt-auth · shi-log 와 API 스펙 주소(spec_url)를 관리합니다."
       newLabel="신규 Service"
       searchPlaceholder="id · name · spec_url 검색"
       syncTitle="게이트웨이에서 Service 전체 목록을 다시 조회해 로컬 캐시를 갱신합니다"
       onSync={() => void syncServices()}
-      columns={["id", "name", "upstream", "spec_url", "log-key", "플러그인", "수정일시"]}
+      columns={COLS}
       total={shown.length}
       emptyMessage={
         syncedAt === null
@@ -55,24 +68,19 @@ export default function ServicesScreen() {
       {shown.map((s) => (
         <tr key={s.id} onClick={() => openItem(s.id)} style={{ cursor: "pointer" }}>
           <td className="mono" style={{ padding: ROW }}>
-            {s.id}
+            <Cell text={s.id} />
           </td>
           <td style={{ padding: ROW }}>
-            <div className="name">{s.name || "—"}</div>
-            {s.desc && <div className="text-xs muted">{s.desc}</div>}
+            <CellPair main={s.name || "—"} sub={s.desc} />
+          </td>
+          <td style={{ padding: ROW }}>
+            <CellPair main={s.upstreamId || "—"} sub={s.upstreamLabel} mono />
+          </td>
+          <td className="mono text-xs" style={{ padding: ROW }}>
+            {s.specUrl ? <Cell text={s.specUrl} /> : <span className="muted">미등록</span>}
           </td>
           <td className="mono" style={{ padding: ROW }}>
-            <div>{s.upstreamId || "—"}</div>
-            {s.upstreamLabel && <div className="text-xs muted">{s.upstreamLabel}</div>}
-          </td>
-          <td
-            className="mono text-xs"
-            style={{ padding: ROW, maxWidth: 260, wordBreak: "break-all" }}
-          >
-            {s.specUrl || <span className="muted">미등록</span>}
-          </td>
-          <td className="mono" style={{ padding: ROW }}>
-            {s.logKey || <span className="muted">—</span>}
+            {s.logKey ? <Cell text={s.logKey} /> : <span className="muted">—</span>}
           </td>
           <td style={{ padding: ROW }}>
             {/* 저장할 때 jwt-auth 를 보장하지만, 다른 도구로 만든 service 는 없을 수 있다. */}
@@ -81,8 +89,8 @@ export default function ServicesScreen() {
               {s.hasJwtAuth ? "jwt-auth" : "jwt-auth 없음"}
             </span>
           </td>
-          <td className="mono text-xs muted" style={{ padding: ROW, whiteSpace: "nowrap" }}>
-            {s.updated}
+          <td className="mono text-xs muted" style={{ padding: ROW }}>
+            <Cell text={s.updated} />
           </td>
         </tr>
       ))}

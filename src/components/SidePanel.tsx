@@ -1,6 +1,9 @@
 /**
  * 232px 사이드 패널 — 섹션별 요약 항목(클릭 시 목록 필터) + 하단 ENDPOINT 블록.
  *
+ * 필터를 한 번 고르고 나면 볼 일이 없는 보조 화면이라 접을 수 있다. 접으면 14px 띠만 남고
+ * (`panel-rail`) 본문 그리드가 그만큼 넓어진다 — 폭 전환은 App.tsx 의 셸 그리드가 맡는다.
+ *
  * Route 섹션의 패널은 **컨슈머 접근** 목록이다. 상태(전체/활성/비활성)는 상단 토글 칩이
  * 이미 제공하므로 여기서 되풀이하지 않고, 대신 "이 컨슈머가 쓸 수 있는 API" 를 고르게 한다.
  * 판정은 컨슈머의 auth-groups 와 라우트의 allowed_groups 교집합이고 SQLite 조인으로 푼다.
@@ -25,6 +28,24 @@ interface Row {
   dim?: boolean;
 }
 
+/** 접기/펼치기 셰브론. 앱의 다른 아이콘과 같은 24 viewBox · stroke 관례를 따른다. */
+function Chevron({ dir }: { dir: "left" | "right" }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      // kit.css 의 `.icon-btn svg { width:20px }` 가 width 속성을 이겨서 인라인으로 못 박는다.
+      style={{ width: 12, height: 12 }}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d={dir === "left" ? "M15 5l-7 7 7 7" : "M9 5l7 7-7 7"} />
+    </svg>
+  );
+}
+
 export default function SidePanel() {
   const section = useStore((s) => s.section);
   const env = useStore((s) => s.env);
@@ -41,6 +62,8 @@ export default function SidePanel() {
   const settings = useStore((s) => s.settings);
   const setChip = useStore((s) => s.setChip);
   const setRouteScope = useStore((s) => s.setRouteScope);
+  const panelOpen = useStore((s) => s.panelOpen);
+  const togglePanel = useStore((s) => s.togglePanel);
 
   const [needle, setNeedle] = useState("");
 
@@ -145,6 +168,23 @@ export default function SidePanel() {
   const hasToken = !!cfg?.hasToken;
   const endpoint = cfg?.adminBase || "—";
 
+  // 접힌 상태 — 훅은 위에서 전부 호출한 뒤라 조기 반환해도 순서가 흐트러지지 않는다.
+  // 띠 전체가 펼치기 버튼이다. 자리를 늘 같은 곳에 두어 어디를 눌러야 하는지 헷갈리지 않게 한다.
+  if (!panelOpen) {
+    return (
+      <div
+        className="panel-rail"
+        onClick={togglePanel}
+        title="패널 펼치기"
+        role="button"
+        aria-expanded={false}
+        aria-label="좌측 패널 펼치기"
+      >
+        <Chevron dir="right" />
+      </div>
+    );
+  }
+
   return (
     <div
       style={{
@@ -159,14 +199,36 @@ export default function SidePanel() {
     >
       <div
         style={{
-          font: "700 10px/12px var(--font-mono)",
-          textTransform: "uppercase",
-          letterSpacing: ".06em",
-          color: "var(--gray-400)",
-          padding: "2px 10px 10px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          padding: "0 4px 10px 10px",
         }}
       >
-        {title}
+        <span
+          style={{
+            font: "700 10px/12px var(--font-mono)",
+            textTransform: "uppercase",
+            letterSpacing: ".06em",
+            color: "var(--gray-400)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {title}
+        </span>
+        <button
+          className="icon-btn"
+          onClick={togglePanel}
+          title="패널 접기"
+          aria-expanded={true}
+          aria-label="좌측 패널 접기"
+          style={{ width: 22, height: 22, flex: "0 0 22px" }}
+        >
+          <Chevron dir="left" />
+        </button>
       </div>
 
       {isRoutes && consumers.length > FILTER_THRESHOLD && (

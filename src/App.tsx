@@ -1,6 +1,6 @@
 /**
  * 앱 셸 — 디자인 원본의 최상위 그리드를 그대로 옮겼다.
- *   38px 타이틀바 / [64px 아이콘 레일 | 232px 사이드 패널 | 본문]
+ *   38px 타이틀바 / [64px 아이콘 레일 | 232px 사이드 패널(접으면 14px) | 본문]
  */
 
 import { useEffect, useRef } from "react";
@@ -26,6 +26,7 @@ import type { Section } from "./types";
 export default function App() {
   const section = useStore((s) => s.section);
   const view = useStore((s) => s.view);
+  const panelOpen = useStore((s) => s.panelOpen);
   const loadSettings = useStore((s) => s.loadSettings);
   const bootstrap = useStore((s) => s.bootstrap);
   const refresh = useStore((s) => s.refresh);
@@ -99,7 +100,9 @@ export default function App() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "64px 232px 1fr",
+          // 좌측 패널을 접으면 232px 가 14px 띠로 줄고 본문 그리드가 그만큼 넓어진다.
+          gridTemplateColumns: `64px ${panelOpen ? 232 : 14}px 1fr`,
+          transition: "grid-template-columns var(--duration-fast) var(--ease-standard)",
           minHeight: 0,
           background: "var(--bg-canvas)",
         }}

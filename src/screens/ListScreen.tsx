@@ -4,10 +4,45 @@ import { useMemo } from "react";
 
 import { maskSecret, syncLabel } from "../lib/design";
 import { filterConsumers, kindOf, NO_GROUP, useStore } from "../store";
+import BadgeList from "../components/BadgeList";
+import { Cell, CellPair } from "../components/Cell";
 import GroupCombo from "../components/GroupCombo";
+import type { Col } from "../components/MetaList";
 import { ALL_ROUTES, rewriteText, scopeLabel } from "../types";
 
 const ROW_H = "14px 16px";
+
+/**
+ * 열 폭 — `table-layout: fixed` 라 여기 값이 곧 잘림 기준이다 (MetaList 의 `Col` 주석 참조).
+ *
+ * 전부 `%` 다. `px` 를 섞어도 소용이 없다 — fixed 레이아웃은 남는 폭을 모든 열에 나눠
+ * 주므로 창이 넓어지면 `150px` 로 못 박은 열도 같이 늘어난다 (실측 확인).
+ *
+ * 기준은 기본 창 1440 · 패널 펼침(표 폭 1088px)이다. 이때 헤더 라벨과 값이 모두 들어간다
+ * (`수정일시` 는 `2026-08-25 14:30` 이 mono 로 약 148px). 창 최소폭 1120(tauri.conf.json)
+ * 까지 줄이면 긴 헤더 몇 개가 `…` 로 잘리는데, 그 상태에서 패널을 접으면 다시 다 들어간다.
+ */
+const ROUTE_COLS: Col[] = [
+  { label: "name / service_id", width: "17%" },
+  { label: "uri", width: "14%" },
+  // 뱃지 하나 + `+N` 이 창 최소폭(1120)에서도 들어가는 값이다. 더 줄이면 `+N` 이 잘려
+  // 몇 개가 숨었는지를 알 수 없게 된다 (BadgeList 주석 참조).
+  { label: "methods", width: "15%" },
+  { label: "proxy-rewrite", width: "12%" },
+  { label: "allowed_groups", width: "15%" },
+  { label: "status", width: "11%" },
+  { label: "수정일시", width: "16%" },
+];
+
+const CONSUMER_COLS: Col[] = [
+  { label: "desc / username", width: "18%" },
+  { label: "secret", width: "11%" },
+  { label: "plugins", width: "11%" },
+  { label: "key", width: "20%" },
+  { label: "auth-groups", width: "14%" },
+  { label: "상태", width: "10%" },
+  { label: "수정일시", width: "16%" },
+];
 
 interface ReleaseChipProps {
   /** 어느 축인지 (`consumer` · `auth-groups`) */
@@ -122,9 +157,7 @@ export default function ListScreen() {
         updated: r.updated,
       }));
 
-  const cols = isConsumer
-    ? ["desc / username", "secret", "plugins", "key", "auth-groups", "상태", "수정일시"]
-    : ["name / service_id", "uri", "methods", "proxy-rewrite", "allowed_groups", "status", "수정일시"];
+  const cols = isConsumer ? CONSUMER_COLS : ROUTE_COLS;
 
   /**
    * 상단 chip 은 Route 의 status 축 전용이다.
@@ -232,11 +265,6 @@ export default function ListScreen() {
           <h2 className="page-title" style={{ fontSize: 24, lineHeight: "32px" }}>
             {isConsumer ? "Consumer" : "Route"}
           </h2>
-          <p className="page-sub">
-            {isConsumer
-              ? "jwt-auth 기반 소비자 계정을 등록하고 토큰을 발급합니다."
-              : "등록된 라우트를 조회하고 uri · methods · 플러그인을 관리합니다."}
-          </p>
         </div>
         <div className="page-actions">
           <span
@@ -378,12 +406,12 @@ export default function ListScreen() {
         </div>
       )}
 
-      <table className="kw-table">
+      <table className="kw-table one-line">
         <thead>
           <tr>
             {cols.map((c) => (
-              <th key={c} style={{ whiteSpace: "nowrap" }}>
-                {c}
+              <th key={c.label} style={{ width: c.width }} title={c.label}>
+                {c.label}
               </th>
             ))}
           </tr>
@@ -392,36 +420,19 @@ export default function ListScreen() {
           {rows.map((r) => (
             <tr key={r.id} onClick={() => openItem(r.id)} style={{ cursor: "pointer" }}>
               <td style={{ padding: ROW_H }}>
-                <div className="name">{r.c1}</div>
-                <div className="mono">{r.c1sub}</div>
+                <CellPair main={r.c1} sub={r.c1sub} />
               </td>
               <td className="mono" style={{ padding: ROW_H }}>
-                {r.c2}
+                <Cell text={r.c2} />
               </td>
               <td style={{ padding: ROW_H }}>
-                <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                  {r.tags.map((t) => (
-                    <span
-                      key={t}
-                      className="badge neutral"
-                      style={{ fontFamily: "var(--font-mono)" }}
-                    >
-                      {t}
-                    </span>
-                  ))}
-                </div>
+                <BadgeList items={r.tags} mono />
               </td>
               <td className="mono" style={{ padding: ROW_H }}>
-                {r.c4}
+                <Cell text={r.c4} />
               </td>
               <td style={{ padding: ROW_H }}>
-                <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-                  {r.groups.map((g) => (
-                    <span key={g} className="badge primary">
-                      {g}
-                    </span>
-                  ))}
-                </div>
+                <BadgeList items={r.groups} variant="primary" />
               </td>
               <td style={{ padding: ROW_H }}>
                 <span className={"badge " + r.badge}>
@@ -430,7 +441,7 @@ export default function ListScreen() {
                 </span>
               </td>
               <td className="mono" style={{ padding: ROW_H }}>
-                {r.updated}
+                <Cell text={r.updated} />
               </td>
             </tr>
           ))}
