@@ -2006,6 +2006,9 @@ mod service_form {
             "upstreamId": "ups-order",
             "specUrl": "https://git.internal/order/openapi.yaml",
             "logKey": "ep",
+            // 기본값에 기대지 않고 명시한다 — 기본값이 바뀌면 이 픽스처를 쓰는 테스트가
+            // 조용히 다른 것을 검증하게 된다.
+            "jwtAuth": true,
         }))
         .expect("폼")
     }
@@ -2023,6 +2026,130 @@ mod service_form {
         // 서버가 관리하는 필드는 본문에 실리지 않는다.
         assert!(out.get("id").is_none());
         assert!(out.get("create_time").is_none());
+    }
+
+    // ── 예외 케이스: 두 플러그인은 없을 수도 있다 ──────────────
+    //
+    // 저장은 GET 해 온 원본에 얹는 머지다. 그래서 "안 넣는다"로는 지워지지 않고,
+    // 아래 테스트들은 모두 **원본에 있던 것이 사라지는지**를 본다.
+
+    /// 토글 OFF 는 "이 service 에 jwt-auth 는 필요 없다" 다 — 설정이 있어도 지운다.
+    #[test]
+    fn jwt_auth_off_removes_the_plugin() {
+        let mut f = form();
+        f.jwt_auth = false;
+
+        let base = json!({
+            "plugins": {
+                "jwt-auth": { "header": "authorization", "hide_credentials": true },
+                "shi-log": { "key": "old" },
+            },
+        });
+        let out = apply(base, &f);
+
+        assert!(out.pointer("/plugins/jwt-auth").is_none(), "설정이 있어도 지운다");
+        // 다른 플러그인은 건드리지 않는다 — 껐다고 shi-log 까지 사라지면 안 된다.
+        assert_eq!(out.pointer("/plugins/shi-log/key"), Some(&json!("ep")));
+    }
+
+    /// 빈 log-key 는 `key: ""` 가 아니라 shi-log 를 통째로 지우라는 뜻이다.
+    /// `key` 만 지우면 로그 키 없는 플러그인이 남아 게이트웨이에서 무슨 일이 날지 모른다.
+    #[test]
+    fn blank_log_key_removes_the_whole_shi_log() {
+        let mut f = form();
+        f.log_key = String::new();
+
+        let base = json!({
+            "plugins": {
+                "jwt-auth": {},
+                "shi-log": { "key": "old", "level": "info" },
+            },
+        });
+        let out = apply(base, &f);
+
+        assert!(out.pointer("/plugins/shi-log").is_none(), "level 까지 함께 사라진다");
+        // jwt-auth 는 토글이 켜져 있으므로 남는다.
+        assert_eq!(out.pointer("/plugins/jwt-auth"), Some(&json!({})));
+    }
+
+    /// 저장이 `trim()` 한 값을 쓰므로 공백뿐인 값은 빈 값과 같은 뜻이어야 한다.
+    /// (`"e p"` 는 여전히 거절된다 — rejects_values_the_gateway_would_reject)
+    #[test]
+    fn whitespace_only_log_key_removes_shi_log() {
+        let mut f = form();
+        f.log_key = "   ".into();
+
+        assert!(!super::service_validate_fails(&f), "공백뿐인 값은 '지워라' 이지 에러가 아니다");
+
+        let out = apply(json!({ "plugins": { "shi-log": { "key": "old" } } }), &f);
+        assert!(out.pointer("/plugins/shi-log").is_none());
+    }
+
+    /// 앱이 관리하는 플러그인이 하나도 남지 않으면 `plugins` 키 자체를 없앤다 —
+    /// `set_label` 이 labels 에 하는 것과 같은 규칙이다 (빈 껍데기를 남기지 않는다).
+    #[test]
+    fn no_managed_plugins_removes_the_plugins_key() {
+        let mut f = form();
+        f.jwt_auth = false;
+        f.log_key = String::new();
+
+        let base = json!({ "plugins": { "jwt-auth": {}, "shi-log": { "key": "old" } } });
+        let out = apply(base, &f);
+
+        assert!(out.get("plugins").is_none(), "plugins: {{}} 라는 빈 껍데기를 남기지 않는다");
+
+        // 애초에 plugins 가 없던 service 도 같은 모양이 나온다.
+        assert!(apply(json!({}), &f).get("plugins").is_none());
+    }
+
+    /// "아무런 플러그인이 없으면" 이 조건이다 — 앱이 모르는 플러그인이 남아 있으면
+    /// `plugins` 는 유지된다. `is_empty()` 로 판단하므로 자연히 성립한다.
+    #[test]
+    fn unknown_plugin_keeps_the_plugins_key() {
+        let mut f = form();
+        f.jwt_auth = false;
+        f.log_key = String::new();
+
+        let base = json!({
+            "plugins": {
+                "jwt-auth": {},
+                "shi-log": { "key": "old" },
+                "limit-count": { "count": 100, "time_window": 60 },
+            },
+        });
+        let out = apply(base, &f);
+
+        assert_eq!(out.pointer("/plugins/limit-count/count"), Some(&json!(100)));
+        assert!(out.pointer("/plugins/jwt-auth").is_none());
+        assert!(out.pointer("/plugins/shi-log").is_none());
+        // 관리 대상 둘만 빠지고 나머지는 그대로다.
+        let left = out.pointer("/plugins").and_then(Value::as_object).expect("plugins 유지");
+        assert_eq!(left.len(), 1, "limit-count 하나만 남는다");
+    }
+
+    /// 삭제한 거절 케이스(`log-key 누락`)의 반대편을 명시적으로 못 박는다.
+    #[test]
+    fn blank_log_key_is_allowed() {
+        let mut f = form();
+        f.log_key = String::new();
+        assert!(!super::service_validate_fails(&f));
+    }
+
+    /// 플러그인이 없는 service 도 조회 → 폼 프리필이 성립해야 한다.
+    /// `view_reads_back_what_the_form_wrote` 의 짝이다 (그쪽은 둘 다 붙은 경우).
+    #[test]
+    fn view_reads_back_a_service_without_plugins() {
+        let mut f = form();
+        f.jwt_auth = false;
+        f.log_key = String::new();
+
+        let mut saved = apply(json!({}), &f);
+        saved["id"] = json!("svc-order");
+
+        let view = ServiceView::from_value(&saved, &[]);
+        // 이 두 값이 폼의 토글과 log-key 칸으로 그대로 내려간다 (types.ts 의 serviceToForm).
+        assert!(!view.has_jwt_auth);
+        assert_eq!(view.log_key, "");
     }
 
     /// jwt-auth 를 `{}` 로 덮으면 게이트웨이에 설정된 옵션이 사라진다 — 있으면 보존한다.
@@ -2138,7 +2265,8 @@ mod service_form {
         let cases: Vec<(&str, Value)> = vec![
             ("name 누락", json!({ "name": "", "upstreamId": "u", "logKey": "ep" })),
             ("upstream 누락", json!({ "name": "n", "upstreamId": "", "logKey": "ep" })),
-            ("log-key 누락", json!({ "name": "n", "upstreamId": "u", "logKey": "" })),
+            // log-key 누락은 더 이상 거절 대상이 아니다 — shi-log 를 지우라는 뜻이다
+            // (blank_log_key_is_allowed 가 반대편을 못 박는다).
             ("log-key 공백", json!({ "name": "n", "upstreamId": "u", "logKey": "e p" })),
             // labels 값 제약: ^\S+$
             ("spec_url 공백", json!({ "name": "n", "upstreamId": "u", "logKey": "ep",
