@@ -496,8 +496,16 @@ export interface ServiceFormState {
   specUrl: string;
   /** `labels.name_prefix` 로 저장된다 — Import 프리필의 route 명 접두어 */
   namePrefix: string;
-  /** `plugins["shi-log"].key` */
+  /** `plugins["shi-log"].key`. **빈 값이면 저장할 때 `shi-log` 를 통째로 지운다** */
   logKey: string;
+  /**
+   * `plugins["jwt-auth"]` 를 붙일지 (폼의 on/off 토글). jwt-auth 가 불필요한 service 가
+   * 있어 강제할 수 없다. OFF 면 저장할 때 그 플러그인을 지운다.
+   *
+   * 이것과 `logKey` 가 둘 다 비면 `plugins` 키 자체가 사라진다 (services.rs 의
+   * apply_service_form). 앱이 모르는 플러그인이 남아 있으면 유지된다.
+   */
+  jwtAuth: boolean;
 }
 
 export type FormState =
@@ -629,6 +637,9 @@ export const emptyServiceForm = (upstreamId: string): ServiceFormState => ({
   specUrl: "",
   namePrefix: "",
   logKey: "",
+  // 신규 등록은 jwt-auth 를 붙이는 쪽이 기본이다 — 대부분의 service 가 그렇고,
+  // 필요 없는 쪽이 예외다. 예외는 폼에서 끈다.
+  jwtAuth: true,
 });
 
 const numText = (v: number | null, fallback = ""): string =>
@@ -664,6 +675,9 @@ export const serviceToForm = (s: ServiceView): ServiceFormState => ({
   specUrl: s.specUrl,
   namePrefix: s.namePrefix,
   logKey: s.logKey,
+  // 기본값(true)이 아니라 **게이트웨이의 실제 상태**를 쓴다. 다른 도구로 만든 service 나
+  // 이 앱에서 껐던 service 를 열었을 때 저장 한 번으로 jwt-auth 가 되붙으면 안 된다.
+  jwtAuth: s.hasJwtAuth,
 });
 
 export const consumerToForm = (c: ConsumerView): ConsumerFormState => ({

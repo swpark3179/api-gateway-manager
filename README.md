@@ -136,7 +136,8 @@ src-tauri/src/
 
 - Route → `proxy-rewrite.uri` **또는** `proxy-rewrite.regex_uri` (둘 중 한쪽만 남긴다 — 아래 Import 절 참조), 그룹 필드(기본 `shi-auth.allowed_groups`)
 - Consumer → `jwt-auth.key`, `jwt-auth.secret`, 그룹 필드(기본 `jwt-auth.auth-groups`)
-- Service → `shi-log.key`, `jwt-auth`(**없을 때만** `{}` 추가), `labels.spec_url`
+- Service → `shi-log`(폼의 `log-key` — 빈 값이면 **통째로 삭제**), `jwt-auth`(폼의 토글 — ON 이면 **없을 때만** `{}` 추가, OFF 면 삭제),
+  `labels.spec_url` · `labels.name_prefix`. 관리 대상 플러그인이 하나도 안 남으면 `plugins` 키 자체를 지운다
 - Upstream → `name`, `desc`, `nodes`, `timeout` (`checks`·`retries`·`scheme`·`type` 은 보존)
 
 그룹 필드의 실제 위치는 조회 때 찾아낸 자리를 그대로 쓴다 — 아래 절 참조.
@@ -704,12 +705,17 @@ Service 폼도 저장 시점에 같은 스킴 제한을 걸어, 나중에 `fetch
 
 두 형태의 JSON 본문도 `lib/design.ts` 의 **표시 전용 사본**(`upstreamJson` · `serviceJson`)
 이다 — 담당자 `labels` 와 같은 판단이고, Rust 의 `apply_upstream_form` ·
-`apply_service_form` 이 진실이다. 실제 저장과 다른 세 지점은 화면에 문구로 적어 두었다.
+`apply_service_form` 이 진실이다. 실제 저장과 다른 네 지점은 화면에 문구로 적어 두었다.
+
+**어느 키가 생기고 사라지는지는 양쪽이 같다.** Service 의 jwt-auth 토글 · 빈 `log-key` · 빈
+`plugins` 는 미리보기에서도 그 키가 없다 — 미리보기가 `plugins: {}` 같은 빈 껍데기를 보여
+주면 저장 결과와 어긋난다. 아래 표의 차이는 모두 **값을 보존하는** 대목이다.
 
 | 미리보기 | 실제 저장 | 왜 |
 |---|---|---|
 | `type` 이 없다 | 원본에 **없을 때만** `roundrobin` 을 채운다 | 앱이 관리하는 키가 아니다. 여기 적어도 반영되지 않는다 |
 | `plugins."jwt-auth": {}` | 이미 설정이 있으면 그 값을 **유지** | `{}` 로 덮으면 게이트웨이의 jwt-auth 옵션이 사라진다 |
+| `plugins."shi-log"` 가 `key` 하나 | `key` 만 갈아 끼우고 `level` 등은 보존 | 위와 같은 이유 |
 | `labels` 에 `spec_url` · `name_prefix` 만 | 나머지 라벨은 보존 | 인식하는 라벨만 손댄다 |
 
 노드 `weight` 는 폼에 없지만 **JSON 에는 넣는다.** 빼 두면 `jsonToForm` 이 `nodes` 를 다시
@@ -760,11 +766,39 @@ APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에
 | `desc` | `desc` |
 | `spec_url` | `labels.spec_url` |
 | `name 접두어` | `labels.name_prefix` |
-| `log-key` (필수, placeholder `ep`) | `plugins.shi-log.key` |
+| `log-key` (선택, placeholder `ep`) | `plugins.shi-log.key` |
+| `jwt-auth` (on/off 토글, 신규 기본 ON) | `plugins.jwt-auth` |
 
-`plugins.jwt-auth` 는 저장할 때 **없을 때만** `{}` 로 넣는다. 이미 붙어 있으면 그 설정
-(`header`·`hide_credentials` 등)을 보존한다 — `{}` 로 덮으면 게이트웨이에 설정된 옵션이
-조용히 사라진다. `shi-log` 도 `key` 만 갈아 끼우고 나머지 필드는 남긴다.
+#### 플러그인은 없을 수도 있다
+
+`jwt-auth` 가 불필요한 service 도, `shi-log` 가 불필요한 service 도 있다. 그래서 두 플러그인
+모두 **선택**이고, 폼에서 빼면 저장할 때 지워진다:
+
+| 폼 입력 | 저장 결과 |
+|---|---|
+| jwt-auth 토글 ON | **없을 때만** `{}` 를 넣는다. 이미 붙어 있으면 그 설정(`header`·`hide_credentials` 등)을 보존한다 — `{}` 로 덮으면 게이트웨이에 설정된 옵션이 조용히 사라진다 |
+| jwt-auth 토글 OFF | `plugins.jwt-auth` 를 지운다 |
+| `log-key` 에 값 | `key` 만 갈아 끼우고 `level` 같은 나머지 필드는 남긴다 |
+| `log-key` 빈 값 | `plugins.shi-log` 를 **통째로** 지운다. `key: ""` 로 남기면 로그 키 없는 플러그인이 붙어 있는 상태가 된다 |
+| 위 둘이 겹쳐 남는 게 없으면 | `plugins` 키 **자체**를 지운다 — `labels` 를 다루는 `set_label` 과 같은 규칙이다(빈 껍데기를 남기지 않는다) |
+
+마지막 줄의 판단 기준은 `plugins.is_empty()` 다. 그래서 **`limit-count` 처럼 앱이 모르는
+플러그인이 붙어 있으면 `plugins` 는 그대로 유지된다** — 지우는 것은 앱이 관리하는 두 개뿐이다.
+
+빈 값을 "그 키를 지워라" 로 읽는 것은 `labels` 와 같은 성질이고, 저장은 GET 해 온 원본에
+얹는 머지이므로 **생략이 아니라 `remove` 로 적극적으로 지운다.**
+
+토글 값은 조회한 상태 그대로 열린다 (`ServiceView.has_jwt_auth` → `serviceToForm`). 기본값
+`true` 로 떨어지면 껐던 service 를 열어 저장하는 것만으로 jwt-auth 가 되붙는다.
+
+`log-key` 를 비우면 `shi-log` 의 다른 필드까지 함께 사라지고, 두 플러그인이 다 빠지면
+`plugins` 가 없어진다 — 파괴적인 결과라 폼에서 저장 전에 인라인 경고로 짚어 준다
+(`spec_url` 의 labels 제약 경고와 같은 성질이다. 저장은 막지 않는다).
+
+회귀 테스트: `jwt_auth_off_removes_the_plugin`, `blank_log_key_removes_the_whole_shi_log`,
+`whitespace_only_log_key_removes_shi_log`, `no_managed_plugins_removes_the_plugins_key`,
+`unknown_plugin_keeps_the_plugins_key`, `blank_log_key_is_allowed`,
+`view_reads_back_a_service_without_plugins`.
 
 ### Upstream 폼
 

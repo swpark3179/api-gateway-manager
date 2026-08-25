@@ -13,12 +13,18 @@
 //!
 //! # 플러그인
 //!
-//! 이 앱이 관리하는 것은 두 개뿐이다.
-//!   * `jwt-auth` — **없을 때만** `{}` 를 넣는다. 이미 있으면 그 설정을 보존한다
-//!     (`{}` 로 덮으면 게이트웨이에 설정된 jwt-auth 옵션이 사라진다).
-//!   * `shi-log.key` — 폼의 `log-key` 값. `shi-log` 의 다른 필드는 건드리지 않는다.
+//! 이 앱이 관리하는 것은 두 개뿐이고, **둘 다 없을 수 있다.** jwt-auth 가 불필요한 service 도
+//! shi-log 가 불필요한 service 도 현장에 존재한다.
+//!   * `jwt-auth` — 폼의 토글. ON 이면 **없을 때만** `{}` 를 넣어 이미 있는 설정을 보존하고
+//!     (`{}` 로 덮으면 게이트웨이에 설정된 jwt-auth 옵션이 사라진다), OFF 면 지운다.
+//!   * `shi-log.key` — 폼의 `log-key` 값. 값이 있으면 `key` 만 갈아 끼우고 다른 필드는
+//!     건드리지 않는다. **빈 값이면 `shi-log` 를 통째로 지운다** — `key: ""` 로 남기면
+//!     플러그인은 붙어 있는데 로그 키가 없는 상태가 된다.
 //!
-//! 그 밖의 플러그인(`limit-count` 등)은 `routes.rs` 와 같은 이유로 전부 보존한다.
+//! 그 둘을 지우고 나서 **남은 플러그인이 하나도 없으면 `plugins` 키 자체를 없앤다.**
+//! `labels` 를 다루는 `models::set_label` 과 같은 규칙이다 — 빈 껍데기를 남기지 않는다.
+//! 앱이 모르는 플러그인(`limit-count` 등)이 남아 있으면 `plugins` 는 그대로 유지된다
+//! (`routes.rs` 와 같은 이유로 전부 보존한다).
 
 use reqwest::Method;
 use serde::Deserialize;
@@ -52,9 +58,20 @@ pub struct ServiceForm {
     /// 선택 항목이지만 값이 있으면 제약을 검사한다.
     #[serde(default)]
     pub name_prefix: String,
-    /// `plugins["shi-log"].key`
+    /// `plugins["shi-log"].key`. **빈 값은 "shi-log 를 지워라"** 는 뜻이다 (선택 항목).
     #[serde(default)]
     pub log_key: String,
+    /// `plugins["jwt-auth"]` 를 붙일지. OFF 면 저장할 때 그 플러그인을 지운다.
+    ///
+    /// 기본값이 `true` 인 이유: bool 의 기본값(`false`)으로 두면 이 필드를 빠뜨린 호출이
+    /// 게이트웨이의 jwt-auth 를 **조용히 지운다.** 누락은 이 필드가 없던 시절의 동작
+    /// (항상 붙인다)으로 떨어지는 쪽이 안전하다.
+    #[serde(default = "jwt_auth_default")]
+    pub jwt_auth: bool,
+}
+
+fn jwt_auth_default() -> bool {
+    true
 }
 
 impl ServiceForm {
@@ -65,10 +82,12 @@ impl ServiceForm {
         if self.upstream_id.trim().is_empty() {
             return Err(AppError::config("upstream_id 는 필수입니다."));
         }
-        if self.log_key.trim().is_empty() {
-            return Err(AppError::config("log-key 는 필수입니다 (plugins.shi-log.key)."));
-        }
-        if self.log_key.chars().any(char::is_whitespace) {
+        // log-key 는 필수가 아니다 — 빈 값은 `plugins.shi-log` 를 지우라는 뜻이다.
+        // 검사는 **다듬은 값**으로 한다: 저장도 `trim()` 한 값을 쓰므로 `"   "` 는 빈 값과
+        // 같은 뜻이 돼야 하고, `"e p"` 는 여전히 거절돼야 한다.
+        // (`spec_url` · `name_prefix` 가 이미 같은 방식이다)
+        let log_key = self.log_key.trim();
+        if !log_key.is_empty() && log_key.chars().any(char::is_whitespace) {
             return Err(AppError::config("log-key 에 공백을 쓸 수 없습니다."));
         }
 
@@ -192,8 +211,10 @@ pub async fn delete(app: &AppHandle<Wry>, env: Env, id: &str, name: &str) -> App
 /// 원본 service 위에 폼 값을 얹는다. 앱이 모르는 필드·플러그인·라벨은 그대로 보존된다.
 ///
 /// JSON 탭의 미리보기(`src/lib/design.ts` 의 `serviceJson`)가 이 함수가 만드는 모양을
-/// 흉내낸다. 미리보기는 `jwt-auth` 를 `{}` 로, `labels` 를 `spec_url` 하나로 보여 주지만
-/// 실제로는 아래처럼 기존 값을 보존한다 — 그 차이는 화면에 문구로 적어 두었다.
+/// 흉내낸다. 어느 키가 **생기고 사라지는지**는 이제 양쪽이 같다 (jwt-auth 토글 · 빈 log-key ·
+/// 빈 plugins). 남은 차이는 값을 보존하는 대목뿐이다 — 미리보기는 `jwt-auth` 를 `{}` 로,
+/// `labels` 를 앱이 아는 키만 보여 주지만 실제로는 기존 값을 보존한다. 그 차이는 화면에
+/// 문구로 적어 두었다.
 fn apply_service_form(base: Value, f: &ServiceForm) -> Value {
     let mut m = obj(base);
     strip_server_fields(&mut m);
@@ -208,16 +229,35 @@ fn apply_service_form(base: Value, f: &ServiceForm) -> Value {
     set_label(&mut m, NAME_PREFIX_LABEL, f.name_prefix.trim());
 
     // ── plugins 머지 ────────────────────────────────────────
+    // 저장은 GET 해 온 원본에 얹는 머지다. 그래서 키를 빼려면 *생략*으로는 안 되고
+    // `remove` 로 적극적으로 지워야 한다.
     let mut plugins = obj(m.remove("plugins").unwrap_or(Value::Null));
 
-    // jwt-auth 는 "붙어 있어야 한다"가 요구사항이다. 이미 설정이 있으면 그대로 둔다.
-    plugins.entry("jwt-auth").or_insert_with(|| json!({}));
+    // ON 이면 없을 때만 `{}` — 이미 있는 설정(`header`·`hide_credentials`)은 보존한다.
+    // OFF 면 지운다. 폼이 "이 service 에는 jwt-auth 가 필요 없다"고 말한 것이다.
+    if f.jwt_auth {
+        plugins.entry("jwt-auth").or_insert_with(|| json!({}));
+    } else {
+        plugins.remove("jwt-auth");
+    }
 
-    let mut log = obj(plugins.remove("shi-log").unwrap_or(Value::Null));
-    log.insert("key".into(), Value::String(f.log_key.trim().to_string()));
-    plugins.insert("shi-log".into(), Value::Object(log));
+    // 빈 log-key 는 `key: ""` 가 아니라 shi-log 를 통째로 지우라는 뜻이다. 값이 있으면
+    // `key` 만 갈아 끼우고 `level` 같은 다른 필드는 남긴다.
+    let log_key = f.log_key.trim();
+    if log_key.is_empty() {
+        plugins.remove("shi-log");
+    } else {
+        let mut log = obj(plugins.remove("shi-log").unwrap_or(Value::Null));
+        log.insert("key".into(), Value::String(log_key.to_string()));
+        plugins.insert("shi-log".into(), Value::Object(log));
+    }
 
-    m.insert("plugins".into(), Value::Object(plugins));
+    // 남은 플러그인이 하나도 없으면 키 자체를 없앤다 — `models::set_label` 이 labels 에
+    // 하는 것과 같은 규칙이다(빈 껍데기를 남기지 않는다). `limit-count` 처럼 앱이 모르는
+    // 플러그인이 남아 있으면 비어 있지 않으므로 `plugins` 는 자연히 유지된다.
+    if !plugins.is_empty() {
+        m.insert("plugins".into(), Value::Object(plugins));
+    }
 
     Value::Object(m)
 }

@@ -172,9 +172,16 @@ export default function JsonTab({ sub }: { sub: string }) {
         {!showRaw && form?.kind === "service" && (
           <>
             <br />
-            <span className="font-mono">{"plugins.jwt-auth: {}"}</span> — 게이트웨이에 이미 설정이
-            있으면 그 값을 유지합니다. <span className="font-mono">labels</span> 는{" "}
-            <span className="font-mono">spec_url</span> 만 보여 주며, 나머지 라벨은 보존됩니다.
+            <span className="font-mono">plugins</span> 는 폼을 따라갑니다 — jwt-auth 토글을 끄면{" "}
+            <span className="font-mono">jwt-auth</span> 가, <span className="font-mono">log-key</span>{" "}
+            를 비우면 <span className="font-mono">shi-log</span> 가 사라지고, 둘 다 없으면{" "}
+            <span className="font-mono">plugins</span> 키 자체가 없습니다 (저장할 때도 그렇게
+            지워집니다). 게이트웨이에 이미 설정이 있으면 그 값은 유지됩니다 —{" "}
+            <span className="font-mono">{"jwt-auth: {}"}</span> 로 보여도{" "}
+            <span className="font-mono">header</span> 같은 옵션을 덮지 않고,{" "}
+            <span className="font-mono">shi-log</span> 는 <span className="font-mono">key</span> 만
+            갈아 끼웁니다. <span className="font-mono">labels</span> 도 같은 식으로 앱이 아는 키만
+            보여 주며 나머지 라벨은 보존됩니다.
           </>
         )}
       </div>

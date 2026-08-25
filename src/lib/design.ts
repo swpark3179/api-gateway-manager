@@ -70,6 +70,38 @@ export const railStyle = (on: boolean): React.CSSProperties => ({
     : { color: "var(--gray-500)" }),
 });
 
+/**
+ * on/off 스위치의 트랙 — 설정 화면의 토글과 Service 폼의 jwt-auth 토글이 같이 쓴다.
+ *
+ * `Settings.tsx` 안에 private 으로 있던 것을 옮겨 왔다. 스위치 모양이 두 곳으로 갈라지면
+ * 같은 뜻의 컨트롤이 화면마다 달라 보인다 — `segStyle` · `railStyle` 이 여기 있는 것과 같은
+ * 이유다.
+ *
+ * 키보드 어포던스는 없다(`<div onClick>` 으로 쓰인다). 앱 전체가 그러하므로 여기서만
+ * `role="switch"` 를 붙이면 절반만 된 접근성이 된다 — 별건으로 둔다.
+ */
+export const switchStyle = (on: boolean): React.CSSProperties => ({
+  width: 44,
+  height: 24,
+  borderRadius: 1000,
+  padding: 3,
+  cursor: "pointer",
+  transition: "background 120ms",
+  flex: "0 0 auto",
+  display: "flex",
+  justifyContent: on ? "flex-end" : "flex-start",
+  background: on ? "var(--purple-600)" : "var(--gray-300)",
+});
+
+/** 스위치의 손잡이 — `switchStyle` 의 짝. */
+export const switchKnobStyle: React.CSSProperties = {
+  width: 18,
+  height: 18,
+  borderRadius: "50%",
+  background: "#fff",
+  boxShadow: "var(--shadow-xs)",
+};
+
 // ── 권한그룹 위치 (Rust 의 find_groups / set_groups_at 대응) ──
 //
 // Rust 는 여섯 가지 표기를 모든 플러그인과 최상위에서 훑어 값을 찾고(find_groups),
@@ -301,9 +333,14 @@ export function upstreamJson(f: UpstreamFormState): Record<string, unknown> {
 /**
  * Service 의 앱 관리 키.
  *
- * 두 군데가 실제 저장과 다르지만, `routeJson` 이 `plugins` 를 통째로 보여 주는 것과 같은
- * 종류의 근사다 (JSON 탭 자체가 "앱이 관리하는 키만" 이라고 밝히고 있다):
+ * 어느 키가 **생기고 사라지는지**는 실제 저장(services.rs 의 `apply_service_form`)과 같다 —
+ * jwt-auth 토글 · 빈 `log-key` · 빈 `plugins` 모두 여기서도 키가 없어진다. 미리보기가
+ * `plugins: {}` 같은 빈 껍데기를 보여 주면 저장 결과와 어긋난다.
+ *
+ * 남은 차이는 **값을 보존하는 대목**이고, `routeJson` 이 `plugins` 를 통째로 보여 주는 것과
+ * 같은 종류의 근사다 (JSON 탭 자체가 "앱이 관리하는 키만" 이라고 밝히고 있다):
  *  · `plugins."jwt-auth": {}` — 게이트웨이에 이미 설정이 있으면 그 값이 **유지**된다.
+ *  · `plugins."shi-log"` — `key` 만 갈아 끼우고 `level` 같은 다른 필드는 보존된다.
  *  · `labels` — 앱이 관리하는 `spec_url` · `name_prefix` 만 보이지만 나머지 라벨(담당자 등)은
  *    그대로 보존된다.
  */
@@ -312,8 +349,13 @@ export function serviceJson(f: ServiceFormState): Record<string, unknown> {
     name: f.name,
     desc: f.desc,
     upstream_id: f.upstreamId,
-    plugins: { "jwt-auth": {}, "shi-log": { key: f.logKey } },
   };
+  // 두 플러그인 모두 조건부다. 하나도 없으면 `plugins` 키 자체를 만들지 않는다 — 아래
+  // labels 와 같은 규칙이고, Rust 도 같은 판단을 한다 (빈 껍데기를 남기지 않는다).
+  const plugins: Record<string, unknown> = {};
+  if (f.jwtAuth) plugins["jwt-auth"] = {};
+  if (f.logKey.trim()) plugins["shi-log"] = { key: f.logKey };
+  if (Object.keys(plugins).length > 0) o.plugins = plugins;
   // 빈 값이면 그 라벨을 지우는 쪽이라(Rust 의 set_label) 키를 만들지 않는다. 둘 다 비면
   // labels 키 자체가 없다 — 저장 때 라벨이 하나도 남지 않는 경우와 같은 모양이다.
   const labels: Record<string, string> = {};
@@ -439,6 +481,11 @@ export function jsonToForm(raw: string, current: FormState): FormState {
         specUrl: (o.labels && o.labels.spec_url) || "",
         namePrefix: (o.labels && o.labels.name_prefix) || "",
         logKey: log.key || "",
+        // 컨슈머의 contacts (`"labels" in o ? … : current`) 처럼 "키가 없으면 건드리지
+        // 말라" 로 읽지 **않는다.** 같은 분기의 logKey 가 이미 무조건 덮고 있고, 이제
+        // "플러그인 없음"이 표현 가능한 정상 상태라 존재 여부에서 파생하는 쪽이 왕복
+        // 무손실이다 — serviceJson 이 낸 본문을 되읽으면 같은 폼이 나온다.
+        jwtAuth: "jwt-auth" in p,
       };
     }
 

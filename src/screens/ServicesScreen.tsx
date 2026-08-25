@@ -98,8 +98,11 @@ export default function ServicesScreen() {
             {s.logKey ? <Cell text={s.logKey} /> : <span className="muted">—</span>}
           </td>
           <td style={{ padding: ROW }}>
-            {/* 저장할 때 jwt-auth 를 보장하지만, 다른 도구로 만든 service 는 없을 수 있다. */}
-            <span className={"badge " + (s.hasJwtAuth ? "success" : "warning")}>
+            {/*
+              jwt-auth 는 폼의 토글이라 "없음"도 정상 설정이다 — warning(노란색)으로 두면
+              멀쩡한 service 가 문제처럼 읽힌다. 사실만 말하는 중립색을 쓴다.
+            */}
+            <span className={"badge " + (s.hasJwtAuth ? "success" : "neutral")}>
               <span className="dot" />
               {s.hasJwtAuth ? "jwt-auth" : "jwt-auth 없음"}
             </span>

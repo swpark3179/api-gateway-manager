@@ -207,7 +207,10 @@ export const serviceSave = (env: EnvKey, f: ServiceFormState) =>
       // 이 줄을 빠뜨리면 저장할 때마다 게이트웨이의 labels.name_prefix 가 지워진다
       // (Rust 의 set_label 이 빈 값을 "그 키를 지워라" 로 읽는다 — specUrl 과 같은 성질).
       namePrefix: f.namePrefix,
+      // 빈 값이면 Rust 가 plugins.shi-log 를 지운다 — 그것이 폼의 뜻이다.
       logKey: f.logKey,
+      // 이 줄을 빠뜨리면 Rust 의 기본값(true)으로 떨어져 토글을 끈 게 무시된다.
+      jwtAuth: f.jwtAuth,
     },
   });
 

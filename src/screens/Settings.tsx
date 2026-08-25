@@ -8,29 +8,9 @@
 
 import { useEffect, useState } from "react";
 
+import { switchKnobStyle, switchStyle } from "../lib/design";
 import { useStore } from "../store";
 import type { EnvConfigView, EnvKey, EnvPayload } from "../types";
-
-const trackStyle = (on: boolean): React.CSSProperties => ({
-  width: 44,
-  height: 24,
-  borderRadius: 1000,
-  padding: 3,
-  cursor: "pointer",
-  transition: "background 120ms",
-  flex: "0 0 auto",
-  display: "flex",
-  justifyContent: on ? "flex-end" : "flex-start",
-  background: on ? "var(--purple-600)" : "var(--gray-300)",
-});
-
-const knobStyle: React.CSSProperties = {
-  width: 18,
-  height: 18,
-  borderRadius: "50%",
-  background: "#fff",
-  boxShadow: "var(--shadow-xs)",
-};
 
 const rowBoxStyle: React.CSSProperties = {
   display: "flex",
@@ -159,8 +139,8 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
             </div>
             <div className="text-xs muted">시스템 프록시를 타지 않고 직접 호출합니다.</div>
           </div>
-          <div onClick={() => setNoProxy((v) => !v)} style={trackStyle(noProxy)}>
-            <div style={knobStyle} />
+          <div onClick={() => setNoProxy((v) => !v)} style={switchStyle(noProxy)}>
+            <div style={switchKnobStyle} />
           </div>
         </div>
 
@@ -188,8 +168,8 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
             </div>
             <div className="text-xs muted">사설·자체서명 인증서를 쓰는 게이트웨이용입니다.</div>
           </div>
-          <div onClick={() => setInsecureTls((v) => !v)} style={trackStyle(insecureTls)}>
-            <div style={knobStyle} />
+          <div onClick={() => setInsecureTls((v) => !v)} style={switchStyle(insecureTls)}>
+            <div style={switchKnobStyle} />
           </div>
         </div>
 

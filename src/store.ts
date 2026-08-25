@@ -1376,7 +1376,9 @@ export const useStore = create<AppState>((set, get) => ({
         case "consumer":
           return !form.username.trim() || !form.key.trim() || !form.secret.trim();
         case "service":
-          return !form.name.trim() || !form.upstreamId.trim() || !form.logKey.trim();
+          // logKey 는 검사하지 않는다 — 빈 값은 "plugins.shi-log 를 지워라" 라는 뜻이고
+          // Rust 의 validate 도 더 이상 필수로 보지 않는다.
+          return !form.name.trim() || !form.upstreamId.trim();
         case "upstream":
           return (
             !form.name.trim() ||
@@ -1408,8 +1410,17 @@ export const useStore = create<AppState>((set, get) => ({
         await api.consumerSave(env, form);
         get().flash("Consumer가 저장되었습니다.");
       } else if (form.kind === "service") {
+        // 어느 플러그인이 붙었는지는 폼에서 정해진다 — "항상 둘 다" 라고 말하면 거짓이 된다.
+        // serviceJson 이 plugins 를 조립하는 것과 같은 조건이다.
+        const included: string[] = [];
+        if (form.jwtAuth) included.push("jwt-auth");
+        if (form.logKey.trim()) included.push("shi-log");
         await api.serviceSave(env, form);
-        get().flash("Service가 저장되었습니다. (jwt-auth · shi-log 포함)");
+        get().flash(
+          `Service가 저장되었습니다. (${
+            included.length > 0 ? included.join(" · ") + " 포함" : "플러그인 없음"
+          })`,
+        );
       } else if (form.kind === "upstream") {
         await api.upstreamSave(env, form);
         get().flash("Upstream이 저장되었습니다.");
