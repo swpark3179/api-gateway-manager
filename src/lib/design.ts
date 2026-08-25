@@ -7,6 +7,7 @@
  * 이 JSON 에 없는 플러그인(limit-count 등)도 보존된다.
  */
 
+import { rewriteModeOf } from "../types";
 import type {
   ConsumerFormState,
   Contact,
@@ -149,7 +150,19 @@ export function routeNamePrefix(servicePrefix: string, pathPrefix: string): stri
 
 export function routeJson(f: RouteFormState): Record<string, unknown> {
   const plugins: Record<string, unknown> = {};
-  if (f.rewrite) plugins["proxy-rewrite"] = { uri: f.rewrite };
+  // `uri` 와 `regex_uri` 중 **한쪽만** 내보낸다. APISIX 는 `uri` 가 있으면 `regex_uri` 를
+  // 무시하므로(proxy-rewrite.lua), 둘을 함께 그리면 이 화면이 게이트웨이 동작과 다른 말을
+  // 하게 된다. 저장 본문도 같은 규칙이다 (Rust `apply_route_form`).
+  if (f.rewriteMode === "regex") {
+    // 빈 항목을 **걸러 내지 않는다** — 걸러 내면 쌍이 밀려 엉뚱한 패턴·치환이 짝이 된다.
+    // 반쯤 채운 상태는 아직 저장할 수 없는 값이라 아예 그리지 않는다 (Rust `validate` 가 막는다).
+    const v = f.rewriteRegex.map((x) => x.trim());
+    if (v.length >= 2 && v.length % 2 === 0 && v.every(Boolean)) {
+      plugins["proxy-rewrite"] = { regex_uri: v };
+    }
+  } else if (f.rewrite) {
+    plugins["proxy-rewrite"] = { uri: f.rewrite };
+  }
   const o: Record<string, any> = {
     uri: f.uri,
     name: f.name,
@@ -363,6 +376,12 @@ export function jsonToForm(raw: string, current: FormState): FormState {
 
     case "route": {
       const p = o.plugins || {};
+      const pr = p["proxy-rewrite"] || {};
+      // 문자열 배열일 때만 받는다. 모드는 값에서 파생하므로 `routeJson` 이 낸 본문을 그대로
+      // 되읽어도 같은 폼이 나온다 (JSON 탭 왕복이 무손실이어야 한다).
+      const regex: string[] = Array.isArray(pr.regex_uri)
+        ? pr.regex_uri.filter((x: unknown): x is string => typeof x === "string")
+        : [];
       return {
         ...current,
         uri: o.uri || "",
@@ -370,7 +389,9 @@ export function jsonToForm(raw: string, current: FormState): FormState {
         desc: o.desc || "",
         methods: Array.isArray(o.methods) ? o.methods : [],
         serviceId: o.service_id || "",
-        rewrite: (p["proxy-rewrite"] && p["proxy-rewrite"].uri) || "",
+        rewrite: (typeof pr.uri === "string" && pr.uri) || "",
+        rewriteMode: rewriteModeOf(regex),
+        rewriteRegex: regex,
         groups: pickGroups(o, current.groupsLocation, ROUTE_LOC),
         status: typeof o.status === "number" ? o.status : current.status,
       };

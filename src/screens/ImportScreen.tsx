@@ -34,6 +34,7 @@ import ErrorBanner from "../components/ErrorBanner";
 import { routeNamePrefix } from "../lib/design";
 import { attrsOfRow, changedKeys, rowVerdict, type RowVerdict } from "../lib/importDiff";
 import { filterCompareRows, useStore } from "../store";
+import { rewriteText } from "../types";
 import type { CompareRow } from "../types";
 
 const ROW_H = "12px 16px";
@@ -96,6 +97,28 @@ export default function ImportScreen() {
 
   const shown = useMemo(() => filterCompareRows(rows, chip, q), [rows, chip, q]);
 
+  /**
+   * 이름이 겹치는 미등록 행의 `suggestedName` 집합.
+   *
+   * 마지막 세그먼트가 파라미터면 name 에서 그것을 떼므로 (`oas::suggested_name`),
+   * `GET /Vendor/GRP/{CD}` 와 `POST /Vendor/GRP/{CD}` 가 같은 이름이 된다. APISIX 는
+   * name 유일성을 요구하지 않아 **저장은 되지만**, 목록에서 두 route 를 구분할 수 없으므로
+   * 만들기 전에 알려 준다.
+   *
+   * 이미 등록된 행은 세지 않는다 — 그쪽 이름은 게이트웨이에 있는 값이고, 이 화면이 새로
+   * 만들어 낼 충돌이 아니다.
+   */
+  const dupNames = useMemo(() => {
+    const seen = new Map<string, number>();
+    for (const r of rows) {
+      if (rowVerdict(r) !== "unregistered") continue;
+      const n = r.suggestedName.trim();
+      if (!n) continue;
+      seen.set(n, (seen.get(n) ?? 0) + 1);
+    }
+    return new Set([...seen].filter(([, c]) => c > 1).map(([n]) => n));
+  }, [rows]);
+
   async function dropFiles(files: FileList | null) {
     const file = files?.[0];
     if (!file) return;
@@ -148,7 +171,7 @@ export default function ImportScreen() {
             첨부하지 않으면 고른 service 의 <span className="font-mono">spec_url</span> 을
             읽습니다. 등록돼 있고 <span className="font-mono">name</span> ·{" "}
             <span className="font-mono">uri</span> ·{" "}
-            <span className="font-mono">proxy-rewrite.uri</span> ·{" "}
+            <span className="font-mono">proxy-rewrite</span> ·{" "}
             <span className="font-mono">desc</span> 까지 스펙과 같으면{" "}
             <b>일치</b>, 값이 다르면 <b>속성 차이</b> 로 표시하고 무엇을 적용할지 고르는 화면으로,
             미등록 API 는 값이 채워진 신규 등록 화면으로 이어집니다.
@@ -328,6 +351,19 @@ export default function ImportScreen() {
                 " 고른 service 에 name 접두어를 등록해 두면 그쪽이 우선합니다."
               )}
             </div>
+            <div className="text-xs" style={{ marginTop: 6, color: "var(--gray-700)" }}>
+              {"path 끝이 파라미터면 ("}
+              <span className="font-mono">{"/Vendor/GRP/{CD}"}</span>
+              {") 이름에서 그 세그먼트를 떼고, "}
+              <span className="font-mono">proxy-rewrite</span>
+              {" 는 "}
+              <span className="font-mono">uri</span>
+              {" 대신 "}
+              <span className="font-mono">regex_uri</span>
+              {" 로 채웁니다 — 정적 문자열은 "}
+              <span className="font-mono">{"{CD}"}</span>
+              {" 를 치환하지 못해 중괄호가 그대로 upstream 에 나갑니다."}
+            </div>
           </div>
         </div>
       </div>
@@ -441,6 +477,24 @@ export default function ImportScreen() {
             </div>
           </div>
 
+          {dupNames.size > 0 && (
+            <div
+              className="text-xs"
+              style={{
+                marginBottom: 12,
+                padding: "10px 14px",
+                borderRadius: 8,
+                background: "var(--bg-warning-tint)",
+                color: "var(--yellow-800)",
+              }}
+            >
+              신규 등록될 <span className="font-mono">name</span> 이 겹치는 이름이{" "}
+              {dupNames.size}개 있습니다 — 경로 끝의 파라미터를 뗀 이름 규칙 때문이며, 같은
+              path 를 메서드별로 나눠 등록할 때 생깁니다. APISIX 는 중복 name 을 허용하므로
+              저장은 되지만, 목록에서 구분하려면 등록 화면에서 이름을 고치세요.
+            </div>
+          )}
+
           <table className="kw-table">
             <thead>
               <tr>
@@ -456,6 +510,7 @@ export default function ImportScreen() {
                 <Row
                   key={`${r.method} ${r.fullPath}`}
                   row={r}
+                  dupName={dupNames.has(r.suggestedName.trim())}
                   onOpen={openRoute}
                   onCreate={createRoute}
                 />
@@ -531,11 +586,13 @@ export default function ImportScreen() {
 
 interface RowProps {
   row: CompareRow;
+  /** 이 행이 만들 name 이 다른 미등록 행과 겹치는가 */
+  dupName: boolean;
   onOpen: (row: CompareRow) => Promise<void>;
   onCreate: (row: CompareRow) => void;
 }
 
-function Row({ row, onOpen, onCreate }: RowProps) {
+function Row({ row, dupName, onOpen, onCreate }: RowProps) {
   const verdict = rowVerdict(row);
   const meta = VERDICT_META[verdict];
   const registered = verdict !== "unregistered";
@@ -599,11 +656,26 @@ function Row({ row, onOpen, onCreate }: RowProps) {
           </>
         ) : (
           <>
-            <div className="name mono">{row.suggestedName}</div>
+            <div className="name mono">
+              {row.suggestedName}
+              {dupName && (
+                <span
+                  className="text-xs"
+                  style={{ marginLeft: 6, color: "var(--yellow-800)" }}
+                  title="다른 API 와 같은 name 이 됩니다 (APISIX 는 허용합니다)"
+                >
+                  이름 중복
+                </span>
+              )}
+            </div>
             <div className="mono text-xs muted">
               신규 등록 → {row.suggestedUri}
               <br />
-              rewrite {row.suggestedRewrite}
+              {/* 파라미터가 있으면 정적 uri 가 아니라 regex_uri 로 채워진다 —
+                  어느 키로 저장될지 여기서 미리 드러나야 한다. */}
+              {row.suggestedRewriteRegex.length >= 2
+                ? `regex_uri ${rewriteText({ rewrite: "", rewriteRegex: row.suggestedRewriteRegex })}`
+                : `rewrite ${row.suggestedRewrite}`}
             </div>
           </>
         )}

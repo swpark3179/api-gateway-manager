@@ -387,6 +387,21 @@ const ACCESS_CLAUSE: &str = " AND (?3 = '' OR EXISTS (
           SELECT 1 FROM route_groups rg
            WHERE rg.env = ?1 AND rg.route_id = routes.id))";
 
+/// name 접두사 조건.
+///
+/// 검색어(`?2`)와 **다른 축**이다. 검색어는 `search` 블롭 어디에나 걸리는 '포함' 이고,
+/// 이쪽은 `name` 이 그 문자열로 **시작**하는가만 본다. 사내 route 명 규약(`EP_…`)으로
+/// 한 덩어리를 골라내는 용도라, 이름 중간에 우연히 들어간 `EP_` 까지 걸리면 안 된다.
+///
+/// `LIKE ?5 || '%'` 를 쓰지 않는다 — route 명에 흔한 `_` 가 LIKE 의 단일문자 와일드카드라
+/// `EP_` 가 `EPX…` 까지 잡는다 (`instr` 을 쓰는 검색어 쪽과 같은 이유).
+///
+/// 대소문자는 무시한다. 경로 접두사에서 파생한 접두어는 대문자(`V1/`)지만 service 에
+/// 등록한 접두어는 사용자가 쓴 그대로(`ep_`)라, 목록에서 고르는 값과 저장된 값의 대소문자가
+/// 다를 수 있다. `?5` 는 호출부가 이미 소문자로 정규화해서 넘긴다 (`needle`).
+const NAME_PREFIX_CLAUSE: &str =
+    " AND (?5 = '' OR substr(lower(name), 1, length(?5)) = ?5)";
+
 /// chip 값(`all` / `on` / `off`)을 status 조건으로 바꾼다.
 fn status_clause(chip: &str) -> &'static str {
     match chip {
@@ -401,7 +416,7 @@ fn needle(q: &str) -> String {
     q.trim().to_lowercase()
 }
 
-/// 세 축(상태 chip · 검색어 · 조회 범위)을 적용해 라우트를 조회한다.
+/// 네 축(상태 chip · 검색어 · name 접두사 · 조회 범위)을 적용해 라우트를 조회한다.
 ///
 /// `scope` 가 `Consumer` 면 그 컨슈머의 auth-groups 와 라우트의 allowed_groups 교집합이
 /// 비어 있지 않은 라우트만 남는다. allowed_groups 가 아예 없는 라우트는 어떤 컨슈머로도
@@ -411,24 +426,27 @@ pub fn query_routes(
     env: &str,
     chip: &str,
     q: &str,
+    name_prefix: &str,
     scope: &RouteScope,
 ) -> AppResult<RoutesPage> {
     let n = needle(q);
+    let pfx = needle(name_prefix);
     let (user, ungrouped) = scope.binds();
 
     // instr() 은 LIKE 와 달리 % · _ 를 메타문자로 취급하지 않는다.
     // uri 에 밑줄이 흔하므로 검색어를 이스케이프해야 하는 부담을 아예 없앤다.
     let sql = format!(
         "SELECT view FROM routes
-          WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){}{}
+          WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){}{}{}
           ORDER BY seq",
         ACCESS_CLAUSE,
+        NAME_PREFIX_CLAUSE,
         status_clause(chip)
     );
 
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
     let rows = stmt
-        .query_map(params![env, &n, user, ungrouped], |row| row.get::<_, String>(0))
+        .query_map(params![env, &n, user, ungrouped, &pfx], |row| row.get::<_, String>(0))
         .map_err(sql_err)?;
 
     let mut items = Vec::new();
@@ -437,24 +455,26 @@ pub fn query_routes(
         items.push(serde_json::from_str::<RouteView>(&json)?);
     }
 
-    let counts = route_counts(conn, env, q, scope)?;
+    let counts = route_counts(conn, env, q, name_prefix, scope)?;
     Ok(RoutesPage { total: items.len() as i64, items, counts })
 }
 
-/// 검색어와 조회 범위만 적용한 상태별 건수.
+/// chip 을 **뺀** 나머지 축(검색어 · name 접두사 · 조회 범위)만 적용한 상태별 건수.
 ///
 /// chip 을 빼는 이유는 chip 을 눌러도 라벨의 숫자가 흔들리지 않게 하기 위해서고,
-/// 범위를 **넣는** 이유는 그게 chip 과 나란한 필터가 아니라 조회 범위이기 때문이다.
+/// 나머지를 **넣는** 이유는 그것들이 chip 과 나란한 필터가 아니라 조회 범위이기 때문이다.
 /// 컨슈머로 8건이 남았는데 chip 이 `status 1 (312)` 라고 말하면 안 된다.
-/// ('그룹 제한 없음' 도 같은 이유로 반영해야 한다 — 안 하면 `?4` 가 여기서 바인딩되지 않아
-/// rusqlite 가 아예 `InvalidParameterCount` 를 던진다.)
+/// ('그룹 제한 없음' · name 접두사도 같은 이유로 반영해야 한다 — 안 하면 `?4` · `?5` 가
+/// 여기서 바인딩되지 않아 rusqlite 가 아예 `InvalidParameterCount` 를 던진다.)
 pub fn route_counts(
     conn: &Connection,
     env: &str,
     q: &str,
+    name_prefix: &str,
     scope: &RouteScope,
 ) -> AppResult<RouteCounts> {
     let n = needle(q);
+    let pfx = needle(name_prefix);
     let (user, ungrouped) = scope.binds();
     conn.query_row(
         &format!(
@@ -462,9 +482,10 @@ pub fn route_counts(
                     COALESCE(SUM(status =  1), 0),
                     COALESCE(SUM(status <> 1), 0)
                FROM routes
-              WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){ACCESS_CLAUSE}"
+              WHERE env = ?1
+                AND (?2 = '' OR instr(search, ?2) > 0){ACCESS_CLAUSE}{NAME_PREFIX_CLAUSE}"
         ),
-        params![env, &n, user, ungrouped],
+        params![env, &n, user, ungrouped, &pfx],
         |row| Ok(RouteCounts { all: row.get(0)?, on: row.get(1)?, off: row.get(2)? }),
     )
     .map_err(sql_err)
@@ -776,7 +797,7 @@ pub struct CompareRow {
     pub state: String,
     /// 매칭된 route 의 id. 미등록이면 빈 문자열
     pub route_id: String,
-    /// 아래 네 값은 **매칭된 route 에 지금 저장돼 있는 값**이다.
+    /// 아래 `route_*` 는 **매칭된 route 에 지금 저장돼 있는 값**이다.
     /// 프런트가 `suggested_*` 와 대조해 "등록돼 있지만 스펙과 값이 다르다"를 판정한다
     /// (`lib/importDiff.ts`). 캐시의 `RouteView` 를 그대로 옮기므로 `route_cached` 로
     /// 다시 읽어 만드는 diff 화면의 기준값과 어긋날 자리가 없다.
@@ -784,6 +805,8 @@ pub struct CompareRow {
     pub route_uri: String,
     pub route_desc: String,
     pub route_rewrite: String,
+    /// 매칭된 route 의 `proxy-rewrite.regex_uri` (배열 그대로, 없으면 빈 배열).
+    pub route_rewrite_regex: Vec<String>,
     pub route_status: i64,
     /// 정확 일치가 아니라 와일드카드(`/a/*`) 로 걸렸는가
     pub wildcard: bool,
@@ -796,7 +819,14 @@ pub struct CompareRow {
     pub suggested_name: String,
     /// 신규 생성 폼의 `proxy-rewrite.uri` 후보 — 접두사를 붙이지 않은 OAS 원본 path.
     /// 게이트웨이 uri 에는 접두사가 붙지만 upstream 이 아는 경로는 접두사 없는 쪽이다.
+    ///
+    /// **경로 파라미터가 있으면 이 값을 쓰지 않는다** — 아래 `suggested_rewrite_regex` 를 쓴다.
     pub suggested_rewrite: String,
+    /// 신규 생성 폼의 `proxy-rewrite.regex_uri` 후보 (패턴, 치환) — 파라미터가 없으면 빈 배열.
+    ///
+    /// `proxy-rewrite.uri` 는 정적 문자열이라 `{VNDRCD}` 를 치환하지 않는다. 파라미터가 있는
+    /// path 를 `uri` 로 프리필하면 중괄호가 리터럴로 upstream 에 나간다 (`oas::to_rewrite_regex`).
+    pub suggested_rewrite_regex: Vec<String>,
 }
 
 pub const REGISTERED: &str = "registered";
@@ -949,9 +979,15 @@ pub fn compare(
 
         if last_seq != Some(seq) {
             last_seq = Some(seq);
+            let path: String = row.get(1).map_err(sql_err)?;
+            // 파라미터가 있는 path 는 regex 쌍을, 없으면 빈 배열을 준다. 열을 늘리지 않고
+            // 여기서 계산하는 이유는 `prefix` 와 `path` 가 이 자리에 둘 다 있기 때문이다.
+            let rewrite_regex = oas::to_rewrite_regex(prefix, &path)
+                .map(|(from, to)| vec![from, to])
+                .unwrap_or_default();
             acc.push((
                 CompareRow {
-                    path: row.get(1).map_err(sql_err)?,
+                    path: path.clone(),
                     full_path: row.get(2).map_err(sql_err)?,
                     method: row.get(3).map_err(sql_err)?,
                     operation_id: row.get(4).map_err(sql_err)?,
@@ -962,12 +998,14 @@ pub fn compare(
                     route_uri: String::new(),
                     route_desc: String::new(),
                     route_rewrite: String::new(),
+                    route_rewrite_regex: Vec::new(),
                     route_status: 0,
                     wildcard: false,
                     suggested_uri: row.get(8).map_err(sql_err)?,
                     suggested_name: row.get(9).map_err(sql_err)?,
                     // 접두사를 붙이지 않은 원본 path 가 곧 rewrite 후보다.
-                    suggested_rewrite: row.get(1).map_err(sql_err)?,
+                    suggested_rewrite: path,
+                    suggested_rewrite_regex: rewrite_regex,
                 },
                 None,
             ));
@@ -993,6 +1031,7 @@ pub fn compare(
             row.route_uri = r.uri;
             row.route_desc = r.desc;
             row.route_rewrite = r.rewrite;
+            row.route_rewrite_regex = r.rewrite_regex;
             row.route_status = r.status;
             row.wildcard = c.wildcard;
         }

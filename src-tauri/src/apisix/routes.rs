@@ -4,8 +4,9 @@
 //!
 //! 디자인의 `routeJson()` 은 `plugins` 를 통째로 교체한다. 그대로 구현하면 게이트웨이에
 //! 이미 붙어 있던 `limit-count` 같은 플러그인이 저장 시 사라진다. 그래서 저장 직전에
-//! 원본을 GET 해 와 **앱이 관리하는 키(`proxy-rewrite.uri`, `shi-auth.allowed_groups`)만
-//! 덮어쓰는** 머지 방식으로 처리한다.
+//! 원본을 GET 해 와 **앱이 관리하는 키(`proxy-rewrite.uri` · `proxy-rewrite.regex_uri` ·
+//! `shi-auth.allowed_groups`)만 덮어쓰는** 머지 방식으로 처리한다. `proxy-rewrite` 안의
+//! `scheme` · `headers` 처럼 앱이 모르는 키도 같은 이유로 보존된다.
 
 use reqwest::Method;
 use serde::Deserialize;
@@ -35,8 +36,16 @@ pub struct RouteForm {
     pub methods: Vec<String>,
     #[serde(default)]
     pub service_id: String,
+    /// `proxy-rewrite.uri` — `rewrite_mode` 가 `"uri"` 일 때만 쓴다.
     #[serde(default)]
     pub rewrite: String,
+    /// `"uri"` | `"regex"`. 어느 키를 남길지 정한다 (`apply_route_form` 주석 참조).
+    /// 빈 값은 `"uri"` 로 읽는다 — 이 필드가 없던 시절의 본문도 그대로 받는다.
+    #[serde(default)]
+    pub rewrite_mode: String,
+    /// `proxy-rewrite.regex_uri` — 배열 그대로. 폼은 첫 쌍만 편집하고 나머지는 여기 실려 온다.
+    #[serde(default)]
+    pub rewrite_regex: Vec<String>,
     #[serde(default)]
     pub groups: Vec<String>,
     /// 디자인상 등록 시 1(활성) 고정. 기존 항목은 원래 status 를 유지한다.
@@ -58,7 +67,43 @@ impl RouteForm {
         if self.service_id.trim().is_empty() {
             return Err(AppError::config("service_id 는 필수입니다."));
         }
+        if self.is_regex_rewrite() {
+            let v = self.regex_values();
+            // 전부 비었으면 "rewrite 없음" 이다 — uri 모드에서 빈 칸을 둔 것과 같이 다룬다.
+            // 반쯤 채운 것만 막는다. 그대로 보내면 게이트웨이가 스키마 오류로 거부하는데,
+            // 무엇이 비었는지는 여기가 안다.
+            if !v.is_empty() {
+                if v.iter().any(String::is_empty) {
+                    return Err(AppError::config(
+                        "regex_uri 는 패턴과 치환값을 모두 입력해야 합니다.",
+                    ));
+                }
+                // APISIX 는 쌍 단위로 시도한다 (minItems = 2). 홀수면 짝 없는 항목이 남는다.
+                if v.len() % 2 != 0 {
+                    return Err(AppError::config(
+                        "regex_uri 는 (패턴, 치환값) 쌍이어야 합니다.",
+                    ));
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// `proxy-rewrite` 를 `regex_uri` 로 쓰는가.
+    fn is_regex_rewrite(&self) -> bool {
+        self.rewrite_mode.trim() == "regex"
+    }
+
+    /// 다듬은 `regex_uri` 항목들. **전부 비었으면 빈 벡터**다 (= rewrite 없음).
+    ///
+    /// 중간의 빈 항목은 걸러 내지 않는다 — 걸러 내면 쌍이 밀려 엉뚱한 패턴·치환이 짝이 된다.
+    /// 그 상태는 `validate` 가 막는다.
+    fn regex_values(&self) -> Vec<String> {
+        let v: Vec<String> = self.rewrite_regex.iter().map(|s| s.trim().to_string()).collect();
+        if v.iter().all(String::is_empty) {
+            return Vec::new();
+        }
+        v
     }
 }
 
@@ -205,13 +250,33 @@ fn apply_route_form(base: Value, f: &RouteForm, is_new: bool) -> Value {
     // ── plugins 머지 ────────────────────────────────────────
     let mut plugins = obj(m.remove("plugins").unwrap_or(Value::Null));
 
-    // proxy-rewrite.uri — 다른 proxy-rewrite 설정(headers 등)은 건드리지 않는다.
-    let rewrite = f.rewrite.trim();
+    // proxy-rewrite — 다른 설정(headers · scheme 등)은 건드리지 않는다.
+    //
+    // `uri` 와 `regex_uri` 중 **항상 한쪽만 남긴다.** APISIX 의 proxy-rewrite 는
+    // `if conf.uri ~= nil then … elseif conf.regex_uri ~= nil then` 순서라 `uri` 가 있으면
+    // `regex_uri` 를 아예 보지 않는다 (스키마 주석: "lower priority than uri property").
+    // 둘을 함께 남기면 화면에는 regex 가 보이는데 게이트웨이는 uri 로 도는 상태가 된다.
     let mut pr = obj(plugins.remove("proxy-rewrite").unwrap_or(Value::Null));
-    if rewrite.is_empty() {
+    if f.is_regex_rewrite() {
         pr.remove("uri");
+        let values = f.regex_values();
+        // validate 가 반쯤 채운 것과 홀수를 막지만, 저장 경로가 늘어도 깨지지 않게 여기서도 본다.
+        if values.len() >= 2 && values.len() % 2 == 0 && !values.iter().any(String::is_empty) {
+            pr.insert(
+                "regex_uri".into(),
+                Value::Array(values.into_iter().map(Value::String).collect()),
+            );
+        } else {
+            pr.remove("regex_uri");
+        }
     } else {
-        pr.insert("uri".into(), Value::String(rewrite.to_string()));
+        pr.remove("regex_uri");
+        let rewrite = f.rewrite.trim();
+        if rewrite.is_empty() {
+            pr.remove("uri");
+        } else {
+            pr.insert("uri".into(), Value::String(rewrite.to_string()));
+        }
     }
     if !pr.is_empty() {
         plugins.insert("proxy-rewrite".into(), Value::Object(pr));
@@ -232,6 +297,12 @@ fn apply_route_form(base: Value, f: &RouteForm, is_new: bool) -> Value {
     Value::Object(m)
 }
 
+
+/// 테스트에서 입력 검증만 따로 보기 위한 통로 (`validate` 는 비공개다).
+#[cfg(test)]
+pub fn validate_for_test(f: &RouteForm) -> AppResult<()> {
+    f.validate()
+}
 
 /// 테스트에서 머지 로직만 따로 검증하기 위한 얇은 래퍼.
 #[cfg(test)]

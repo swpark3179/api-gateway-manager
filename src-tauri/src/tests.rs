@@ -129,6 +129,8 @@ fn route_save_preserves_unknown_plugins() {
         methods: vec!["GET".into(), "POST".into()],
         service_id: "svc-order-core".into(),
         rewrite: "/orders/v2".into(),
+        rewrite_mode: "uri".into(),
+        rewrite_regex: vec![],
         groups: vec!["ops-admin".into(), "order-dev".into()],
         status: Some(0),
         groups_location: None,
@@ -171,6 +173,8 @@ fn new_route_is_always_active() {
         methods: vec![],
         service_id: "svc-1".into(),
         rewrite: String::new(),
+        rewrite_mode: String::new(),
+        rewrite_regex: vec![],
         groups: vec![],
         status: None,
         groups_location: None,
@@ -185,6 +189,146 @@ fn new_route_is_always_active() {
     // 쉼표가 있으면 uris 배열로 저장한다.
     assert_eq!(body.get("uris").unwrap(), &json!(["/a", "/b"]));
     assert!(body.get("uri").is_none());
+}
+
+/// `uri` 와 `regex_uri` 는 **절대 함께 남지 않는다.**
+///
+/// APISIX proxy-rewrite 는 `if conf.uri ~= nil then … elseif conf.regex_uri ~= nil then` 이라
+/// `uri` 가 있으면 regex 를 아예 보지 않는다. 둘이 함께 남으면 화면에는 regex 가 보이는데
+/// 게이트웨이는 uri 로 도는, 눈으로 잡을 수 없는 상태가 된다.
+#[test]
+fn rewrite_modes_are_mutually_exclusive() {
+    use crate::apisix::routes::{apply_route_form_for_test, RouteForm};
+
+    let base = || {
+        json!({
+            "plugins": {
+                "limit-count": { "count": 7 },
+                "proxy-rewrite": {
+                    "uri": "/old",
+                    "scheme": "http",
+                    "headers": { "X-Src": "gw" }
+                }
+            }
+        })
+    };
+    let form = |mode: &str, rewrite: &str, regex: Vec<&str>| RouteForm {
+        id: Some("1".into()),
+        name: "r".into(),
+        uri: "/evcp/Vendor/GRP/*".into(),
+        desc: String::new(),
+        methods: vec!["GET".into()],
+        service_id: "svc".into(),
+        rewrite: rewrite.into(),
+        rewrite_mode: mode.into(),
+        rewrite_regex: regex.into_iter().map(String::from).collect(),
+        groups: vec![],
+        status: None,
+        groups_location: None,
+    };
+
+    // regex 모드 → regex_uri 만 남고 uri 는 사라진다.
+    let body = apply_route_form_for_test(
+        base(),
+        &form("regex", "/ignored", vec!["^/evcp/Vendor/GRP/(.*)", "/Vendor/GRP/$1"]),
+        false,
+    );
+    let pr = body.pointer("/plugins/proxy-rewrite").unwrap();
+    assert_eq!(
+        pr.get("regex_uri").unwrap(),
+        &json!(["^/evcp/Vendor/GRP/(.*)", "/Vendor/GRP/$1"])
+    );
+    assert!(pr.get("uri").is_none(), "regex 모드에서 uri 가 남으면 regex 가 무시된다");
+    // 같은 플러그인 안의 다른 키와 다른 플러그인은 그대로다.
+    assert_eq!(pr.get("scheme").unwrap(), "http");
+    assert_eq!(pr.pointer("/headers/X-Src").unwrap(), "gw");
+    assert_eq!(body.pointer("/plugins/limit-count/count").unwrap(), 7);
+
+    // 되돌아오면 regex_uri 가 지워진다 — 남겨 두면 uri 뒤에서 조용히 죽은 설정이 된다.
+    let back = json!({ "plugins": { "proxy-rewrite": {
+        "regex_uri": ["^/a/(.*)", "/b/$1"], "scheme": "http" } } });
+    let body = apply_route_form_for_test(back, &form("uri", "/orders", vec![]), false);
+    let pr = body.pointer("/plugins/proxy-rewrite").unwrap();
+    assert_eq!(pr.get("uri").unwrap(), "/orders");
+    assert!(pr.get("regex_uri").is_none());
+    assert_eq!(pr.get("scheme").unwrap(), "http");
+}
+
+/// 폼은 첫 쌍만 편집하지만, 게이트웨이에 있던 나머지 쌍은 사라지지 않아야 한다.
+/// APISIX 의 regex_uri 는 쌍을 앞에서부터 시도하므로 뒤쪽 쌍도 살아 있는 규칙이다.
+#[test]
+fn rewrite_regex_keeps_extra_pairs() {
+    use crate::apisix::routes::{apply_route_form_for_test, RouteForm};
+
+    let form = RouteForm {
+        id: Some("1".into()),
+        name: "r".into(),
+        uri: "/a/*".into(),
+        desc: String::new(),
+        methods: vec!["GET".into()],
+        service_id: "svc".into(),
+        rewrite: String::new(),
+        rewrite_mode: "regex".into(),
+        // 첫 쌍만 고치고 세 번째·네 번째는 조회한 값을 그대로 실어 보낸 상태다.
+        rewrite_regex: ["^/a/(.*)", "/b/$1", "^/other/(.*)", "/other"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        groups: vec![],
+        status: None,
+        groups_location: None,
+    };
+
+    let body = apply_route_form_for_test(json!({}), &form, false);
+    assert_eq!(
+        body.pointer("/plugins/proxy-rewrite/regex_uri").unwrap(),
+        &json!(["^/a/(.*)", "/b/$1", "^/other/(.*)", "/other"])
+    );
+}
+
+/// 두 칸을 다 비우면 "rewrite 없음" 이다 — uri 모드에서 빈 칸을 둔 것과 같이 다룬다.
+/// 반쯤 채운 것은 저장 전에 막는다 (게이트웨이가 스키마 오류로 거부하는데, 무엇이 비었는지는
+/// 여기가 안다).
+#[test]
+fn blank_regex_pair_removes_the_key() {
+    use crate::apisix::routes::{apply_route_form_for_test, validate_for_test, RouteForm};
+
+    let form = |regex: Vec<&str>| RouteForm {
+        id: Some("1".into()),
+        name: "r".into(),
+        uri: "/a/*".into(),
+        desc: String::new(),
+        methods: vec![],
+        service_id: "svc".into(),
+        rewrite: String::new(),
+        rewrite_mode: "regex".into(),
+        rewrite_regex: regex.into_iter().map(String::from).collect(),
+        groups: vec![],
+        status: None,
+        groups_location: None,
+    };
+    let base = || json!({ "plugins": { "proxy-rewrite": { "regex_uri": ["^/x/(.*)", "/y/$1"] } } });
+
+    // 전부 비었다 → 키를 지운다. 저장도 통과한다.
+    for blank in [vec![], vec!["", ""], vec!["   ", ""]] {
+        let f = form(blank);
+        assert!(validate_for_test(&f).is_ok());
+        assert!(apply_route_form_for_test(base(), &f, false)
+            .pointer("/plugins/proxy-rewrite/regex_uri")
+            .is_none());
+    }
+
+    // 반쯤 채웠다 → 저장을 막는다.
+    assert!(validate_for_test(&form(vec!["^/a/(.*)", "   "])).is_err());
+    // 홀수 → 짝 없는 항목이 남는다.
+    assert!(validate_for_test(&form(vec!["^/a/(.*)", "/b/$1", "^/c/(.*)"])).is_err());
+    // 정상 쌍은 통과한다.
+    assert!(validate_for_test(&form(vec!["^/a/(.*)", "/b/$1"])).is_ok());
+
+    // 중간이 비어도 **걸러 내지 않는다** — 걸러 내면 쌍이 밀려 엉뚱한 짝이 만들어진다.
+    assert!(apply_route_form_for_test(base(), &form(vec!["^/a/(.*)", "", "^/c/(.*)", "/d"]), false)
+        .pointer("/plugins/proxy-rewrite/regex_uri")
+        .is_none());
 }
 
 #[test]
@@ -394,8 +538,38 @@ fn route_view_reads_plugin_fields() {
     assert_eq!(r.id, "7"); // 숫자 id 도 문자열로 정규화된다
     assert_eq!(r.uri, "/api/v1/invoices/*"); // uris → uri 표기
     assert_eq!(r.rewrite, "/invoices/*");
+    assert!(r.rewrite_regex.is_empty());
     assert_eq!(r.groups, vec!["billing-ops"]);
     assert_eq!(r.status, 0);
+}
+
+/// `regex_uri` 를 읽지 못하면 목록의 proxy-rewrite 칸이 빈칸이 되고, 폼이 그 자리에 `uri` 를
+/// 써 넣어 두 키가 공존하는 본문이 만들어진다 (그러면 regex 가 조용히 죽는다).
+#[test]
+fn route_view_reads_regex_rewrite() {
+    use crate::apisix::models::RouteView;
+
+    let r = RouteView::from_value(&json!({
+        "id": "8",
+        "uri": "/evcp/Vendor/CMCTB_VENDOR_GRP/*",
+        "plugins": { "proxy-rewrite": {
+            "regex_uri": ["^/evcp/Vendor/CMCTB_VENDOR_GRP/(.*)", "/Vendor/CMCTB_VENDOR_GRP/$1"],
+            "scheme": "http"
+        }}
+    }));
+    assert_eq!(r.rewrite, "", "uri 키는 없다");
+    assert_eq!(
+        r.rewrite_regex,
+        ["^/evcp/Vendor/CMCTB_VENDOR_GRP/(.*)", "/Vendor/CMCTB_VENDOR_GRP/$1"]
+    );
+
+    // 쌍이 셋 이상이어도 잘리지 않는다 — 폼이 첫 쌍만 편집해도 나머지가 보존되는 근거다.
+    let many = RouteView::from_value(&json!({
+        "id": "9",
+        "plugins": { "proxy-rewrite": {
+            "regex_uri": ["^/a/(.*)", "/b/$1", "^/c/(.*)", "/d"] }}
+    }));
+    assert_eq!(many.rewrite_regex.len(), 4);
 }
 
 // ── 4. JWT ───────────────────────────────────────────────────
@@ -679,6 +853,86 @@ fn suggests_apisix_uri_from_oas_path() {
     assert_eq!(oas::to_apisix_uri("v1/", "/pets/{id}/x"), "/v1/pets/:id/x");
     assert_eq!(oas::join_path("/v1", "/"), "/v1");
     assert_eq!(oas::join_path("", "pets"), "/pets");
+}
+
+#[test]
+fn builds_rewrite_regex_for_paths_with_params() {
+    use crate::oas;
+
+    // 사용자가 준 그대로의 사례. uri 는 `/evcp/Vendor/CMCTB_VENDOR_GRP/*` 이고,
+    // 그 `*` 자리를 `(.*)` 가 받아 `$1` 로 upstream 에 넘긴다.
+    assert_eq!(
+        oas::to_rewrite_regex("/evcp", "/Vendor/CMCTB_VENDOR_GRP/{VNDRCD}"),
+        Some((
+            "^/evcp/Vendor/CMCTB_VENDOR_GRP/(.*)".into(),
+            "/Vendor/CMCTB_VENDOR_GRP/$1".into()
+        ))
+    );
+
+    // 중간 파라미터는 uri 에서 `:name` 이라 한 세그먼트만 먹는다 → `([^/]+)`.
+    assert_eq!(
+        oas::to_rewrite_regex("/v1", "/orders/{orderId}/items"),
+        Some(("^/v1/orders/([^/]+)/items".into(), "/orders/$1/items".into()))
+    );
+
+    // 파라미터가 여럿이면 왼쪽부터 번호를 매긴다. 마지막만 `(.*)` 다.
+    assert_eq!(
+        oas::to_rewrite_regex("", "/a/{x}/b/{y}"),
+        Some(("^/a/([^/]+)/b/(.*)".into(), "/a/$1/b/$2".into()))
+    );
+
+    // 접두사가 없어도 치환값은 같다 — upstream 이 아는 경로에는 접두사가 붙지 않는다.
+    assert_eq!(
+        oas::to_rewrite_regex("", "/Vendor/GRP/{CD}"),
+        Some(("^/Vendor/GRP/(.*)".into(), "/Vendor/GRP/$1".into()))
+    );
+
+    // 파라미터가 없으면 정적 문자열 하나로 충분하다 → proxy-rewrite.uri 를 계속 쓴다.
+    assert_eq!(oas::to_rewrite_regex("/v1", "/pets"), None);
+    assert_eq!(oas::to_rewrite_regex("", "/"), None);
+}
+
+#[test]
+fn rewrite_regex_escapes_literal_segments() {
+    use crate::oas;
+
+    // `.` 를 그대로 두면 `/v1X0/…` 까지 매칭돼 엉뚱한 요청이 rewrite 된다.
+    let (from, to) = oas::to_rewrite_regex("/v1.0", "/a.b/{id}").unwrap();
+    assert_eq!(from, r"^/v1\.0/a\.b/(.*)");
+    assert_eq!(to, "/a.b/$1", "치환값은 이스케이프하지 않는다 — 정규식이 아니다");
+}
+
+#[test]
+fn route_name_drops_only_a_trailing_param_segment() {
+    use crate::oas;
+
+    // 마지막 파라미터는 uri 에서 `*` 가 되어 route 하나가 모든 값을 처리한다.
+    // 이름도 실제로 매칭하는 구간까지만 적는다.
+    assert_eq!(
+        oas::suggested_name("/evcp", "/Vendor/CMCTB_VENDOR_GRP/{VNDRCD}"),
+        "EVCP/Vendor/CMCTB_VENDOR_GRP"
+    );
+    assert_eq!(
+        oas::suggested_name_for("EP_", "/v1", "/Vendor/GRP/{CD}"),
+        "EP_Vendor/GRP"
+    );
+
+    // 중간 파라미터는 그대로 둔다 — 뒤의 정적 세그먼트가 API 를 구분하는 정보다.
+    assert_eq!(
+        oas::suggested_name("/v1", "/orders/{orderId}/items"),
+        "V1/orders/{orderId}/items"
+    );
+
+    // 뗀 결과가 또 파라미터로 끝나도 반복해서 떼지 않는다.
+    assert_eq!(oas::suggested_name("", "/a/{x}/{y}"), "a/{x}");
+
+    // 떼면 남는 것이 없는 path 는 원본을 유지한다 — 접두사만인 이름을 만들지 않는다.
+    assert_eq!(oas::suggested_name("/v1", "/{id}"), "V1/{id}");
+    assert_eq!(oas::suggested_name_for("EP_", "/v1", "/{id}"), "EP_{id}");
+
+    // `:id` · `*` 표기도 같은 파라미터로 본다 (`to_apisix_uri` 와 같은 판정).
+    assert_eq!(oas::suggested_name("", "/pets/:petId"), "pets");
+    assert_eq!(oas::suggested_name("", "/pets/*"), "pets");
 }
 
 #[test]
@@ -966,6 +1220,49 @@ mod compare {
         assert_eq!(r.suggested_uri, "/v1/orders/:orderId/items");
         // proxy-rewrite.uri — upstream 이 아는 경로는 접두사가 없는 원본 path 다
         assert_eq!(r.suggested_rewrite, "/orders/{orderId}/items");
+        // 파라미터가 있으므로 regex 쌍도 함께 내려간다. 폼은 이쪽을 쓴다 —
+        // 위의 suggested_rewrite 를 그대로 저장하면 `{orderId}` 가 리터럴로 upstream 에 간다.
+        assert_eq!(
+            r.suggested_rewrite_regex,
+            ["^/v1/orders/([^/]+)/items", "/orders/$1/items"]
+        );
+    }
+
+    /// 사용자가 준 사례를 표 전체 경로로 한 번 더 고정한다 (`oas` 단위 테스트와 별개로,
+    /// `db::compare` 가 접두사를 regex 에 실제로 실어 보내는지 본다).
+    #[test]
+    fn prefills_regex_rewrite_for_dynamic_paths() {
+        let c = conn();
+        db::load_oas_ops(
+            &c,
+            &[
+                op("GET", "/Vendor/CMCTB_VENDOR_GRP/{VNDRCD}"),
+                op("POST", "/Vendor/CMCTB_VENDOR_GRP/{VNDRCD}"),
+                op("GET", "/Vendor/CMCTB_VENDOR_GRP"),
+            ],
+        )
+        .unwrap();
+
+        let rows = db::compare(&c, "dev", "svc", "/evcp").unwrap();
+
+        // 같은 path 의 GET · POST 는 서로 다른 행(=서로 다른 API)이다.
+        for r in rows.iter().take(2) {
+            assert_eq!(r.suggested_uri, "/evcp/Vendor/CMCTB_VENDOR_GRP/*");
+            assert_eq!(
+                r.suggested_rewrite_regex,
+                ["^/evcp/Vendor/CMCTB_VENDOR_GRP/(.*)", "/Vendor/CMCTB_VENDOR_GRP/$1"]
+            );
+            // 마지막 파라미터를 뗀 이름이라 두 행의 name 이 같아진다 (화면이 경고한다).
+            assert_eq!(r.suggested_name, "EVCP/Vendor/CMCTB_VENDOR_GRP");
+        }
+        assert_eq!(rows[0].method, "GET");
+        assert_eq!(rows[1].method, "POST");
+
+        // 파라미터가 없는 path 는 예전 그대로 — 정적 rewrite 를 쓴다.
+        let plain = &rows[2];
+        assert!(plain.suggested_rewrite_regex.is_empty());
+        assert_eq!(plain.suggested_rewrite, "/Vendor/CMCTB_VENDOR_GRP");
+        assert_eq!(plain.suggested_name, "EVCP/Vendor/CMCTB_VENDOR_GRP");
     }
 
     #[test]
@@ -1050,27 +1347,27 @@ fn sqlite_search_and_counts_replace_the_old_array_filter() {
     .unwrap();
 
     // 검색어 없음 → 전체, 원래 순서 유지.
-    let page = db::query_routes(&c, "dev", "all", "", &ALL).unwrap();
+    let page = db::query_routes(&c, "dev", "all", "", "", &ALL).unwrap();
     assert_eq!(page.total, 3);
     assert_eq!(page.items.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);
 
     // 예전 필터가 JSON 전체를 훑었으므로 name·uri 어느 쪽으로도 잡혀야 한다.
-    assert_eq!(db::query_routes(&c, "dev", "all", "pet", &ALL).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "/orders", &ALL).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "API", &ALL).unwrap().total, 3, "대소문자 무시");
+    assert_eq!(db::query_routes(&c, "dev", "all", "pet", "", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "/orders", "", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "API", "", &ALL).unwrap().total, 3, "대소문자 무시");
 
     // '_' 가 LIKE 의 단일문자 와일드카드로 해석되면 안 된다.
-    assert_eq!(db::query_routes(&c, "dev", "all", "legacy_v1", &ALL).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "legacyXv1", &ALL).unwrap().total, 0);
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacy_v1", "", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacyXv1", "", &ALL).unwrap().total, 0);
 
     // chip 은 status 로 나눈다.
-    assert_eq!(db::query_routes(&c, "dev", "on", "", &ALL).unwrap().total, 2);
-    assert_eq!(db::query_routes(&c, "dev", "off", "", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "on", "", "", &ALL).unwrap().total, 2);
+    assert_eq!(db::query_routes(&c, "dev", "off", "", "", &ALL).unwrap().total, 1);
 
     // counts 는 chip 을 빼고 검색어만 반영한다 — chip 을 눌러도 라벨 숫자가 흔들리지 않아야 한다.
-    let page = db::query_routes(&c, "dev", "off", "", &ALL).unwrap();
+    let page = db::query_routes(&c, "dev", "off", "", "", &ALL).unwrap();
     assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
-    let page = db::query_routes(&c, "dev", "all", "api", &ALL).unwrap();
+    let page = db::query_routes(&c, "dev", "all", "api", "", &ALL).unwrap();
     assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
 
     // 단건 조회 (Import 결과 → 상세 이동 경로).
@@ -1079,8 +1376,72 @@ fn sqlite_search_and_counts_replace_the_old_array_filter() {
 
     // 재동기화는 전체 교체다 — 게이트웨이에서 사라진 라우트가 남으면 Import 가 잘못 판정한다.
     db::sync_routes(&c, "dev", &[mk("1", "order-api", "/orders", 1)]).unwrap();
-    assert_eq!(db::query_routes(&c, "dev", "all", "", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "", "", &ALL).unwrap().total, 1);
     assert!(db::route_view(&c, "dev", "2").unwrap().is_none());
+}
+
+/// name 접두사는 검색어와 **다른 축**이다 — 이름이 그 문자열로 시작하는가만 본다.
+#[test]
+fn name_prefix_filters_by_start_of_name() {
+    use crate::apisix::models::RouteView;
+    use crate::db;
+    use rusqlite::Connection;
+
+    const ALL: db::RouteScope = db::RouteScope::All;
+
+    let c = Connection::open_in_memory().unwrap();
+    db::init(&c).unwrap();
+
+    let mk = |id: &str, name: &str, status: i64| {
+        RouteView::from_value(&json!({
+            "id": id, "name": name, "uri": "/x", "status": status,
+            "service_id": "svc", "methods": ["GET"],
+        }))
+    };
+    db::sync_routes(
+        &c,
+        "dev",
+        &[
+            mk("1", "EP_orders", 1),
+            mk("2", "EP_pets", 0),
+            mk("3", "EPXother", 1),
+            mk("4", "V1/orders", 1),
+            mk("5", "legacy-EP_orders", 1),
+        ],
+    )
+    .unwrap();
+
+    let ids = |pfx: &str| -> Vec<String> {
+        db::query_routes(&c, "dev", "all", "", pfx, &ALL)
+            .unwrap()
+            .items
+            .iter()
+            .map(|r| r.id.clone())
+            .collect()
+    };
+
+    // 빈 값은 "조건 없음" 이다.
+    assert_eq!(ids("").len(), 5);
+
+    // 접두사로 시작하는 것만. `_` 를 LIKE 의 단일문자 와일드카드로 읽으면 EPXother 가 딸려 온다.
+    assert_eq!(ids("EP_"), ["1", "2"]);
+    // 이름 **중간**에 들어간 접두사는 걸리지 않는다 (검색어 축과 갈리는 지점).
+    assert!(!ids("EP_").contains(&"5".to_string()));
+    assert_eq!(ids("V1/"), ["4"]);
+
+    // 대소문자는 무시한다 — 경로에서 파생한 접두어(V1/)와 사용자가 등록한 것(ep_)이 섞인다.
+    assert_eq!(ids("ep_"), ["1", "2"]);
+    assert_eq!(ids("  EP_  "), ["1", "2"], "앞뒤 공백은 다듬는다");
+
+    // 다른 축과는 AND 로 걸린다.
+    assert_eq!(db::query_routes(&c, "dev", "on", "", "EP_", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "pets", "EP_", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "orders", "V1/", &ALL).unwrap().total, 1);
+
+    // counts 는 chip 만 빼고 접두사는 반영한다. 반영하지 않으면 `?5` 가 여기서 바인딩되지 않아
+    // rusqlite 가 InvalidParameterCount 를 던진다 — 이 assert 가 그것까지 잡는다.
+    let page = db::query_routes(&c, "dev", "on", "", "EP_", &ALL).unwrap();
+    assert_eq!((page.counts.all, page.counts.on, page.counts.off), (2, 1, 1));
 }
 
 // ── 11. 담당자 (labels · name{n} / dept{n}) ──────────────────
@@ -1316,7 +1677,7 @@ mod access {
         .unwrap();
 
         let total =
-            |scope: &db::RouteScope| db::query_routes(&c, "dev", "all", "", scope).unwrap().total;
+            |scope: &db::RouteScope| db::query_routes(&c, "dev", "all", "", "", scope).unwrap().total;
 
         assert_eq!(total(&ALL), 3, "필터 없으면 전체");
         assert_eq!(total(&user("alpha")), 1);
@@ -1325,7 +1686,7 @@ mod access {
 
         // allowed_groups 가 빈 라우트는 어떤 컨슈머로도 걸리지 않는다.
         // (그래서 좌측 패널이 '그룹 제한 없음' 건수를 따로 보여 준다)
-        let names: Vec<String> = db::query_routes(&c, "dev", "all", "", &user("beta"))
+        let names: Vec<String> = db::query_routes(&c, "dev", "all", "", "", &user("beta"))
             .unwrap()
             .items
             .iter()
@@ -1342,7 +1703,7 @@ mod access {
         db::sync_routes(&c, "dev", &[route("1", "both", 1, json!(["a", "b"]))]).unwrap();
         db::sync_consumers(&c, "dev", &[consumer("u", json!(["a", "b"]))]).unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", &user("u")).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", "", &user("u")).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.counts.all, 1);
@@ -1367,14 +1728,14 @@ mod access {
 
         // chip 을 눌러도 라벨 숫자는 그대로다.
         for chip in ["all", "on", "off"] {
-            let counts = db::query_routes(&c, "dev", chip, "", &user("alpha")).unwrap().counts;
+            let counts = db::query_routes(&c, "dev", chip, "", "", &user("alpha")).unwrap().counts;
             assert_eq!((counts.all, counts.on, counts.off), (2, 1, 1), "chip={chip}");
         }
         // 반면 total 은 chip 을 반영한다.
-        assert_eq!(db::query_routes(&c, "dev", "on", "", &user("alpha")).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "on", "", "", &user("alpha")).unwrap().total, 1);
 
         // 검색어도 반영한다.
-        let counts = db::query_routes(&c, "dev", "all", "partner-on", &user("alpha")).unwrap().counts;
+        let counts = db::query_routes(&c, "dev", "all", "partner-on", "", &user("alpha")).unwrap().counts;
         assert_eq!((counts.all, counts.on, counts.off), (1, 1, 0));
     }
 
@@ -1423,7 +1784,7 @@ mod access {
         db::sync_routes(&c, "dev", &[route("1", "r", 1, json!(["Partner"]))]).unwrap();
         db::sync_consumers(&c, "dev", &[consumer("u", json!(["partner"]))]).unwrap();
 
-        assert_eq!(db::query_routes(&c, "dev", "all", "", &user("u")).unwrap().total, 0);
+        assert_eq!(db::query_routes(&c, "dev", "all", "", "", &user("u")).unwrap().total, 0);
         assert_eq!(db::consumer_access_counts(&c, "dev").unwrap().items[0].count, 0);
     }
 
@@ -1436,7 +1797,7 @@ mod access {
         // CSV 표기도 같은 경로를 탄다.
         db::sync_consumers(&c, "dev", &[consumer("u", json!("ops, ops"))]).unwrap();
 
-        assert_eq!(db::query_routes(&c, "dev", "all", "", &user("u")).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "", "", &user("u")).unwrap().total, 1);
         assert_eq!(db::consumer_access_counts(&c, "dev").unwrap().items[0].count, 1);
     }
 
@@ -1504,11 +1865,11 @@ mod access {
         db::sync_routes(&c, "prod", &[route("9", "prod-r", 1, json!(["shared"]))]).unwrap();
         db::sync_consumers(&c, "dev", &[consumer("u", json!(["shared"]))]).unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", &user("u")).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", "", &user("u")).unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].name, "dev-r");
         // prod 에는 그 username 의 컨슈머가 없으니 아무것도 안 걸린다.
-        assert_eq!(db::query_routes(&c, "prod", "all", "", &user("u")).unwrap().total, 0);
+        assert_eq!(db::query_routes(&c, "prod", "all", "", "", &user("u")).unwrap().total, 0);
     }
 
     /// '그룹 제한 없음' 범위 — allowed_groups 가 빈 라우트만 남는다.
@@ -1530,7 +1891,7 @@ mod access {
         .unwrap();
         db::sync_consumers(&c, "dev", &[consumer("alpha", json!(["partner"]))]).unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", &UNGROUPED).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", "", &UNGROUPED).unwrap();
         assert_eq!(
             page.items.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             ["free-on", "free-off"]
@@ -1539,20 +1900,20 @@ mod access {
         assert_eq!(page.total, db::consumer_access_counts(&c, "dev").unwrap().ungrouped);
 
         // chip · 검색어와 AND 로 겹친다.
-        assert_eq!(db::query_routes(&c, "dev", "on", "", &UNGROUPED).unwrap().total, 1);
-        assert_eq!(db::query_routes(&c, "dev", "all", "free-off", &UNGROUPED).unwrap().total, 1);
-        assert_eq!(db::query_routes(&c, "dev", "all", "partner", &UNGROUPED).unwrap().total, 0);
+        assert_eq!(db::query_routes(&c, "dev", "on", "", "", &UNGROUPED).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "free-off", "", &UNGROUPED).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "partner", "", &UNGROUPED).unwrap().total, 0);
 
         // chip 라벨의 숫자도 범위를 따라간다 — 컨슈머를 골랐을 때와 같은 이유다
         // (`counts_follow_the_selected_consumer_but_not_the_chip`). 여기서 `?4` 가
         // route_counts 에도 실제로 바인딩됐는지 드러난다.
         for chip in ["all", "on", "off"] {
-            let counts = db::query_routes(&c, "dev", chip, "", &UNGROUPED).unwrap().counts;
+            let counts = db::query_routes(&c, "dev", chip, "", "", &UNGROUPED).unwrap().counts;
             assert_eq!((counts.all, counts.on, counts.off), (2, 1, 1), "chip={chip}");
         }
 
         // 범위는 배타적이다 — 컨슈머를 고르면 그룹 없는 라우트는 안 보인다.
-        assert_eq!(db::query_routes(&c, "dev", "all", "", &user("alpha")).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "", "", &user("alpha")).unwrap().total, 1);
     }
 
     /// 새 절도 환경별로 격리돼야 한다 (`access_join_is_env_scoped` 와 같은 이유).
@@ -1567,10 +1928,10 @@ mod access {
         )
         .unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", &UNGROUPED).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", "", &UNGROUPED).unwrap();
         assert_eq!(page.items.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["dev-free"]);
 
-        let page = db::query_routes(&c, "prod", "all", "", &UNGROUPED).unwrap();
+        let page = db::query_routes(&c, "prod", "all", "", "", &UNGROUPED).unwrap();
         assert_eq!(page.items.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["prod-free"]);
     }
 

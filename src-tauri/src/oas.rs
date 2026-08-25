@@ -159,11 +159,46 @@ pub fn name_prefix(prefix: &str) -> String {
 
 /// route 명 프리필 — `name_prefix(prefix)` + 접두사를 뗀 OAS 원본 path.
 ///
-/// path 표기는 스펙 그대로 둔다 (`/orders/{orderId}` → `V1/orders/{orderId}`).
+/// path 표기는 스펙 그대로 둔다 (`/orders/{orderId}/items` → `V1/orders/{orderId}/items`).
 /// 게이트웨이 uri 는 `to_apisix_uri` 가 따로 만들고, 이름은 사람이 읽는 값이라
 /// 스펙과 같은 표기를 유지하는 편이 대조하기 쉽다.
+///
+/// 예외가 하나 있다 — **마지막 세그먼트가 파라미터면 뗀다** (`name_path` 참조).
 pub fn suggested_name(prefix: &str, path: &str) -> String {
-    join_name(&name_prefix(prefix), path)
+    join_name(&name_prefix(prefix), &name_path(path))
+}
+
+/// route 명에 쓸 path — **마지막 세그먼트가 파라미터면 그 세그먼트를 뗀다.**
+///
+/// 그 자리를 `to_apisix_uri` 가 `*` 로 바꿔 접두 매칭하므로 (`/Vendor/GRP/*`), route 하나가
+/// 그 파라미터의 **모든 값**을 처리한다. 이름에 특정 값처럼 보이는 자리표시자를 남기는 대신
+/// 실제로 매칭하는 구간까지만 적는다.
+///
+/// ```text
+/// "/Vendor/CMCTB_VENDOR_GRP/{VNDRCD}"  →  "/Vendor/CMCTB_VENDOR_GRP"
+/// "/orders/{orderId}/items"            →  "/orders/{orderId}/items"  (중간은 그대로)
+/// "/{id}"                              →  "/{id}"                    (떼면 접두사만 남는다)
+/// ```
+///
+/// **중간 파라미터는 건드리지 않는다.** 그 자리는 uri 에서 `:name` 이라 한 세그먼트만
+/// 매칭하고, 뒤에 오는 정적 세그먼트(`/items`)가 API 를 구분하는 정보이기 때문이다.
+/// 같은 이유로 뗀 결과가 또 파라미터로 끝나도(`/a/{x}/{y}` → `/a/{x}`) **반복해서 떼지 않는다.**
+///
+/// 파라미터 판정은 `to_apisix_uri` 와 **같은 `param_name`** 을 쓴다. 두 함수가 서로 다른
+/// 기준으로 세그먼트를 읽으면 "uri 는 `*` 인데 이름에는 자리표시자가 남는" 조합이 나온다.
+fn name_path(path: &str) -> String {
+    let trimmed = path.trim();
+    let segs: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    // 세그먼트가 하나뿐이면 떼고 남는 것이 없다 — 접두사만인 이름을 만들지 않는다.
+    if segs.len() < 2 || param_name(segs[segs.len() - 1]).is_none() {
+        return trimmed.to_string();
+    }
+    let mut out = String::new();
+    for seg in &segs[..segs.len() - 1] {
+        out.push('/');
+        out.push_str(seg);
+    }
+    out
 }
 
 /// route 명 프리필 — **service 의 `labels.name_prefix` 가 있으면 그것이 이긴다.**
@@ -173,18 +208,19 @@ pub fn suggested_name(prefix: &str, path: &str) -> String {
 /// 사용자가 Service 화면에서 명시적으로 등록한 값이라 앱이 몰래 바꿀 자리가 아니다.
 ///
 /// ```text
-/// ("EP_", "/v1", "/orders/{orderId}")  →  EP_orders/{orderId}
-/// ("EP/", "/v1", "/orders/{orderId}")  →  EP/orders/{orderId}
-/// ("",    "/v1", "/orders/{orderId}")  →  V1/orders/{orderId}   (경로 접두사 규칙)
+/// ("EP_", "/v1", "/orders/{orderId}/items")  →  EP_orders/{orderId}/items
+/// ("EP/", "/v1", "/orders/{orderId}/items")  →  EP/orders/{orderId}/items
+/// ("",    "/v1", "/orders/{orderId}/items")  →  V1/orders/{orderId}/items  (경로 접두사 규칙)
+/// ("EP_", "/v1", "/orders/{orderId}")        →  EP_orders   (마지막 파라미터는 뗀다)
 /// ```
 ///
-/// 접두어가 이겨도 `uri` · `proxy-rewrite.uri` 는 계속 경로 접두사를 따른다 — 이름만의 규약이다.
+/// 접두어가 이겨도 `uri` · `proxy-rewrite` 는 계속 경로 접두사를 따른다 — 이름만의 규약이다.
 pub fn suggested_name_for(service_prefix: &str, path_prefix: &str, path: &str) -> String {
     let svc = service_prefix.trim();
     if svc.is_empty() {
         return suggested_name(path_prefix, path);
     }
-    join_name(svc, path)
+    join_name(svc, &name_path(path))
 }
 
 /// 접두어 + 앞 슬래시를 뗀 path. 접두어가 어디서 왔든 이어 붙이는 규칙은 하나다.
@@ -385,6 +421,97 @@ fn param_name(seg: &str) -> Option<String> {
     let cleaned: String =
         inner.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
     Some(if cleaned.is_empty() { "param".to_string() } else { cleaned })
+}
+
+/// OAS path 를 `proxy-rewrite.regex_uri` 후보 (패턴, 치환) 로 바꾼다.
+///
+/// path 에 경로 파라미터가 **없으면 `None`** 이다 — 그때는 정적 문자열 하나로 충분하므로
+/// 계속 `proxy-rewrite.uri` 를 쓴다.
+///
+/// # 왜 파라미터가 있으면 uri 로는 안 되는가
+///
+/// `proxy-rewrite.uri` 는 정적 문자열이라 `{VNDRCD}` 를 치환하지 않는다. 그대로 두면
+/// upstream 에 중괄호가 **리터럴로** 나간다. 캡처한 세그먼트를 넘기려면 `regex_uri` 뿐이다.
+///
+/// ```text
+/// ("/evcp", "/Vendor/CMCTB_VENDOR_GRP/{VNDRCD}")
+///   →  ("^/evcp/Vendor/CMCTB_VENDOR_GRP/(.*)", "/Vendor/CMCTB_VENDOR_GRP/$1")
+/// ```
+///
+/// # 캡처 문법을 `to_apisix_uri` 와 맞춘다
+///
+/// 패턴은 **uri 가 매칭시킨 요청을 반드시 다시 매칭해야 한다.** 놓치면 rewrite 가 통째로
+/// 실패해 원래 경로가 그대로 upstream 에 간다. 그래서 세그먼트 분해와 파라미터 판정을
+/// `to_apisix_uri` 와 같은 `param_name` 으로 하고, 두 문법을 1:1 로 대응시킨다.
+///
+/// | 자리 | `to_apisix_uri` | 패턴 | 왜 |
+/// |---|---|---|---|
+/// | 마지막 세그먼트 | `*` (접두 매칭) | `(.*)` | `*` 뒤로는 슬래시를 포함해 뭐든 온다 |
+/// | 중간 세그먼트 | `:name` | `([^/]+)` | `:name` 은 한 세그먼트만 먹는다 |
+///
+/// 끝에 `$` 앵커를 붙이지 않는다 — 요청은 이미 route 의 `uri` 로 걸러져 들어오고,
+/// 마지막 `(.*)` 가 나머지를 삼킨다.
+///
+/// 치환값에는 **접두사가 붙지 않는다** (`proxy-rewrite.uri` 와 같은 계약 — upstream 이 아는
+/// 경로다). 캡처 번호는 접두사 쪽 파라미터까지 **함께 세어** 매긴다. 접두사에 파라미터가
+/// 들어오는 일은 드물지만, 거기서 번호가 하나 밀리면 엉뚱한 세그먼트가 upstream 으로 간다.
+pub fn to_rewrite_regex(prefix: &str, path: &str) -> Option<(String, String)> {
+    let joined = join_path(prefix, path);
+    let all: Vec<&str> = joined.split('/').filter(|s| !s.is_empty()).collect();
+    // 접두사가 차지하는 앞 세그먼트 수. 치환값은 여기부터 뒤만 쓴다.
+    let head = join_path(prefix, "").split('/').filter(|s| !s.is_empty()).count();
+
+    // 판정은 **path 쪽 파라미터**로만 한다. 접두사에만 파라미터가 있고 path 는 정적이면
+    // 치환값이 정적 문자열이라 regex 를 쓸 이유가 없다.
+    if !all.iter().skip(head).any(|seg| param_name(seg).is_some()) {
+        return None;
+    }
+
+    let last = all.len().saturating_sub(1);
+    let mut from = String::from("^");
+    let mut to = String::new();
+    let mut capture = 0usize;
+
+    for (i, seg) in all.iter().enumerate() {
+        let is_param = param_name(seg).is_some();
+        from.push('/');
+        if is_param {
+            capture += 1;
+            from.push_str(if i == last { "(.*)" } else { "([^/]+)" });
+        } else {
+            from.push_str(&escape_regex(seg));
+        }
+        if i >= head {
+            to.push('/');
+            if is_param {
+                to.push('$');
+                to.push_str(&capture.to_string());
+            } else {
+                to.push_str(seg);
+            }
+        }
+    }
+
+    if to.is_empty() {
+        to.push('/');
+    }
+    Some((from, to))
+}
+
+/// 정규식 리터럴로 쓰기 위해 메타문자를 이스케이프한다.
+///
+/// 경로 세그먼트에 `.` 나 `+` 가 들어가는 일은 흔하다 (`/v1.0/…`, `/a+b/…`). 이스케이프하지
+/// 않으면 패턴이 의도보다 넓게 매칭돼 엉뚱한 요청까지 rewrite 된다.
+fn escape_regex(seg: &str) -> String {
+    const META: &str = r"\.+*?()[]{}^$|";
+    let mut out = String::with_capacity(seg.len());
+    for c in seg.chars() {
+        if META.contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// 접두사와 path 를 `/` 하나로 이어 붙인다.

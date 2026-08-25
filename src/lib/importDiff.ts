@@ -32,8 +32,8 @@
  * 이 API 의 차이가 아니라 후보를 만들지 않는다. 두 본문에 똑같이 실려 diff 에서 조용히 지나간다.
  */
 
-import { specDesc } from "../types";
-import type { CompareRow, RouteFormState } from "../types";
+import { rewriteText, specDesc, specRewrite } from "../types";
+import type { CompareRow, RewriteMode, RouteFormState } from "../types";
 
 /** 스펙과 대조하는 네 필드. 체크박스 하나가 한 필드다. */
 export type FlagKey = "name" | "uri" | "rewrite" | "desc";
@@ -61,7 +61,10 @@ export const NO_SELECTION: DiffSelection = {
 export interface RouteAttrs {
   name: string;
   uri: string;
+  /** `proxy-rewrite.uri` — regex 모드면 빈 문자열이다 */
   rewrite: string;
+  /** `proxy-rewrite.regex_uri` — uri 모드면 빈 배열이다 */
+  rewriteRegex: string[];
   desc: string;
 }
 
@@ -70,22 +73,47 @@ export const attrsOfRow = (row: CompareRow): RouteAttrs => ({
   name: row.routeName,
   uri: row.routeUri,
   rewrite: row.routeRewrite,
+  rewriteRegex: row.routeRewriteRegex,
   desc: row.routeDesc,
 });
 
 /** 스펙이 제안하는 값. `desc` 만 여기서 만들고 나머지는 Rust 가 계산한 것이다. */
-export const specAttrs = (row: CompareRow): RouteAttrs => ({
-  name: row.suggestedName,
-  uri: row.suggestedUri,
-  rewrite: row.suggestedRewrite,
-  desc: specDesc(row),
-});
+export const specAttrs = (row: CompareRow): RouteAttrs => {
+  // 프리필(`routeFormFromOas`)과 **같은 함수**로 모드를 정한다. 두 곳에서 각자 정하면
+  // "신규로 만든 값" 과 "적용하겠다고 보여 준 값" 이 달라진다.
+  const rw = specRewrite(row);
+  return {
+    name: row.suggestedName,
+    uri: row.suggestedUri,
+    rewrite: rw.rewrite,
+    rewriteRegex: rw.rewriteRegex,
+    desc: specDesc(row),
+  };
+};
+
+/**
+ * `rewrite` 한 축의 비교 — `uri` 와 `regex_uri` 를 **함께** 본다.
+ *
+ * 체크박스는 계속 하나다. 두 키는 게이트웨이에서 한쪽만 살아 있는 값이라 서로 갈아 끼우는
+ * 관계이지 나란한 필드가 아니다. 따로 두면 "uri 만 지우고 regex 는 안 넣는" 선택이 가능해져
+ * rewrite 가 통째로 사라지는 상태를 만들 수 있다.
+ */
+const sameRewrite = (a: RouteAttrs, b: RouteAttrs): boolean =>
+  a.rewrite === b.rewrite &&
+  a.rewriteRegex.length === b.rewriteRegex.length &&
+  a.rewriteRegex.every((v, i) => v === b.rewriteRegex[i]);
 
 /** 스펙과 다른 필드. 표의 판정과 diff 화면이 **이 한 함수**만 본다. */
 export const changedKeys = (row: CompareRow, cur: RouteAttrs): FlagKey[] => {
   const next = specAttrs(row);
-  return FLAG_KEYS.filter((k) => cur[k] !== next[k]);
+  return FLAG_KEYS.filter((k) =>
+    k === "rewrite" ? !sameRewrite(cur, next) : cur[k] !== next[k],
+  );
 };
+
+/** 어느 키로 저장되는가 — diff 행의 label 에 쓴다. */
+const rewriteModeIn = (a: Pick<RouteAttrs, "rewriteRegex">): RewriteMode =>
+  a.rewriteRegex.length >= 2 ? "regex" : "uri";
 
 /**
  * 비교 결과 표의 판정.
@@ -154,6 +182,21 @@ export function diffFields(
       ? "표기 차이 — 현재 uri 가 와일드카드로 이 경로를 이미 매칭하고 있습니다."
       : "표기 차이 — 현재 uri 도 이 경로에 매칭됩니다 (그래서 '등록' 으로 판정됐습니다).";
 
+  const rewriteSame = !changedKeys(row, cur).includes("rewrite");
+  const curMode = rewriteModeIn(cur);
+  const nextMode = rewriteModeIn(next);
+  const rewriteEmpty = cur.rewrite.trim() === "" && cur.rewriteRegex.length < 2;
+  const rewriteNote = rewriteSame
+    ? undefined
+    : rewriteEmpty
+      ? "현재 proxy-rewrite 가 없습니다 — 적용하면 새로 추가됩니다."
+      : curMode !== nextMode
+        ? nextMode === "regex"
+          ? "`uri` 에서 `regex_uri` 로 바뀝니다 — 경로 파라미터를 upstream 으로 넘기려면 " +
+            "정규식 캡처가 필요합니다 (`uri` 는 정적 문자열이라 `{}` 를 치환하지 못합니다)."
+          : "`regex_uri` 에서 `uri` 로 바뀝니다 — 이 경로에는 파라미터가 없습니다."
+        : undefined;
+
   const uriWarns: string[] = [];
   if (cur.uri.includes(",")) {
     const n = cur.uri.split(",").filter((s) => s.trim()).length;
@@ -182,14 +225,12 @@ export function diffFields(
     },
     {
       key: "rewrite",
-      label: "plugins.proxy-rewrite.uri",
-      current: show(cur.rewrite),
-      next: show(next.rewrite),
-      same: cur.rewrite === next.rewrite,
-      note:
-        cur.rewrite.trim() === "" && next.rewrite.trim() !== ""
-          ? "현재 proxy-rewrite 가 없습니다 — 적용하면 새로 추가됩니다."
-          : undefined,
+      // 저장되는 키가 무엇인지 label 이 말해 준다 — 둘은 나란한 필드가 아니라 배타적이다.
+      label: `plugins.proxy-rewrite.${rewriteModeIn(next) === "regex" ? "regex_uri" : "uri"}`,
+      current: show(rewriteText(cur)),
+      next: show(rewriteText(next)),
+      same: rewriteSame,
+      note: rewriteNote,
     },
     {
       key: "desc",
@@ -235,7 +276,15 @@ export function applySelection(
     ...base,
     name: sel.name ? next.name : base.name,
     uri: sel.uri ? next.uri : base.uri,
-    rewrite: sel.rewrite ? next.rewrite : base.rewrite,
+    // 세 값을 **함께** 얹는다. 하나만 바꾸면 `uri` 와 `regex_uri` 가 공존하는 폼이 되고,
+    // APISIX 는 `uri` 를 우선하므로 화면에 보이는 regex 가 조용히 죽는다.
+    ...(sel.rewrite
+      ? specRewrite(row)
+      : {
+          rewrite: base.rewrite,
+          rewriteMode: base.rewriteMode,
+          rewriteRegex: base.rewriteRegex,
+        }),
     desc: sel.desc ? next.desc : base.desc,
   };
 }

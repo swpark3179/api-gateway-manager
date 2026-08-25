@@ -164,9 +164,13 @@ pub fn routes_query(
     env: Env,
     chip: String,
     q: String,
+    // 프런트는 `namePrefix` 로 보낸다 — Tauri 가 camelCase 를 snake_case 로 맞춰 준다
+    // (`oas_compare` 의 `service_id` 와 같다).
+    name_prefix: String,
     scope: RouteScope,
 ) -> AppResult<RoutesPage> {
-    cache(&app)?.with(|conn| db::query_routes(conn, env.as_str(), &chip, &q, &scope))
+    cache(&app)?
+        .with(|conn| db::query_routes(conn, env.as_str(), &chip, &q, &name_prefix, &scope))
 }
 
 /// 게이트웨이에서 Consumer 전체 목록을 다시 받아 캐시를 갱신하고, 그 목록을 돌려준다.
