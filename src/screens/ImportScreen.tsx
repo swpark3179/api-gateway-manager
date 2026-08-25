@@ -31,7 +31,7 @@ import { useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import ErrorBanner from "../components/ErrorBanner";
-import { nameFromPrefix } from "../lib/design";
+import { routeNamePrefix } from "../lib/design";
 import { attrsOfRow, changedKeys, rowVerdict, type RowVerdict } from "../lib/importDiff";
 import { filterCompareRows, useStore } from "../store";
 import type { CompareRow } from "../types";
@@ -121,8 +121,12 @@ export default function ImportScreen() {
   const envLabel = env === "dev" ? "개발" : "운영";
   const serviceMissing = services.length === 0;
   const selected = services.find((s) => s.id === service);
-  /** 접두사에서 파생되는 route 명 접두사 — 눌러 보기 전에 무엇이 채워질지 보여 준다. */
-  const namePrefix = nameFromPrefix(prefix);
+  /**
+   * 실효 route 명 접두사 — 눌러 보기 전에 무엇이 채워질지 보여 준다.
+   * 고른 service 에 `labels.name_prefix` 가 있으면 그것이 경로 접두사를 이긴다.
+   */
+  const servicePrefix = selected?.namePrefix?.trim() ?? "";
+  const namePrefix = routeNamePrefix(servicePrefix, prefix);
 
   return (
     <div data-screen-label="Import" style={{ padding: "20px 28px 56px", maxWidth: 1120 }}>
@@ -311,6 +315,18 @@ export default function ImportScreen() {
               </span>
               {" — 미등록 건을 신규 등록할 때 "}
               <span className="font-mono">name</span> 앞에 붙습니다.
+              {servicePrefix ? (
+                <>
+                  {" 고른 service 의 "}
+                  <span className="font-mono">labels.name_prefix</span>
+                  {" 라 이 접두사에서 파생하지 않고 "}
+                  <b>입력된 그대로</b>
+                  {" 쓰입니다 (Service 화면에서 바꿉니다). "}
+                  <span className="font-mono">uri</span> 는 그대로 이 접두사를 따릅니다.
+                </>
+              ) : (
+                " 고른 service 에 name 접두어를 등록해 두면 그쪽이 우선합니다."
+              )}
             </div>
           </div>
         </div>

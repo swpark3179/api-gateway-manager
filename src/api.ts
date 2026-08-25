@@ -197,6 +197,9 @@ export const serviceSave = (env: EnvKey, f: ServiceFormState) =>
       desc: f.desc,
       upstreamId: f.upstreamId,
       specUrl: f.specUrl,
+      // 이 줄을 빠뜨리면 저장할 때마다 게이트웨이의 labels.name_prefix 가 지워진다
+      // (Rust 의 set_label 이 빈 값을 "그 키를 지워라" 로 읽는다 — specUrl 과 같은 성질).
+      namePrefix: f.namePrefix,
       logKey: f.logKey,
     },
   });

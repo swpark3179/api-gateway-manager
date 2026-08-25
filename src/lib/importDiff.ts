@@ -9,7 +9,7 @@
  * # 무엇을 비교하는가
  *
  * 스펙 쪽 후보값은 **전부 Rust 가 계산해 `CompareRow` 에 실어 보낸 것**을 그대로 쓴다
- * (`oas::suggested_name` · `oas::to_apisix_uri`). 여기서 uri·이름 규칙을 다시 구현하면
+ * (`oas::suggested_name_for` · `oas::to_apisix_uri`). 여기서 uri·이름 규칙을 다시 구현하면
  * 반드시 어긋난다 — `types.ts` 의 `routeFormFromOas` 주석과 같은 이유다.
  *
  * 기존 쪽(`RouteAttrs`)은 두 경로로 들어온다. 표는 `CompareRow` 의 `route*` 값

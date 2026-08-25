@@ -146,8 +146,8 @@ pub fn init(conn: &Connection) -> AppResult<()> {
         );
         CREATE INDEX IF NOT EXISTS upstreams_env_seq ON upstreams(env, seq);
 
-        -- Service 목록. spec_url 을 열로 뽑아 둔 것은 Import 화면이 service 를 고른 순간
-        -- 그 주소만 필요하기 때문이다 (view 전체를 파싱하지 않아도 된다).
+        -- Service 목록. spec_url 과 name_prefix 를 열로 뽑아 둔 것은 Import 화면이 service 를
+        -- 고른 순간 그 두 값만 필요하기 때문이다 (view 전체를 파싱하지 않아도 된다).
         CREATE TABLE IF NOT EXISTS services (
           env         TEXT    NOT NULL,
           id          TEXT    NOT NULL,
@@ -155,6 +155,8 @@ pub fn init(conn: &Connection) -> AppResult<()> {
           name        TEXT    NOT NULL DEFAULT '',
           upstream_id TEXT    NOT NULL DEFAULT '',
           spec_url    TEXT    NOT NULL DEFAULT '',
+          -- route 명 접두어. 비교할 때 `oas::suggested_name_for` 로 넘어간다.
+          name_prefix TEXT    NOT NULL DEFAULT '',
           search      TEXT    NOT NULL,
           view        TEXT    NOT NULL,     -- serde_json::to_string(&ServiceView)
           PRIMARY KEY (env, id)
@@ -171,7 +173,8 @@ pub fn init(conn: &Connection) -> AppResult<()> {
           full_path    TEXT NOT NULL DEFAULT '',
           -- APISIX route 의 uri 후보 (신규 생성 폼 프리필). oas::to_apisix_uri 참조.
           suggested_uri TEXT NOT NULL DEFAULT '',
-          -- route 명 후보 — 접두사를 대문자로 바꾼 것 + 원본 path. oas::suggested_name 참조.
+          -- route 명 후보. service 의 name 접두어가 있으면 그것을 그대로, 없으면 경로 접두사를
+          -- 대문자로 바꾼 것 + 원본 path 다. oas::suggested_name_for 참조.
           suggested_name TEXT NOT NULL DEFAULT '',
           norm         TEXT NOT NULL DEFAULT ''
         );
@@ -712,8 +715,9 @@ pub fn sync_services(conn: &Connection, env: &str, items: &[ServiceView]) -> App
     {
         let mut ins = tx
             .prepare(
-                "INSERT INTO services (env, id, seq, name, upstream_id, spec_url, search, view)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO services
+                        (env, id, seq, name, upstream_id, spec_url, name_prefix, search, view)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )
             .map_err(sql_err)?;
         for (i, sv) in items.iter().enumerate() {
@@ -729,6 +733,7 @@ pub fn sync_services(conn: &Connection, env: &str, items: &[ServiceView]) -> App
                 &sv.name,
                 &sv.upstream_id,
                 &sv.spec_url,
+                &sv.name_prefix,
                 view.to_lowercase(),
                 view
             ])
@@ -785,8 +790,9 @@ pub struct CompareRow {
     /// 미등록 건을 신규 생성할 때 폼에 채울 uri 후보.
     /// 경로 파라미터 변환 규칙이 한 곳에만 있어야 하므로 프런트에서 다시 만들지 않는다.
     pub suggested_uri: String,
-    /// 신규 생성 폼의 `name` 후보 — `V1/` 같은 접두사 + 접두사를 뗀 원본 path.
-    /// (`oas::suggested_name`. uri 와 같은 이유로 프런트에서 다시 만들지 않는다.)
+    /// 신규 생성 폼의 `name` 후보 — 접두어 + 접두사를 뗀 원본 path. 접두어는 고른 service 의
+    /// `labels.name_prefix` 가 있으면 그것(`EP_`), 없으면 경로 접두사에서 파생한 것(`V1/`)이다.
+    /// (`oas::suggested_name_for`. uri 와 같은 이유로 프런트에서 다시 만들지 않는다.)
     pub suggested_name: String,
     /// 신규 생성 폼의 `proxy-rewrite.uri` 후보 — 접두사를 붙이지 않은 OAS 원본 path.
     /// 게이트웨이 uri 에는 접두사가 붙지만 upstream 이 아는 경로는 접두사 없는 쪽이다.
@@ -849,6 +855,18 @@ pub fn compare(
     service_id: &str,
     prefix: &str,
 ) -> AppResult<Vec<CompareRow>> {
+    // 고른 service 가 route 명 접두어를 갖고 있으면 그것이 경로 접두사를 이긴다.
+    // 캐시에 없는 service (동기화 전 등) 는 빈 문자열이라 기존 규칙으로 degrade 한다.
+    let svc_prefix: String = conn
+        .query_row(
+            "SELECT name_prefix FROM services WHERE env = ?1 AND id = ?2",
+            params![env, service_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql_err)?
+        .unwrap_or_default();
+
     // 접두사가 바뀌면 비교 대상 경로가 달라진다 — 매번 다시 계산해 넣는다.
     {
         let tx = conn.unchecked_transaction().map_err(sql_err)?;
@@ -871,7 +889,7 @@ pub fn compare(
                 let full = oas::join_path(prefix, &path);
                 let norm = oas::normalize(&full).norm;
                 let suggested = oas::to_apisix_uri(prefix, &path);
-                let name = oas::suggested_name(prefix, &path);
+                let name = oas::suggested_name_for(&svc_prefix, prefix, &path);
                 upd.execute(params![seq, full, norm, suggested, name]).map_err(sql_err)?;
             }
         }

@@ -717,10 +717,39 @@ fn suggests_route_name_from_prefix_and_raw_path() {
     assert!(out.starts_with("V1/가"));
 }
 
+#[test]
+fn service_name_prefix_wins_over_path_prefix() {
+    use crate::oas;
+
+    // 접두어가 자기 구분자(`/` 또는 `_`)를 들고 있으므로 슬래시를 끼워 넣지 않는다.
+    assert_eq!(
+        oas::suggested_name_for("EP_", "/v1", "/orders/{orderId}/items"),
+        "EP_orders/{orderId}/items"
+    );
+    assert_eq!(
+        oas::suggested_name_for("EP/", "/v1", "/orders/{orderId}/items"),
+        "EP/orders/{orderId}/items"
+    );
+
+    // 입력한 그대로 쓴다 — 경로 접두사와 달리 대문자로 바꾸지 않는다.
+    assert_eq!(oas::suggested_name_for("ep_", "/v1", "/orders"), "ep_orders");
+
+    // 접두어가 없으면(공백뿐이어도) 경로 접두사 규칙으로 떨어진다.
+    assert_eq!(oas::suggested_name_for("", "/v1", "/orders"), "V1/orders");
+    assert_eq!(oas::suggested_name_for("   ", "/v1", "/orders"), "V1/orders");
+    assert_eq!(oas::suggested_name_for("", "", "/orders"), "orders");
+
+    // 100자 절단은 접두어가 어디서 왔든 같은 자리(char 경계)에서 일어난다.
+    let long = format!("/{}", "가".repeat(200));
+    let out = oas::suggested_name_for("EP_", "/v1", &long);
+    assert_eq!(out.chars().count(), oas::MAX_NAME_LEN);
+    assert!(out.starts_with("EP_가"));
+}
+
 // ── 9. 등록 판정 (내장 SQLite) ───────────────────────────────
 
 mod compare {
-    use crate::apisix::models::RouteView;
+    use crate::apisix::models::{RouteView, ServiceView};
     use crate::db;
     use crate::oas::OasOp;
     use rusqlite::Connection;
@@ -954,6 +983,39 @@ mod compare {
         assert_eq!(ep[0].suggested_name, "EP/orders");
         assert_eq!(ep[0].suggested_uri, "/ep/orders");
         assert_eq!(ep[0].suggested_rewrite, "/orders", "접두사가 붙지 않는다");
+    }
+
+    /// 고른 service 의 `labels.name_prefix` 는 경로 접두사를 **이름에 한해서만** 이긴다.
+    #[test]
+    fn service_name_prefix_overrides_the_path_prefix() {
+        let c = conn();
+        db::load_oas_ops(&c, &[op("GET", "/orders/{orderId}/items")]).unwrap();
+        db::sync_services(
+            &c,
+            "dev",
+            &[
+                ServiceView::from_value(
+                    &json!({ "id": "svc-ep", "labels": { "name_prefix": "EP_" } }),
+                    &[],
+                ),
+                ServiceView::from_value(&json!({ "id": "svc-plain" }), &[]),
+            ],
+        )
+        .unwrap();
+
+        let ep = db::compare(&c, "dev", "svc-ep", "/v1").unwrap();
+        assert_eq!(ep[0].suggested_name, "EP_orders/{orderId}/items");
+        // uri · rewrite 는 접두어와 무관하게 경로 접두사 규칙 그대로다.
+        assert_eq!(ep[0].suggested_uri, "/v1/orders/:orderId/items");
+        assert_eq!(ep[0].suggested_rewrite, "/orders/{orderId}/items");
+
+        // 접두어가 없는 service 는 지금까지의 규칙 그대로다.
+        let plain = db::compare(&c, "dev", "svc-plain", "/v1").unwrap();
+        assert_eq!(plain[0].suggested_name, "V1/orders/{orderId}/items");
+
+        // 캐시에 없는 service 도 같은 쪽으로 degrade 한다 (동기화 전에 비교를 돌린 경우).
+        let unknown = db::compare(&c, "dev", "svc-none", "/v1").unwrap();
+        assert_eq!(unknown[0].suggested_name, "V1/orders/{orderId}/items");
     }
 }
 
@@ -1654,6 +1716,40 @@ mod service_form {
     }
 
     #[test]
+    fn writes_name_prefix_label_and_reads_it_back() {
+        let mut f = form();
+        f.name_prefix = "EP_".into();
+
+        let out = apply(json!({ "labels": { "name1": "박승우" } }), &f);
+        assert_eq!(out.pointer("/labels/name_prefix"), Some(&json!("EP_")));
+        assert_eq!(out.pointer("/labels/name1"), Some(&json!("박승우")), "다른 라벨은 남는다");
+        assert!(out.pointer("/labels/spec_url").is_some(), "spec_url 과 나란히 들어간다");
+
+        // 게이트웨이 응답 모양으로 되돌려 읽으면 폼이 쓴 값이 그대로 나온다.
+        let mut saved = out;
+        saved["id"] = json!("svc-order");
+        assert_eq!(ServiceView::from_value(&saved, &[]).name_prefix, "EP_");
+    }
+
+    /// spec_url 과 같은 성질이다 — 빈 값은 `""` 로 쓰지 않고 그 키만 지운다.
+    #[test]
+    fn blank_name_prefix_removes_only_that_label() {
+        let base = json!({ "labels": { "name_prefix": "EP_", "name1": "박승우" } });
+        let out = apply(base, &form()); // 폼의 name_prefix 는 비어 있다
+
+        assert!(out.pointer("/labels/name_prefix").is_none());
+        assert_eq!(out.pointer("/labels/name1"), Some(&json!("박승우")));
+    }
+
+    /// 끝문자(`/`·`_`)는 규약이지 게이트웨이 제약이 아니다 — 화면이 경고하고 저장은 통과시킨다.
+    #[test]
+    fn name_prefix_without_a_separator_still_saves() {
+        let mut f = form();
+        f.name_prefix = "EP".into();
+        assert!(!super::service_validate_fails(&f));
+    }
+
+    #[test]
     fn view_reads_back_what_the_form_wrote() {
         // 요청 본문에는 id 가 실리지 않는다(서버가 관리한다). 게이트웨이 **응답**에는
         // 들어 있으므로 그 모양으로 되돌려 놓고 읽는다 — 실제 save() 경로와 같다.
@@ -1692,6 +1788,11 @@ mod service_form {
             // labels 값은 256 바이트가 상한이다
             ("spec_url 길이", json!({ "name": "n", "upstreamId": "u", "logKey": "ep",
                                       "specUrl": format!("https://h/{}", "a".repeat(300)) })),
+            // name 접두어도 labels 로 들어가므로 같은 제약을 받는다.
+            ("name 접두어 공백", json!({ "name": "n", "upstreamId": "u", "logKey": "ep",
+                                       "namePrefix": "EP 1/" })),
+            ("name 접두어 길이", json!({ "name": "n", "upstreamId": "u", "logKey": "ep",
+                                       "namePrefix": "a".repeat(300) })),
         ];
 
         for (label, payload) in cases {

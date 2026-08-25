@@ -162,11 +162,37 @@ pub fn name_prefix(prefix: &str) -> String {
 /// path 표기는 스펙 그대로 둔다 (`/orders/{orderId}` → `V1/orders/{orderId}`).
 /// 게이트웨이 uri 는 `to_apisix_uri` 가 따로 만들고, 이름은 사람이 읽는 값이라
 /// 스펙과 같은 표기를 유지하는 편이 대조하기 쉽다.
+pub fn suggested_name(prefix: &str, path: &str) -> String {
+    join_name(&name_prefix(prefix), path)
+}
+
+/// route 명 프리필 — **service 의 `labels.name_prefix` 가 있으면 그것이 이긴다.**
+///
+/// service 접두어는 **입력한 그대로** 쓴다. 경로 접두사와 달리 대문자로 바꾸지 않고,
+/// 뒤에 슬래시를 끼워 넣지도 않는다 — 접두어가 자기 구분자(`/` 또는 `_`)를 들고 있고,
+/// 사용자가 Service 화면에서 명시적으로 등록한 값이라 앱이 몰래 바꿀 자리가 아니다.
+///
+/// ```text
+/// ("EP_", "/v1", "/orders/{orderId}")  →  EP_orders/{orderId}
+/// ("EP/", "/v1", "/orders/{orderId}")  →  EP/orders/{orderId}
+/// ("",    "/v1", "/orders/{orderId}")  →  V1/orders/{orderId}   (경로 접두사 규칙)
+/// ```
+///
+/// 접두어가 이겨도 `uri` · `proxy-rewrite.uri` 는 계속 경로 접두사를 따른다 — 이름만의 규약이다.
+pub fn suggested_name_for(service_prefix: &str, path_prefix: &str, path: &str) -> String {
+    let svc = service_prefix.trim();
+    if svc.is_empty() {
+        return suggested_name(path_prefix, path);
+    }
+    join_name(svc, path)
+}
+
+/// 접두어 + 앞 슬래시를 뗀 path. 접두어가 어디서 왔든 이어 붙이는 규칙은 하나다.
 ///
 /// APISIX 의 `name` 은 100자 제한이라 넘치면 잘라야 한다. 바이트로 자르면 UTF-8
 /// 경계가 깨져 serde 직렬화가 아니라 저장이 실패하므로 **char 경계**에서 자른다.
-pub fn suggested_name(prefix: &str, path: &str) -> String {
-    let mut out = name_prefix(prefix);
+fn join_name(prefix: &str, path: &str) -> String {
+    let mut out = prefix.to_string();
     out.push_str(path.trim().trim_start_matches('/'));
     truncate_chars(&out, MAX_NAME_LEN)
 }

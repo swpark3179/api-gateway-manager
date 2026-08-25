@@ -120,13 +120,29 @@ function pickGroups(
  * 경로 접두사 → route 명 접두사. `/v1` → `V1/`
  *
  * **표시 전용이다.** 실제로 폼에 채워지는 값은 Rust 가 계산한 `CompareRow.suggestedName`
- * 이고(`oas::name_prefix` · `oas::suggested_name`, 테스트가 붙어 있다), 이 함수는 접두사를
+ * 이고(`oas::name_prefix` · `oas::suggested_name_for`, 테스트가 붙어 있다), 이 함수는 접두사를
  * 입력하는 중에 "그래서 이름이 어떻게 되는가"를 미리 보여 주기 위한 것뿐이다.
  * 규칙이 바뀌면 Rust 쪽이 진실이다.
+ *
+ * service 의 name 접두어가 이기는 경우까지 합친 실효 접두사는 `routeNamePrefix` 다.
  */
 export function nameFromPrefix(prefix: string): string {
   const core = prefix.trim().replace(/^\/+|\/+$/g, "");
   return core ? `${core.toUpperCase()}/` : "";
+}
+
+/**
+ * 실효 route 명 접두사 — service 의 `labels.name_prefix` 가 있으면 그것이 이긴다.
+ *
+ * service 접두어는 **입력한 그대로** 쓴다. 경로 접두사와 달리 대문자로 바꾸지 않고 뒤에
+ * 슬래시를 붙이지도 않는다 — 접두어가 자기 구분자(`/`·`_`)를 들고 있기 때문이다.
+ *
+ * `nameFromPrefix` 와 같은 **표시 전용**이다. 실제로 폼에 채워지는 값은 Rust 의
+ * `oas::suggested_name_for` 가 계산해 `CompareRow.suggestedName` 으로 내려보낸다.
+ */
+export function routeNamePrefix(servicePrefix: string, pathPrefix: string): string {
+  const svc = servicePrefix.trim();
+  return svc || nameFromPrefix(pathPrefix);
 }
 
 // ── JSON 탭 본문 ─────────────────────────────────────────────
@@ -275,7 +291,8 @@ export function upstreamJson(f: UpstreamFormState): Record<string, unknown> {
  * 두 군데가 실제 저장과 다르지만, `routeJson` 이 `plugins` 를 통째로 보여 주는 것과 같은
  * 종류의 근사다 (JSON 탭 자체가 "앱이 관리하는 키만" 이라고 밝히고 있다):
  *  · `plugins."jwt-auth": {}` — 게이트웨이에 이미 설정이 있으면 그 값이 **유지**된다.
- *  · `labels` — `spec_url` 만 보이지만 나머지 라벨(담당자 등)은 그대로 보존된다.
+ *  · `labels` — 앱이 관리하는 `spec_url` · `name_prefix` 만 보이지만 나머지 라벨(담당자 등)은
+ *    그대로 보존된다.
  */
 export function serviceJson(f: ServiceFormState): Record<string, unknown> {
   const o: Record<string, any> = {
@@ -284,8 +301,12 @@ export function serviceJson(f: ServiceFormState): Record<string, unknown> {
     upstream_id: f.upstreamId,
     plugins: { "jwt-auth": {}, "shi-log": { key: f.logKey } },
   };
-  // 빈 값이면 라벨을 지우는 쪽이라(Rust 의 set_label) 키를 만들지 않는다.
-  if (f.specUrl.trim()) o.labels = { spec_url: f.specUrl };
+  // 빈 값이면 그 라벨을 지우는 쪽이라(Rust 의 set_label) 키를 만들지 않는다. 둘 다 비면
+  // labels 키 자체가 없다 — 저장 때 라벨이 하나도 남지 않는 경우와 같은 모양이다.
+  const labels: Record<string, string> = {};
+  if (f.specUrl.trim()) labels.spec_url = f.specUrl;
+  if (f.namePrefix.trim()) labels.name_prefix = f.namePrefix;
+  if (Object.keys(labels).length > 0) o.labels = labels;
   return o;
 }
 
@@ -395,6 +416,7 @@ export function jsonToForm(raw: string, current: FormState): FormState {
         desc: o.desc || "",
         upstreamId: o.upstream_id || "",
         specUrl: (o.labels && o.labels.spec_url) || "",
+        namePrefix: (o.labels && o.labels.name_prefix) || "",
         logKey: log.key || "",
       };
     }
