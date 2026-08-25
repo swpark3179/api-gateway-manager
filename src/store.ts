@@ -78,6 +78,31 @@ import {
 
 const NO_COUNTS: RouteCounts = { all: 0, on: 0, off: 0 };
 
+/**
+ * 좌측 패널 접힘 상태만 웹뷰 localStorage 에 남긴다.
+ *
+ * 설정(`settings`)은 Rust IPC 를 거치지만 이건 창 배치 취향일 뿐이라 게이트웨이와 아무 상관이
+ * 없다. 커맨드를 하나 더 파는 대신 웹뷰에 맡긴다 — WebView2 가 프로필에 유지해 준다.
+ * 값을 못 읽어도(저장소 차단 등) 기본값으로 펼쳐져 있으면 그만이라 조용히 삼킨다.
+ */
+const PANEL_KEY = "agm.panelOpen";
+
+function readPanelOpen(): boolean {
+  try {
+    return localStorage.getItem(PANEL_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function writePanelOpen(open: boolean): void {
+  try {
+    localStorage.setItem(PANEL_KEY, open ? "1" : "0");
+  } catch {
+    // 저장에 실패해도 이번 세션 동안은 화면이 정상 동작한다.
+  }
+}
+
 export type BootVariant = "overlay" | "bar";
 
 interface AppState {
@@ -96,6 +121,11 @@ interface AppState {
    */
   routeScope: RouteScope;
   q: string;
+  /**
+   * 좌측 패널이 펼쳐져 있는지. 접으면 14px 띠만 남고 본문 그리드가 그만큼 넓어진다.
+   * 섹션과 무관한 창 배치 상태라 `LIST_RESET` 에 넣지 않는다 — 화면을 옮겨도 유지된다.
+   */
+  panelOpen: boolean;
   /**
    * Route 목록의 name 접두사 축.
    *
@@ -196,6 +226,8 @@ interface AppState {
   setQ: (q: string) => void;
   /** Route 목록의 name 접두사 필터. `setQ` 와 같은 디바운스로 캐시를 다시 조회한다. */
   setNamePrefix: (v: string) => void;
+  /** 좌측 패널 접기/펼치기. 걸어 둔 필터는 건드리지 않는다 — 표시만 접는다. */
+  togglePanel: () => void;
   /** 대시보드·설정 화면만 게이트웨이를 다시 본다 (목록은 캐시가 진실의 사본이다) */
   refresh: () => Promise<void>;
   /** 캐시만 다시 조회한다 (게이트웨이 호출 없음) */
@@ -414,6 +446,7 @@ export const useStore = create<AppState>((set, get) => ({
   routeScope: ALL_ROUTES,
   q: "",
   namePrefix: "",
+  panelOpen: readPanelOpen(),
 
   form: null,
   groupDraft: "",
@@ -646,6 +679,12 @@ export const useStore = create<AppState>((set, get) => ({
     if (get().section !== "routes") return;
     if (namePrefixTimer) clearTimeout(namePrefixTimer);
     namePrefixTimer = setTimeout(() => void get().queryRoutes(), SEARCH_DEBOUNCE_MS);
+  },
+
+  togglePanel() {
+    const panelOpen = !get().panelOpen;
+    writePanelOpen(panelOpen);
+    set({ panelOpen });
   },
 
   /**

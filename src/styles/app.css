@@ -137,3 +137,83 @@ select.text-input { padding-right: 32px; appearance: auto; }
               background var(--duration-fast) var(--ease-standard);
 }
 .drop-zone.over { border-color: var(--purple-500); background: var(--purple-50); }
+
+/* ─── 목록 그리드: 모든 행을 한 줄로 ──────────────────────────
+   폭이 모자라면 … 로 잘렸음을 드러내고, 전체 값은 툴팁(네이티브 title)으로 보여 준다.
+   `text-overflow` 는 셀 폭이 확정돼 있어야 동작하므로 `table-layout: fixed` 가 짝이다.
+
+   .kw-table 전역이 아니라 `.one-line` 수식자에만 건다 — Import 비교표(ImportScreen ·
+   ImportDiffScreen)도 같은 클래스를 쓰는데 열 폭을 선언하지 않아, 전역으로 바꾸면
+   그쪽 열이 전부 균등폭으로 무너진다. */
+.kw-table.one-line { table-layout: fixed; }
+.kw-table.one-line thead th,
+.kw-table.one-line tbody td {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 빈 목록 안내는 예외 — colSpan 으로 한 행을 다 쓰므로 줄바꿈을 허용한다 */
+.kw-table.one-line .state-block,
+.kw-table.one-line .state-block .msg { white-space: normal; }
+
+/* 뱃지가 든 셀만 1px 커지는 것을 막는다 — inline-flex 뱃지가 글줄 baseline 에 앉으면
+   18px 높이가 20px 글줄 밖으로 삐져나가 줄 상자를 21px 로 밀어 올린다. */
+.kw-table.one-line tbody td .badge { vertical-align: middle; }
+
+/* 한 줄 텍스트 셀 (components/Cell.tsx 의 Cell) */
+.cell-1 {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 주값 + 보조값을 한 줄에 나란히 (components/Cell.tsx 의 CellPair).
+   min-width:0 이 없으면 flex 항목이 안 줄어들어 … 대신 셀이 삐져나간다. */
+/* height 를 못 박는 이유: baseline 정렬은 글꼴 크기가 다른 두 항목(13px sans + 12px mono)의
+   ascent/descent 합으로 줄 높이를 정해서, 값에 따라 행이 1px 씩 들쭉날쭉해진다. */
+.cell-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; height: 20px; }
+.cell-line > .t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cell-line > .t.sub {
+  /* 보조값이 먼저 줄어든다 — 주값을 끝까지 남긴다 */
+  flex: 0 1 auto;
+  color: var(--gray-500);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* 뱃지 열 — 줄바꿈 금지 (components/BadgeList.tsx) */
+.badge-row {
+  display: flex; align-items: center; gap: 4px;
+  flex-wrap: nowrap; min-width: 0; overflow: hidden;
+  /* 본문 글줄(13px/20px)과 같은 높이로 못 박는다 — 뱃지가 있는 행만 커지지 않게 */
+  height: 20px;
+}
+/* 값 뱃지는 폭이 모자라면 자기가 먼저 줄어든다. `.badge` 기본값인 inline-flex 로는
+   text-overflow 가 먹지 않아 inline-block 으로 바꾼다 (여기 뱃지는 .dot 자식이 없다). */
+.badge-row > .badge {
+  flex: 0 1 auto;
+  min-width: 0; max-width: 100%;
+  display: inline-block;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* `+N` 은 절대 줄지 않는다 — 몇 개가 숨었는지가 잘려 버리면 접은 의미가 없다. */
+.badge-row > .badge.more { flex: 0 0 auto; }
+
+/* ─── 좌측 패널 접기 (components/SidePanel.tsx) ───────────────
+   접으면 14px 띠만 남기고, 띠 전체가 펼치기 버튼이다. */
+.panel-rail {
+  background: #fff;
+  border-right: 1px solid var(--gray-200);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  color: var(--gray-400);
+  transition: background var(--duration-fast) var(--ease-standard),
+              color var(--duration-fast) var(--ease-standard);
+}
+.panel-rail:hover { background: var(--gray-50); color: var(--purple-600); }

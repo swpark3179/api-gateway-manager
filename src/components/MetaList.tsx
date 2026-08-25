@@ -15,16 +15,24 @@ import ErrorBanner from "./ErrorBanner";
 import { syncLabel } from "../lib/design";
 import { useStore } from "../store";
 
+/**
+ * 열 하나. 폭을 반드시 준다 — 그리드가 `table-layout: fixed` 라 열 폭이 곧 잘림 기준이다
+ * (app.css 의 `.kw-table.one-line`). `%` 와 `px` 를 섞어 써도 된다.
+ */
+export interface Col {
+  label: string;
+  width: string;
+}
+
 interface Props {
   title: string;
-  sub: string;
   /** 신규 등록 버튼 라벨 */
   newLabel: string;
   searchPlaceholder: string;
   /** 동기화 버튼 툴팁 — 무엇을 다시 받는지 밝힌다 */
   syncTitle: string;
   onSync: () => void;
-  columns: string[];
+  columns: Col[];
   /** 필터가 적용된 행 수 (하단 '총 N건') */
   total: number;
   /** 목록이 비었을 때 보여 줄 문구. 로딩·미동기화는 이 컴포넌트가 판단한다 */
@@ -36,7 +44,6 @@ interface Props {
 
 export default function MetaList({
   title,
-  sub,
   newLabel,
   searchPlaceholder,
   syncTitle,
@@ -65,7 +72,6 @@ export default function MetaList({
           <h2 className="page-title" style={{ fontSize: 24, lineHeight: "32px" }}>
             {title}
           </h2>
-          <p className="page-sub">{sub}</p>
         </div>
         <div className="page-actions">
           <span
@@ -129,12 +135,13 @@ export default function MetaList({
 
       <ErrorBanner error={error} />
 
-      <table className="kw-table">
+      <table className="kw-table one-line">
         <thead>
           <tr>
             {columns.map((c) => (
-              <th key={c} style={{ whiteSpace: "nowrap" }}>
-                {c}
+              // 헤더도 잘린다 — `timeout (connect/send/read)` 처럼 긴 라벨이 있어 툴팁을 건다.
+              <th key={c.label} style={{ width: c.width }} title={c.label}>
+                {c.label}
               </th>
             ))}
           </tr>

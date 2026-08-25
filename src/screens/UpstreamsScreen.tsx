@@ -2,11 +2,24 @@
 
 import { useMemo, useState } from "react";
 
+import { Cell, CellPair } from "../components/Cell";
 import MetaList from "../components/MetaList";
+import type { Col } from "../components/MetaList";
 import { useStore } from "../store";
 import type { UpstreamView } from "../types";
 
 const ROW = "12px 16px";
+
+/** 열 폭 — `table-layout: fixed` 라 여기 값이 곧 잘림 기준이다 (ListScreen 의 `ROUTE_COLS` 주석 참조). */
+const COLS: Col[] = [
+  { label: "id", width: "14%" },
+  { label: "name", width: "18%" },
+  { label: "nodes", width: "20%" },
+  // 값은 `1000 / 1000 / 1000` 로 짧지만 헤더 라벨이 200px 라 그쪽이 기준이 된다.
+  { label: "timeout (connect/send/read)", width: "22%" },
+  { label: "type", width: "10%" },
+  { label: "수정일시", width: "16%" },
+];
 
 /** 건수가 적어 클라이언트 배열 필터를 쓴다 (MetaList 주석 참조). */
 function filter(items: UpstreamView[], q: string): UpstreamView[] {
@@ -30,12 +43,11 @@ export default function UpstreamsScreen() {
   return (
     <MetaList
       title="Upstream"
-      sub="게이트웨이가 트래픽을 흘려보낼 노드와 타임아웃을 관리합니다."
       newLabel="신규 Upstream"
       searchPlaceholder="id · name · host 검색"
       syncTitle="게이트웨이에서 Upstream 전체 목록을 다시 조회해 로컬 캐시를 갱신합니다 (Service 라벨도 함께 갱신)"
       onSync={() => void syncUpstreams()}
-      columns={["id", "name", "nodes", "timeout (connect/send/read)", "type", "수정일시"]}
+      columns={COLS}
       total={shown.length}
       emptyMessage={
         syncedAt === null
@@ -50,14 +62,15 @@ export default function UpstreamsScreen() {
       {shown.map((u) => (
         <tr key={u.id} onClick={() => openItem(u.id)} style={{ cursor: "pointer" }}>
           <td className="mono" style={{ padding: ROW }}>
-            {u.id}
+            <Cell text={u.id} />
           </td>
           <td style={{ padding: ROW }}>
-            <div className="name">{u.name || "—"}</div>
-            {u.desc && <div className="text-xs muted">{u.desc}</div>}
+            <CellPair main={u.name || "—"} sub={u.desc} />
           </td>
           <td className="mono" style={{ padding: ROW }}>
-            {u.nodeLabel || (
+            {u.nodeLabel ? (
+              <Cell text={u.nodeLabel} />
+            ) : (
               // 노드가 없으면 게이트웨이가 흘려보낼 데가 없다 — 조용히 빈 칸으로 두지 않는다.
               <span className="badge warning">
                 <span className="dot" />
@@ -66,13 +79,13 @@ export default function UpstreamsScreen() {
             )}
           </td>
           <td className="mono" style={{ padding: ROW }}>
-            {u.timeout.connect} / {u.timeout.send} / {u.timeout.read}
+            <Cell text={`${u.timeout.connect} / ${u.timeout.send} / ${u.timeout.read}`} />
           </td>
           <td className="mono text-xs muted" style={{ padding: ROW }}>
-            {u.type}
+            <Cell text={u.type} />
           </td>
-          <td className="mono text-xs muted" style={{ padding: ROW, whiteSpace: "nowrap" }}>
-            {u.updated}
+          <td className="mono text-xs muted" style={{ padding: ROW }}>
+            <Cell text={u.updated} />
           </td>
         </tr>
       ))}
