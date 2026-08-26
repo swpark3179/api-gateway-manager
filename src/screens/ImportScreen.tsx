@@ -33,7 +33,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import ErrorBanner from "../components/ErrorBanner";
 import { routeNamePrefix } from "../lib/design";
 import { attrsOfRow, changedKeys, rowVerdict, type RowVerdict } from "../lib/importDiff";
-import { filterCompareRows, useStore } from "../store";
+import { filterCompareRows, selectPerm, serviceOptions, useStore } from "../store";
 import { rewriteText } from "../types";
 import type { CompareRow } from "../types";
 
@@ -58,12 +58,12 @@ const CHIPS: Array<[RowVerdict | "all", string]> = [
 export default function ImportScreen() {
   const env = useStore((s) => s.env);
   const settings = useStore((s) => s.settings);
-  const services = useStore((s) => s.services);
+  const allServices = useStore((s) => s.services);
+  const perm = useStore(selectPerm);
   const doc = useStore((s) => s.importDoc);
   const rows = useStore((s) => s.importRows);
   const service = useStore((s) => s.importService);
   const prefix = useStore((s) => s.importPrefix);
-  const noProxy = useStore((s) => s.importNoProxy);
   const busy = useStore((s) => s.importBusy);
   const error = useStore((s) => s.importError);
   const chip = useStore((s) => s.importChip);
@@ -75,7 +75,6 @@ export default function ImportScreen() {
   const clearFile = useStore((s) => s.clearImportFile);
   const setService = useStore((s) => s.setImportService);
   const setPrefix = useStore((s) => s.setImportPrefix);
-  const setNoProxy = useStore((s) => s.setImportNoProxy);
   const setChip = useStore((s) => s.setImportChip);
   const setQ = useStore((s) => s.setImportQ);
   const openRoute = useStore((s) => s.openRouteFromImport);
@@ -142,8 +141,15 @@ export default function ImportScreen() {
   }
 
   const envLabel = env === "dev" ? "개발" : "운영";
+  // 관리 토큰이 허용한 service 만 고를 수 있다 (`store.serviceOptions`).
+  const services = useMemo(() => serviceOptions(allServices, perm), [allServices, perm]);
   const serviceMissing = services.length === 0;
   const selected = services.find((s) => s.id === service);
+  /**
+   * 고른 service 를 게이트웨이에서 읽어 오지 못했다 — 토큰의 권한 클레임으로만 만든 항목이다
+   * (`store.serviceOptions`). `spec_url` 을 알 수 없으므로 "등록되지 않았다" 와 다르게 말해야 한다.
+   */
+  const serviceUnread = !!selected && !allServices.some((s) => s.id === selected.id);
   /**
    * 실효 route 명 접두사 — 눌러 보기 전에 무엇이 채워질지 보여 준다.
    * 고른 service 에 `labels.name_prefix` 가 있으면 그것이 경로 접두사를 이긴다.
@@ -255,29 +261,6 @@ export default function ImportScreen() {
             <span className="font-mono">spec_url</span> 을 읽어 비교합니다.
           </div>
         )}
-
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            marginTop: 10,
-            cursor: "pointer",
-            font: "400 12px/18px var(--font-sans)",
-            color: "var(--gray-600)",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={noProxy}
-            onChange={(e) => setNoProxy(e.target.checked)}
-          />
-          service 의 spec_url 도 시스템 프록시를 우회해 직접 호출 (기본값은 {envLabel} 서버 설정)
-        </label>
-        <div className="text-xs muted" style={{ marginTop: 4 }}>
-          스펙이 사외 주소에 있고 사내에서 프록시를 거쳐야 한다면 이 체크를 해제하세요. 게이트웨이
-          호출에는 영향을 주지 않습니다.
-        </div>
       </div>
 
       {/* ── 비교 조건 ───────────────────────────────────────── */}
@@ -302,12 +285,16 @@ export default function ImportScreen() {
             </select>
             <div className="text-xs muted" style={{ marginTop: 6 }}>
               {serviceMissing
-                ? "등록된 Service 가 없습니다. Upstream · Service 화면에서 먼저 생성하세요."
+                ? perm?.kind === "scoped"
+                  ? "고를 수 있는 Service 가 없습니다. 관리 토큰의 권한 service 를 확인하세요."
+                  : "등록된 Service 가 없습니다. Upstream · Service 화면에서 먼저 생성하세요."
                 : fileName
                   ? "이 service 에 속한 라우트만 비교 대상입니다. 첨부한 스펙으로 비교합니다."
                   : selected?.specUrl
                     ? "이 service 의 spec_url 을 읽어 비교합니다."
-                    : "이 service 에는 spec_url 이 없습니다. Service 화면에서 등록하거나 위에 파일을 첨부하세요."}
+                    : serviceUnread
+                      ? "Service 목록을 조회하지 못해 이 service 의 spec_url 을 알 수 없습니다. 위에 스펙 파일을 첨부하세요."
+                      : "이 service 에는 spec_url 이 없습니다. Service 화면에서 등록하거나 위에 파일을 첨부하세요."}
             </div>
             {!fileName && selected?.specUrl && (
               <div

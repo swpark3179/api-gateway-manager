@@ -180,12 +180,13 @@ pub async fn request(
 ///
 /// Admin API 가 아니므로 `X-API-KEY` 를 붙이지 않고, 응답을 JSON 으로 해석하지도 않는다.
 /// 클라이언트는 이 파일의 [`build`] 를 그대로 쓴다 — 프록시 정책 결정 지점이 하나여야 한다.
+/// 따라서 스펙 조회도 게이트웨이와 똑같이 **항상 시스템 프록시를 우회한다**
+/// (`cfg.no_proxy` 는 `config::force_toggles` 가 항상 `true` 로 강제한다).
+/// 예전에는 Import 화면의 체크박스로 이것만 뒤집을 수 있었는데, 사내 환경에서는 우회가
+/// 켜져 있어야만 스펙 주소에도 닿아서 끌 이유가 없었다.
 ///
-/// # 프록시
-///
-/// 게이트웨이는 반드시 프록시를 우회해야 하지만, 스펙 URL 은 사외 주소라 오히려 사내
-/// 프록시를 타야 할 수 있다. 그래서 우회 여부를 `cfg.no_proxy` 로 호출자가 정하게 두고,
-/// Import 화면이 체크박스로 노출한다. 게이트웨이 호출 경로에는 영향이 없다.
+/// 실패 매핑이 [`AppError::from_spec_status`] 인 것이 [`request`] 와의 유일한 차이다 —
+/// 토큰을 보내지 않는 호출의 401 / 403 을 관리키 탓으로 돌리지 않기 위한 것이다.
 pub async fn fetch_text(cfg: &EnvConfig, url: &str, max_bytes: usize) -> AppResult<String> {
     let url = url.trim();
     // http(s) 만 허용한다. file:// 같은 스킴을 열어 두면 URL 입력란이 임의 파일 읽기가 된다.
@@ -203,7 +204,7 @@ pub async fn fetch_text(cfg: &EnvConfig, url: &str, max_bytes: usize) -> AppResu
     let status = res.status().as_u16();
     if !(200..300).contains(&status) {
         let text = res.text().await.unwrap_or_default();
-        return Err(AppError::from_status(status, &text));
+        return Err(AppError::from_spec_status(status, &text));
     }
 
     // Content-Length 를 믿을 수 없는 서버가 있으니 선언값과 실제 누적량을 둘 다 본다.

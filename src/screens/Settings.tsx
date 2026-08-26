@@ -6,9 +6,12 @@
  * (`src-tauri/src/config.rs` 모듈 주석). 고를 수 없는 값을 스위치로 보여 주면
  * "껐는데 왜 그대로냐" 는 질문만 남는다.
  *
- * 관리키(`secret$token`)는 Windows 자격 증명 관리자에 저장되고 평소에는 마스킹된 값만
- * 내려온다. `표시` 를 누르면 `settings_reveal_token` 으로 원문을 받아 입력란에 채우고,
- * 그 안의 관리 토큰이 담은 권한(시작일 · 종료일 · 권한 service)을 함께 펼친다.
+ * 관리키(`secret$token`)는 Windows 자격 증명 관리자에 저장된다. 이 화면에 들어오면
+ * `settings_reveal_token` 으로 원문을 받아 입력란에 채우고 `type="password"` 로 가려 둔다 —
+ * `표시` 는 그 `type` 만 뒤집는다. 값을 채우지 않으면 미표시 모드가 **빈 칸**이 되어
+ * 관리키가 등록돼 있는지조차 보이지 않는다. 손대지 않은 값은 저장에서 `null`(유지)로
+ * 나가므로(`payload`) 화면을 열었다 닫는 것만으로 자격 증명이 다시 쓰이지는 않는다.
+ * 관리 토큰이 담은 권한(시작일 · 종료일 · 권한 service)은 그 아래에 항상 펼친다.
  *
  * 게이트웨이로 나가는 `X-API-KEY` 는 관리키의 토큰 부분만이다 (Rust `config::resolve`).
  */
@@ -63,7 +66,11 @@ function isoDate(offsetDays: number): string {
 // ── 토큰이 담은 권한 상세 ────────────────────────────────────
 
 /**
- * `표시` 를 켰을 때 관리키 입력란 아래에 펼치는 카드.
+ * 관리키가 등록돼 있으면 입력란 아래에 늘 펼치는 카드.
+ *
+ * 예전에는 `표시` 를 켰을 때만 보여 줬는데, 그 버튼이 원문을 가져오는 역할을 겸했기
+ * 때문이다. 이제는 `type` 만 뒤집으므로 권한 상세를 숨길 이유가 없다 — 오히려 자기 토큰이
+ * 무엇을 할 수 있는지는 이 화면에 들어오면 바로 보여야 한다.
  *
  * 기간이 지난 토큰도 시작일 · 종료일 · 권한 service 를 보여 준다 — 사용자가 "왜 막혔는지"
  * 를 이 화면에서 알아야 하기 때문이다 (Rust `perm::view` 주석).
@@ -145,24 +152,49 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
   const revealToken = useStore((s) => s.revealToken);
 
   const [baseUrl, setBaseUrl] = useState(cfg.baseUrl);
-  /** 빈 문자열 = 변경 없음 (저장된 토큰 유지) */
   const [token, setToken] = useState("");
+  /**
+   * 방금 불러온 관리키 원문. `token` 이 이 값과 같으면 **사용자가 손대지 않았다**는 뜻이다.
+   *
+   * 입력란을 미리 채워 두는 순간 "빈 문자열 = 변경 없음" 규약을 쓸 수 없게 된다 — 그러면
+   * 저장할 때마다 원문을 다시 써 보내게 되고, 삭제(`""`)와 유지(`null`)의 구별도 사라진다.
+   * 그래서 원문 사본을 들고 비교한다 (`payload`).
+   */
+  const [loaded, setLoaded] = useState("");
   const [reveal, setReveal] = useState(false);
   const [result, setResult] = useState("");
   const [busy, setBusy] = useState(false);
 
   // 저장 후 서버 상태가 갱신되면 로컬 입력값도 맞춰 준다.
-  // `reveal` 도 되돌린다 — 저장으로 입력란이 비워지는데 '표시' 만 켜져 있으면
-  // 원문을 보여 주는 중인지 빈 칸인지 구별할 수 없다.
+  //
+  // 관리키는 **비우지 않고 다시 불러온다** — 입력란이 `type="password"` 라 값이 있어야
+  // 점으로 보인다. 값이 없으면 "미표시 모드" 가 빈 칸으로 나와 등록돼 있는지조차 알 수 없다.
+  // `reveal` 은 되돌린다: 저장 직후에 원문이 그대로 보이고 있을 이유가 없다.
   useEffect(() => {
+    let alive = true;
     setBaseUrl(cfg.baseUrl);
-    setToken("");
     setReveal(false);
-  }, [cfg.baseUrl, cfg.hasToken, cfg.tokenMasked]);
+    if (!cfg.hasToken) {
+      setToken("");
+      setLoaded("");
+      return;
+    }
+    void (async () => {
+      const raw = await revealToken(env);
+      // 다른 환경 카드로 갈아탔거나 그새 저장이 한 번 더 돌았으면 이 응답은 버린다.
+      if (!alive) return;
+      setToken(raw);
+      setLoaded(raw);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [env, cfg.baseUrl, cfg.hasToken, cfg.tokenMasked, revealToken]);
 
   const payload = (tokenOverride?: string | null) => ({
     baseUrl,
-    token: tokenOverride !== undefined ? tokenOverride : token.trim() === "" ? null : token,
+    // 손대지 않았으면 `null` — 저장이 자격 증명 관리자를 건드리지 않는다.
+    token: tokenOverride !== undefined ? tokenOverride : token === loaded ? null : token,
   });
 
   const onTest = async () => {
@@ -183,30 +215,22 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
   const onClearToken = async () => {
     setBusy(true);
     await saveSettings(env, payload(""));
+    // 저장 후 효과가 `hasToken: false` 를 보고 입력란을 비우지만, 그 사이에 방금 지운 값이
+    // 점으로 남아 있으면 삭제가 안 된 것처럼 보인다.
+    setToken("");
+    setLoaded("");
     setResult("");
     setBusy(false);
   };
 
   /**
-   * 표시 ⇄ 가리기.
+   * 표시 ⇄ 가리기 — `type` 만 뒤집는다.
    *
-   * 예전에는 `type` 만 뒤집었는데, 입력값은 항상 빈 문자열이고 마스킹된 값은 placeholder 라
-   * `표시` 를 눌러도 보여 줄 것이 없었다. 이제 원문을 받아 입력란에 채운다 — 같은 값을 다시
-   * 저장해도 자격 증명 관리자에 같은 값이 덮여 쓰일 뿐이라 무해하다.
+   * 원문은 화면에 들어올 때 이미 받아 두었으므로(위 `useEffect`) 여기서 부를 것이 없다.
+   * 예전에는 이 버튼이 원문을 가져오는 역할까지 했는데, 그러면 누르기 전까지 입력란이 빈 칸이라
+   * 관리키가 등록돼 있는지도 보이지 않았다.
    */
-  const onToggleReveal = async () => {
-    if (reveal) {
-      setReveal(false);
-      return;
-    }
-    if (token.trim() === "" && cfg.hasToken) {
-      setBusy(true);
-      const raw = await revealToken(env);
-      setBusy(false);
-      if (raw) setToken(raw);
-    }
-    setReveal(true);
-  };
+  const onToggleReveal = () => setReveal((v) => !v);
 
   return (
     <div className="card-surface" style={{ padding: 24 }}>
@@ -257,7 +281,7 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
             placeholder={TOKEN_PLACEHOLDER}
           />
           <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: "wrap" }}>
-            <button className="btn sm outline" onClick={() => void onToggleReveal()} disabled={busy}>
+            <button className="btn sm outline" onClick={onToggleReveal} disabled={busy}>
               {reveal ? "가리기" : "표시"}
             </button>
             {cfg.hasToken && (
@@ -265,16 +289,15 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
                 관리키 삭제
               </button>
             )}
-            <span className="text-xs muted font-mono">{cfg.hasToken ? cfg.tokenMasked : ""}</span>
           </div>
           <div className="text-xs muted" style={{ marginTop: 6, lineHeight: "18px" }}>
             {cfg.hasToken
-              ? "관리키는 Windows 자격 증명 관리자에 보관됩니다. 비워 두면 기존 관리키가 유지됩니다."
+              ? "관리키는 Windows 자격 증명 관리자에 보관됩니다. 값을 고치지 않고 저장하면 기존 관리키가 그대로 유지됩니다."
               : "미입력 시 해당 환경은 관리할 수 없습니다. 게이트웨이로는 $ 뒤의 토큰만 나갑니다."}
           </div>
         </div>
 
-        {reveal && cfg.hasToken && <PermDetail perm={cfg.perm} />}
+        {cfg.hasToken && <PermDetail perm={cfg.perm} />}
 
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
           <button className="btn md outline" onClick={() => void onTest()} disabled={busy}>

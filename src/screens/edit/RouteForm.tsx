@@ -1,17 +1,24 @@
 /** Route 폼 탭 — 기본 정보 / methods / 권한그룹(또는 전체 허용) / status. */
 
+import { useMemo } from "react";
+
 import { methodChips } from "../../lib/design";
-import { useStore } from "../../store";
+import { selectPerm, serviceOptions, useStore } from "../../store";
 import GroupsCard from "./GroupsCard";
 
 const Req = () => <span style={{ color: "var(--red-600)" }}>*</span>;
 
 export default function RouteForm() {
   const form = useStore((s) => s.form);
-  const services = useStore((s) => s.services);
+  const allServices = useStore((s) => s.services);
+  const perm = useStore(selectPerm);
   const patch = useStore((s) => s.patchForm);
   const toggleMethod = useStore((s) => s.toggleMethod);
   const view = useStore((s) => s.view);
+
+  // 관리 토큰이 허용한 service 만 담는다 (`store.serviceOptions`). Hook 이므로 아래의
+  // 이른 반환보다 위에 있어야 한다.
+  const services = useMemo(() => serviceOptions(allServices, perm), [allServices, perm]);
 
   if (!form || form.kind !== "route") return null;
 
@@ -72,9 +79,11 @@ export default function RouteForm() {
               ))}
             </select>
             <div className="text-xs muted" style={{ marginTop: 6 }}>
-              {services.length === 0
-                ? "등록된 Service 가 없습니다. Upstream/Service 화면에서 먼저 생성하세요."
-                : "신규 서버의 upstream · service는 Upstream/Service 화면에서 먼저 생성합니다."}
+              {services.length > 0
+                ? "신규 서버의 upstream · service는 Upstream/Service 화면에서 먼저 생성합니다."
+                : perm?.kind === "scoped"
+                  ? "고를 수 있는 Service 가 없습니다. 관리 토큰의 권한 service 를 확인하세요."
+                  : "등록된 Service 가 없습니다. Upstream/Service 화면에서 먼저 생성하세요."}
             </div>
           </div>
 

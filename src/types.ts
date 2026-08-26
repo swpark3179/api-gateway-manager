@@ -320,8 +320,6 @@ export interface ImportSource {
    */
   kind: "text" | "path" | "url";
   value: string;
-  /** `url` 일 때만 의미 있다. 스펙 주소는 사외라 프록시가 필요할 수 있다. */
-  noProxy?: boolean;
 }
 
 export interface OasOp {
