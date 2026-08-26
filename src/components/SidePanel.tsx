@@ -6,7 +6,7 @@
  *
  * Route 섹션의 패널은 **컨슈머 접근** 목록이다. 상태(전체/활성/비활성)는 상단 토글 칩이
  * 이미 제공하므로 여기서 되풀이하지 않고, 대신 "이 컨슈머가 쓸 수 있는 API" 를 고르게 한다.
- * 판정은 컨슈머의 auth-groups 와 라우트의 allowed_groups 교집합이고 SQLite 조인으로 푼다.
+ * 판정은 컨슈머의 auth_groups 와 라우트의 allowed_groups 교집합이고 SQLite 조인으로 푼다.
  */
 
 import { useMemo, useState } from "react";

@@ -136,7 +136,7 @@ src-tauri/src/
 
 - Route → `proxy-rewrite.uri` **또는** `proxy-rewrite.regex_uri` (둘 중 한쪽만 남긴다 — 아래 Import 절 참조), 그룹 필드(기본 `shi-auth.allowed_groups`).
   폼이 **전체 허용**이면 그 그룹 필드를 쓰는 대신 권한 플러그인을 **지운다**. 관리 대상이 하나도 안 남으면 `plugins` 키 자체를 지운다 (아래 '권한 없이 접근' 절)
-- Consumer → `jwt-auth.key`, `jwt-auth.secret`, 그룹 필드(기본 `jwt-auth.auth-groups`)
+- Consumer → `jwt-auth.key`, `jwt-auth.secret`, 그룹 필드(기본 `jwt-auth.auth_groups` — 아래 절 참조)
 - Service → `shi-log`(폼의 `log-key` — 빈 값이면 **통째로 삭제**), `jwt-auth`(폼의 토글 — ON 이면 **없을 때만** `{}` 추가, OFF 면 삭제),
   `labels.spec_url` · `labels.name_prefix`. 관리 대상 플러그인이 하나도 안 남으면 `plugins` 키 자체를 지운다
 - Upstream → `name`, `desc`, `nodes`, `timeout` (`checks`·`retries`·`scheme`·`type` 은 보존)
@@ -154,14 +154,39 @@ src-tauri/src/
 
 JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 없는 플러그인도 저장 시 유지된다.
 
+### 컨슈머 그룹 키는 `auth_groups` — 표기가 곧 동작이다
+
+게이트웨이의 `shi-auth` 는 라우트의 `conf.allowed_groups` 와 컨슈머의
+`ctx.consumer.auth_conf.auth_groups` 를 교집합 비교한다. APISIX 에서 `auth_conf` 는 그 컨슈머의
+**인증 플러그인 conf 객체 자체**라, 실제로 가리키는 자리는 `plugins.jwt-auth.auth_groups` 다.
+
+Lua 테이블에서 `auth_conf.auth_groups` 는 **하이픈 키를 보지 못한다** — `auth-groups` 는
+`auth_conf["auth-groups"]` 로만 읽힌다. 그래서 그룹을 하이픈 표기로 저장하면 게이트웨이에서 값이
+nil 이 되고, 교집합 검사가 통째로 실패해 호출이 `user does not belong to allowed groups` 로 막힌다.
+**화면에는 그룹이 멀쩡히 보이기 때문에** 원인을 찾기 어렵다.
+
+그래서 기본 저장 위치를 그 규약에 맞춰 두었다 — `models.rs` 의 `CONSUMER_AUTH_PLUGIN` ·
+`CONSUMER_GROUPS_KEY`. 프런트에도 같은 값이 있어야 한다 (`src/lib/design.ts` 의 `CONSUMER_LOC`,
+`src/screens/edit/GroupsCard.tsx` 의 `DEFAULT_LOC`).
+회귀 테스트: `new_consumer_writes_groups_where_the_gateway_reads_them`.
+
+> **이미 `auth-groups` 로 저장된 컨슈머는 저절로 고쳐지지 않는다.** 아래 규칙대로 이 앱은
+> **읽은 자리에 그대로 되쓰므로**, 그런 컨슈머는 여기서 저장해도 계속 하이픈에 남는다.
+> 게이트웨이에서 키 이름을 직접 `auth_groups` 로 바꿔야 한다. 어느 컨슈머가 그 상태인지는
+> 상세 → JSON 탭 → `게이트웨이 원본` 과 그룹 편집 카드의 **비표준 위치** 표시로 확인한다.
+> 두 키가 함께 남아 있으면 이 앱은 게이트웨이가 실제로 읽는 `auth_groups` 쪽을 택한다
+> (회귀 테스트 `standard_group_key_wins_over_legacy_spelling`) — 손으로 해 둔 조치가
+> 저장 한 번에 되돌아가지 않게 하기 위해서다.
+
 ### auth-groups 를 어디에 넣어 뒀든 찾아 읽는다
 
 이 앱 밖에서 등록된 Route/Consumer 는 그룹 필드의 표기가 다를 수 있다. 표준 위치만 보면
 게이트웨이에는 값이 있는데 화면은 공란으로 보인다. 그래서 **읽기는 관대하게, 쓰기는 읽은 그 자리에**
 를 규칙으로 삼았다 (`src-tauri/src/apisix/models.rs` `find_groups` · `set_groups_at`).
 
-찾는 순서 — 각 단계에서 `auth-groups` / `auth_groups` / `authGroups` / `allowed_groups` /
-`allowed-groups` / `groups` 를 모두 훑는다:
+찾는 순서 — 각 단계에서 그 리소스의 **표준 키를 먼저** 보고(Consumer → `auth_groups`,
+Route → `allowed_groups`), 없으면 대체 표기 `auth-groups` / `auth_groups` / `authGroups` /
+`allowed_groups` / `allowed-groups` / `groups` 를 모두 훑는다:
 
 1. 해당 리소스가 원래 쓰는 플러그인 (Consumer → `jwt-auth`, Route → `shi-auth`)
 2. 나머지 플러그인 전부
@@ -177,7 +202,8 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 실제로 어디에 들어 있는지는 화면에서 확인할 수 있다:
 
 - **상세 → JSON 탭 → `게이트웨이 원본`** — Admin API 가 돌려준 객체 그대로 (읽기 전용)
-- 같은 탭 하단과 그룹 편집 카드 제목에 `plugins.jwt-auth.auth_groups` 처럼 **찾아낸 위치**를 표시
+- 같은 탭 하단과 그룹 편집 카드 제목에 `plugins.jwt-auth.auth-groups` 처럼 **찾아낸 위치**를 표시하고,
+  표준 위치가 아니면 눈에 띄게 알린다
 
 ### 권한 없이 접근 — Route 의 전체 허용
 
@@ -195,7 +221,7 @@ JSON 탭은 디자인대로 **앱이 관리하는 키만** 보여준다. 거기 
 | `전체 허용` | `plugins.shi-auth` 를 지운다. 그룹 값이 **비표준 자리**에서 읽혔다면 그 자리(다른 플러그인 · 최상위 필드)도 함께 지운다 — 한쪽만 지우면 남은 자리가 계속 검사를 해서 화면이 거짓말을 한다 |
 | 전체 허용 + `proxy-rewrite` 도 없음 | `plugins` 키 **자체**가 없어진다 — Service 와 같은 규칙이다(빈 껍데기를 남기지 않는다) |
 
-Consumer 에는 이 모드가 없다. 컨슈머의 `auth-groups` 가 비어 있는 것은 "이 계정에 권한이
+Consumer 에는 이 모드가 없다. 컨슈머의 `auth_groups` 가 비어 있는 것은 "이 계정에 권한이
 없다" 는 뜻이고, 인가를 여는 쪽은 언제나 route 다.
 
 **읽기는 값이 아니라 자리를 본다.** `RouteView.hasAuth`(Rust `models::groups_slot_present`)가
@@ -326,7 +352,7 @@ Consumer 목록 화면의 검색·chip 은 건수가 적어 프런트 배열 필
 좌측 패널은 예전에 전체/활성/비활성이었는데, 같은 조건을 상단 토글 칩이 이미 제공한다.
 그래서 **컨슈머 목록**으로 바꿨다. 컨슈머를 고르면 그 컨슈머가 접근할 수 있는 Route 만 남는다.
 
-판정 규칙은 **교집합**이다 — 컨슈머의 `auth-groups` 중 하나라도 라우트의 `allowed_groups` 에
+판정 규칙은 **교집합**이다 — 컨슈머의 `auth_groups` 중 하나라도 라우트의 `allowed_groups` 에
 있으면 권한이 있다. 두 값 모두 `models::find_groups` 가 이미 정규화해 둔 것을 쓴다
 (비표준 표기까지 훑어 찾은 값이다. 아래 "auth-groups 를 어디에 넣어 뒀든 찾아 읽는다" 참조).
 
@@ -898,7 +924,7 @@ APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에
 | `editSub` | 항상 `PUT …/routes/{name}` | 신규는 `POST …/routes` | 실제 호출과 일치시킴 |
 | JSON 탭 `status` | 항상 `1` | 실제 status | 비활성 라우트를 잘못 표시하지 않도록 |
 | Consumer `username` | 항상 편집 가능 | 상세에서는 읽기 전용 | APISIX 식별자라 바꾸면 다른 consumer 가 됨 |
-| Consumer 좌측 탭 | 전체 / 제휴사 / 내부 시스템 고정 | 실제 `auth-groups` 값별 버킷 + `(그룹 없음)` | `partner`·`internal` 이라는 특정 문자열을 가정한 구분이라 조직마다 맞지 않음 |
+| Consumer 좌측 탭 | 전체 / 제휴사 / 내부 시스템 고정 | 실제 `auth_groups` 값별 버킷 + `(그룹 없음)` | `partner`·`internal` 이라는 특정 문자열을 가정한 구분이라 조직마다 맞지 않음 |
 | Consumer 목록 상단 칩 | 권한그룹별 칩 줄 | 없음. 고른 그룹만 해제 칩 하나로 | 좌측 패널이 같은 값을 같은 건수로 이미 보여 준다. 두 번 두면 어느 쪽이 켜져 있는지가 오히려 헷갈린다 |
 | Consumer 목록 열 | `username / key` · `secret` · `alg` · `plugins` | `desc` · `username` 을 **각자의 열**로, + `권한그룹` | 목록에서 찾는 것은 식별자가 아니라 설명이라 desc 를 앞에 둔다. 다만 한 칸에 나란히 두면 둘이 서로의 폭을 가져가 양쪽 다 잘린다. `alg`(늘 `HS256`) · `plugins`(늘 `jwt-auth`) · `secret`(마스킹돼 행마다 같은 모양) · `key` 는 행을 구별해 주지 못해 뺐고, 그 자리를 실제로 확인해야 하는 인가 범위 — 권한그룹 — 이 쓴다 |
 | Route 목록 첫 열 | `name / service_id` | `name` 단독 | 같은 칸의 service_id 가 name 의 폭을 가져갔다. 어느 service 소속인지는 name 접두사 필터와 편집 화면이 답해 준다 |

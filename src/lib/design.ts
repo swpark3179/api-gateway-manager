@@ -104,13 +104,18 @@ export const switchKnobStyle: React.CSSProperties = {
 
 // ── 권한그룹 위치 (Rust 의 find_groups / set_groups_at 대응) ──
 //
-// Rust 는 여섯 가지 표기를 모든 플러그인과 최상위에서 훑어 값을 찾고(find_groups),
-// **찾은 자리에 그대로** 되쓴다(set_groups_at). 이 파일이 그걸 무시하고 표준 표기만
-// 읽고 쓰면, 값이 `auth_groups` 에 있던 컨슈머는 '폼에 적용' 한 번으로 groups 가 비고
+// Rust 는 표준 키를 먼저 보고 대체 표기까지 모든 플러그인과 최상위에서 훑어 값을 찾고
+// (find_groups), **찾은 자리에 그대로** 되쓴다(set_groups_at). 이 파일이 그걸 무시하고 표준
+// 표기만 읽고 쓰면, 값이 `auth-groups` 에 있던 컨슈머는 '폼에 적용' 한 번으로 groups 가 비고
 // 그대로 저장하면 게이트웨이의 권한이 조용히 사라진다. 그래서 위치를 따라간다.
 
-/** Rust 의 GroupsLocation::default() 와 같아야 한다 (models.rs). */
-const CONSUMER_LOC: GroupsLocation = { plugin: "jwt-auth", key: "auth-groups", asCsv: false };
+/**
+ * Rust 의 GroupsLocation::default() = CONSUMER_AUTH_PLUGIN/CONSUMER_GROUPS_KEY 와 같아야 한다 (models.rs).
+ *
+ * 키는 **언더스코어**다. 게이트웨이의 shi-auth 가 `ctx.consumer.auth_conf.auth_groups` 로 읽는데,
+ * Lua 의 dot 접근은 하이픈 키(`auth-groups`)를 보지 못해 그대로 인가 실패로 이어진다.
+ */
+const CONSUMER_LOC: GroupsLocation = { plugin: "jwt-auth", key: "auth_groups", asCsv: false };
 /** RouteView::from_value 가 쓰는 기본 위치 (models.rs 의 find_groups 호출부). */
 const ROUTE_LOC: GroupsLocation = { plugin: "shi-auth", key: "allowed_groups", asCsv: false };
 

@@ -109,11 +109,11 @@ fn uri_of(v: &Value) -> String {
 
 // ── auth-groups 탐색 (Route · Consumer 공용) ─────────────────
 
-/// auth-groups 를 찾을 때 시도하는 키 이름들.
+/// auth-groups 를 찾을 때 시도하는 **대체** 표기들.
 ///
-/// 이 앱이 쓰는 표기는 `auth-groups` 지만, 다른 도구나 손으로 등록한 consumer 는
-/// 표기가 다를 수 있다. 게이트웨이에는 값이 있는데 화면이 공란으로 보이는 사고를
-/// 막기 위해 흔한 변형을 모두 훑는다.
+/// 리소스의 표준 키(`find_groups` 의 `default_key`)를 **먼저** 보고, 거기 없을 때 이 목록을 훑는다.
+/// 다른 도구나 손으로 등록한 consumer 는 표기가 다를 수 있어, 게이트웨이에는 값이 있는데
+/// 화면이 공란으로 보이는 사고를 막기 위해 흔한 변형을 모두 본다.
 const GROUP_KEYS: &[&str] = &[
     "auth-groups",
     "auth_groups",
@@ -141,9 +141,25 @@ pub struct GroupsLocation {
 
 impl Default for GroupsLocation {
     fn default() -> Self {
-        Self { plugin: "jwt-auth".into(), key: "auth-groups".into(), as_csv: false }
+        Self {
+            plugin: CONSUMER_AUTH_PLUGIN.into(),
+            key: CONSUMER_GROUPS_KEY.into(),
+            as_csv: false,
+        }
     }
 }
+
+/// Consumer 의 인증 플러그인. 그룹 필드의 기본 위치이기도 하다.
+pub const CONSUMER_AUTH_PLUGIN: &str = "jwt-auth";
+/// 그 플러그인 안의 기본 키 — **표기가 곧 동작이다.**
+///
+/// 게이트웨이의 `shi-auth` 는 컨슈머의 그룹을 `ctx.consumer.auth_conf.auth_groups` 로 읽는다.
+/// APISIX 에서 `auth_conf` 는 그 컨슈머의 **인증 플러그인 conf 객체 자체**라, 실제로 가리키는
+/// 자리는 `plugins.jwt-auth.auth_groups` 다. Lua 에서 `auth_conf.auth_groups` 는 하이픈 키
+/// (`auth-groups`)를 **볼 수 없어** nil 이 되고, 그러면 라우트의 `allowed_groups` 와의 교집합
+/// 검사가 통째로 실패한다 — "user does not belong to allowed groups".
+/// 언더스코어는 취향이 아니라 게이트웨이와의 규약이다.
+pub const CONSUMER_GROUPS_KEY: &str = "auth_groups";
 
 /// Route 의 권한 검사 플러그인.
 ///
@@ -195,12 +211,15 @@ fn find_groups(v: &Value, preferred: &str, default_key: &str) -> (Vec<String>, G
 
     let mut probe = |container: &Value, plugin: &str| -> Option<(Vec<String>, GroupsLocation)> {
         let obj = container.as_object()?;
-        for k in GROUP_KEYS {
-            let Some(raw) = obj.get(*k) else { continue };
+        // 리소스의 표준 키를 먼저 본다. 표준 표기와 대체 표기가 **둘 다** 있으면 게이트웨이가
+        // 실제로 읽는 쪽을 골라야 한다 — 손으로 표준 키를 채워 넣은 조치가 이 앱에서 한 번
+        // 저장하는 것으로 조용히 되돌아가면 안 된다.
+        for k in std::iter::once(default_key).chain(GROUP_KEYS.iter().copied()) {
+            let Some(raw) = obj.get(k) else { continue };
             let Some(list) = to_string_list(raw) else { continue };
             let loc = GroupsLocation {
                 plugin: plugin.to_string(),
-                key: (*k).to_string(),
+                key: k.to_string(),
                 as_csv: raw.is_string(),
             };
             if !list.is_empty() {
@@ -546,14 +565,14 @@ pub struct ConsumerView {
 
 impl ConsumerView {
     pub fn from_value(v: &Value) -> Self {
-        let jwt = v.get("plugins").and_then(|p| p.get("jwt-auth"));
+        let jwt = v.get("plugins").and_then(|p| p.get(CONSUMER_AUTH_PLUGIN));
         let secret = jwt
             .and_then(|j| j.get("secret"))
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
         let ts = unix(v, "update_time").or_else(|| unix(v, "create_time"));
-        let (groups, groups_location) = find_groups(v, "jwt-auth", "auth-groups");
+        let (groups, groups_location) = find_groups(v, CONSUMER_AUTH_PLUGIN, CONSUMER_GROUPS_KEY);
 
         Self {
             username: s(v, "username"),

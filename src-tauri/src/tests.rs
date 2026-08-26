@@ -554,7 +554,7 @@ fn consumer_save_preserves_jwt_auth_extras() {
     assert_eq!(p.pointer("/jwt-auth/exp").unwrap(), 86400);
     assert_eq!(p.pointer("/limit-count/count").unwrap(), 10);
     assert_eq!(p.pointer("/jwt-auth/key").unwrap(), "partner-alpha-key");
-    assert_eq!(p.pointer("/jwt-auth/auth-groups").unwrap(), &json!(["partner"]));
+    assert_eq!(p.pointer("/jwt-auth/auth_groups").unwrap(), &json!(["partner"]));
 }
 
 // ── 2-b. auth-groups 를 어디에 넣어 뒀든 찾아 읽고, 그 자리에 되쓴다 ──
@@ -566,22 +566,22 @@ fn consumer_save_preserves_jwt_auth_extras() {
 fn finds_auth_groups_in_nonstandard_places() {
     use crate::apisix::models::ConsumerView;
 
-    // (1) 표준 위치
+    // (1) 표준 위치 — 게이트웨이가 `auth_conf.auth_groups` 로 읽는 자리
     let c = ConsumerView::from_value(&json!({
         "username": "a",
-        "plugins": { "jwt-auth": { "key": "k", "auth-groups": ["partner", "ops"] } }
+        "plugins": { "jwt-auth": { "key": "k", "auth_groups": ["partner", "ops"] } }
     }));
     assert_eq!(c.groups, vec!["partner", "ops"]);
     assert_eq!(c.groups_location.plugin, "jwt-auth");
-    assert_eq!(c.groups_location.key, "auth-groups");
+    assert_eq!(c.groups_location.key, "auth_groups");
 
-    // (2) 언더스코어 표기
+    // (2) 하이픈 표기
     let c = ConsumerView::from_value(&json!({
         "username": "b",
-        "plugins": { "jwt-auth": { "key": "k", "auth_groups": ["internal"] } }
+        "plugins": { "jwt-auth": { "key": "k", "auth-groups": ["internal"] } }
     }));
     assert_eq!(c.groups, vec!["internal"]);
-    assert_eq!(c.groups_location.key, "auth_groups");
+    assert_eq!(c.groups_location.key, "auth-groups");
 
     // (3) 다른 플러그인 (사내 shi-auth 등)
     let c = ConsumerView::from_value(&json!({
@@ -623,7 +623,7 @@ fn finds_auth_groups_in_nonstandard_places() {
     let c = ConsumerView::from_value(&json!({
         "username": "g",
         "plugins": {
-            "jwt-auth": { "key": "k", "auth-groups": [] },
+            "jwt-auth": { "key": "k", "auth_groups": [] },
             "shi-auth": { "allowed_groups": ["ops-admin"] }
         }
     }));
@@ -636,10 +636,10 @@ fn saves_auth_groups_back_to_where_they_were_found() {
     use crate::apisix::consumers::{apply_consumer_form_for_test, ConsumerForm};
     use crate::apisix::models::{ConsumerView, GroupsLocation};
 
-    // 다른 도구가 `auth_groups`(언더스코어)로 넣어 둔 consumer
+    // 다른 도구가 `auth-groups`(하이픈)로 넣어 둔 consumer
     let existing = json!({
         "username": "partner_alpha",
-        "plugins": { "jwt-auth": { "key": "k", "secret": "s", "auth_groups": ["partner"] } }
+        "plugins": { "jwt-auth": { "key": "k", "secret": "s", "auth-groups": ["partner"] } }
     });
     let view = ConsumerView::from_value(&existing);
 
@@ -658,9 +658,9 @@ fn saves_auth_groups_back_to_where_they_were_found() {
     let p = body.get("plugins").unwrap();
 
     // 원래 표기 그대로 갱신되고
-    assert_eq!(p.pointer("/jwt-auth/auth_groups").unwrap(), &json!(["partner", "mobile"]));
+    assert_eq!(p.pointer("/jwt-auth/auth-groups").unwrap(), &json!(["partner", "mobile"]));
     // 표준 표기를 새로 만들어 키를 둘로 갈라 놓지 않는다.
-    assert!(p.pointer("/jwt-auth/auth-groups").is_none());
+    assert!(p.pointer("/jwt-auth/auth_groups").is_none());
 
     // CSV 로 저장돼 있던 경우엔 CSV 로 되쓴다.
     let csv_loc = GroupsLocation {
@@ -680,6 +680,51 @@ fn saves_auth_groups_back_to_where_they_were_found() {
     };
     let body = apply_consumer_form_for_test(json!({}), &form);
     assert_eq!(body.pointer("/plugins/jwt-auth/auth-groups").unwrap(), "a,b");
+}
+
+#[test]
+fn new_consumer_writes_groups_where_the_gateway_reads_them() {
+    use crate::apisix::consumers::{apply_consumer_form_for_test, ConsumerForm};
+
+    // 신규 등록은 읽어 올 원본이 없어(consumers::save 가 base 를 `{}` 로 둔다) 폼도
+    // groups_location 을 보내지 못한다 — 기본 위치가 그대로 저장 위치가 된다.
+    let form = ConsumerForm {
+        username: "partner_beta".into(),
+        desc: String::new(),
+        key: "partner-beta-key".into(),
+        secret: "s".into(),
+        groups: vec!["partner".into()],
+        is_new: true,
+        groups_location: None,
+        contacts: None,
+    };
+
+    let body = apply_consumer_form_for_test(json!({}), &form);
+    let p = body.get("plugins").unwrap();
+
+    // 게이트웨이의 shi-auth 가 `ctx.consumer.auth_conf.auth_groups` 로 읽는 자리.
+    assert_eq!(p.pointer("/jwt-auth/auth_groups").unwrap(), &json!(["partner"]));
+    // 하이픈으로 쓰면 Lua 의 dot 접근이 그 키를 보지 못해 인가가 통째로 실패한다
+    // ("user does not belong to allowed groups").
+    assert!(p.pointer("/jwt-auth/auth-groups").is_none());
+}
+
+#[test]
+fn standard_group_key_wins_over_legacy_spelling() {
+    use crate::apisix::models::ConsumerView;
+
+    // 하이픈으로 잘못 저장됐던 컨슈머를 게이트웨이에서 손으로 고치면 두 키가 함께 남는다.
+    // 그때 하이픈 쪽을 읽어 되쓰면 그 조치가 이 앱에서 한 번 저장하는 것으로 되돌아간다.
+    let c = ConsumerView::from_value(&json!({
+        "username": "partner_alpha",
+        "plugins": { "jwt-auth": {
+            "key": "k",
+            "auth-groups": ["stale"],
+            "auth_groups": ["ops-admin"]
+        }}
+    }));
+    assert_eq!(c.groups, vec!["ops-admin"]);
+    assert_eq!(c.groups_location.key, "auth_groups");
 }
 
 // ── 3. 응답 파싱 ─────────────────────────────────────────────
@@ -1833,7 +1878,7 @@ mod access {
     fn consumer(username: &str, groups: serde_json::Value) -> ConsumerView {
         ConsumerView::from_value(&json!({
             "username": username,
-            "plugins": { "jwt-auth": { "key": username, "secret": "s", "auth-groups": groups } }
+            "plugins": { "jwt-auth": { "key": username, "secret": "s", "auth_groups": groups } }
         }))
     }
 
@@ -2004,7 +2049,7 @@ mod access {
             "labels": { "env": "prod", "name1": "김철수", "dept1": "플랫폼" },
             "update_time": 1_760_000_000i64,
             "plugins": {
-                "jwt-auth": { "key": "k", "secret": "s", "auth_groups": ["partner"] },
+                "jwt-auth": { "key": "k", "secret": "s", "auth-groups": ["partner"] },
                 "limit-count": { "count": 100 }
             }
         }));
@@ -2020,9 +2065,9 @@ mod access {
         assert_eq!(g.has_secret, src.has_secret);
         assert_eq!(g.has_jwt_auth, src.has_jwt_auth);
         assert_eq!(g.groups, src.groups);
-        // 비표준 표기(auth_groups)에서 읽은 위치가 그대로 살아남아야 저장이 같은 자리로 간다.
+        // 비표준 표기(auth-groups)에서 읽은 위치가 그대로 살아남아야 저장이 같은 자리로 간다.
         assert_eq!(g.groups_location, src.groups_location);
-        assert_eq!(g.groups_location.key, "auth_groups");
+        assert_eq!(g.groups_location.key, "auth-groups");
         assert_eq!(g.contacts, src.contacts);
         assert_eq!(g.updated, src.updated);
         // 원본은 통째로 보존된다 — JSON 탭의 '게이트웨이 원본' 이 이걸 그대로 보여 준다.
