@@ -862,6 +862,191 @@ fn generated_secret_is_32_hex_chars() {
     assert_ne!(a, b, "매번 다른 값이 나와야 한다");
 }
 
+// ── 4-b. 관리 토큰 권한 (perm) ───────────────────────────────
+
+mod admin_token {
+    use crate::jwt;
+    use crate::perm::{self, Perm, Reason};
+
+    /// 하루짜리 유효 구간. `at()` 이 시각을 인자로 받으므로 실제 시계에 의존하지 않는다.
+    const NBF: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
+    const EXP: i64 = 1_767_312_000; // 2026-01-02T00:00:00Z
+    const MID: i64 = 1_767_268_800; // 그 사이
+
+    fn admin_token() -> String {
+        jwt::sign_admin(NBF, EXP, &Perm::Admin).unwrap().token
+    }
+
+    fn scoped_token(ids: &[&str]) -> String {
+        let p = Perm::Services(ids.iter().map(|s| s.to_string()).collect());
+        jwt::sign_admin(NBF, EXP, &p).unwrap().token
+    }
+
+    /// 발급한 토큰이 그대로 되읽힌다 — 이 왕복이 깨지면 발급 화면이 만든 토큰으로
+    /// 아무도 로그인할 수 없게 된다.
+    #[test]
+    fn sign_admin_round_trips_through_decode() {
+        let c = perm::decode(&admin_token()).expect("admin 토큰 해석");
+        assert_eq!((c.nbf, c.exp), (NBF, EXP));
+        assert_eq!(c.perm, Perm::Admin);
+
+        let c = perm::decode(&scoped_token(&["svc-b", "svc-a"])).expect("scoped 토큰 해석");
+        // 발급 시 정렬·중복 제거된다 — 같은 권한이면 같은 토큰이어야 한다.
+        assert_eq!(c.perm, Perm::Services(vec!["svc-a".into(), "svc-b".into()]));
+        assert_eq!(
+            scoped_token(&["svc-a", "svc-b", "svc-a"]),
+            scoped_token(&["svc-b", "svc-a"]),
+            "정렬·중복 제거 후 서명하므로 같은 집합이면 같은 토큰이다"
+        );
+    }
+
+    #[test]
+    fn payload_key_order_is_fixed() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
+        let t = admin_token();
+        let parts: Vec<&str> = t.split('.').collect();
+        let payload = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+        assert_eq!(
+            String::from_utf8(payload).unwrap(),
+            format!(r#"{{"key":"apisix-manage","nbf":{NBF},"exp":{EXP},"perm":"admin"}}"#),
+            "키 순서가 바뀌면 같은 권한인데도 토큰 문자열이 달라진다"
+        );
+        assert!(!t.contains('='), "base64url 패딩이 없어야 한다");
+    }
+
+    #[test]
+    fn rejects_tampered_and_foreign_tokens() {
+        // 서명 위조 — 마지막 세그먼트를 갈아 끼운다.
+        let t = admin_token();
+        let head = t.rsplit_once('.').unwrap().0;
+        assert_eq!(
+            perm::decode(&format!("{head}.YWFhYWFh")).unwrap_err(),
+            Reason::BadSignature
+        );
+
+        // payload 를 고치면 서명이 먼저 깨진다 (권한 승격 시도).
+        let forged = {
+            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            use base64::Engine;
+            let parts: Vec<&str> = t.split('.').collect();
+            let evil = URL_SAFE_NO_PAD
+                .encode(r#"{"key":"apisix-manage","nbf":0,"exp":9999999999,"perm":"admin"}"#);
+            format!("{}.{}.{}", parts[0], evil, parts[2])
+        };
+        assert_eq!(perm::decode(&forged).unwrap_err(), Reason::BadSignature);
+
+        // 다른 secret 으로 서명된 토큰.
+        let other = jwt::sign("apisix-manage", "not-our-secret", Some(NBF), Some(EXP)).unwrap();
+        assert_eq!(perm::decode(&other.token).unwrap_err(), Reason::BadSignature);
+
+        // key 가 다르다 — 서명은 맞지만 우리 관리 토큰이 아니다.
+        // (`jwt::sign` 은 perm 을 싣지 않으므로 key 검사가 먼저 걸리는지도 함께 본다)
+        let wrong_key =
+            jwt::sign("someone-else", crate::perm::ADMIN_SECRET, Some(NBF), Some(EXP)).unwrap();
+        assert_eq!(perm::decode(&wrong_key.token).unwrap_err(), Reason::BadKey);
+
+        // JWT 가 아예 아니다 — 예전 평문 X-API-KEY.
+        assert_eq!(perm::decode("edd1c9f034335f136f87ad84b625c8f1").unwrap_err(), Reason::NotJwt);
+        assert_eq!(perm::decode("a.b").unwrap_err(), Reason::NotJwt);
+        assert_eq!(perm::decode("").unwrap_err(), Reason::NotJwt);
+
+        // alg=none 은 서명 검증 전에 걷어낸다.
+        let none_alg = {
+            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+            use base64::Engine;
+            let h = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
+            let p = URL_SAFE_NO_PAD.encode(r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":"admin"}"#);
+            format!("{h}.{p}.x")
+        };
+        assert_eq!(perm::decode(&none_alg).unwrap_err(), Reason::NotJwt);
+    }
+
+    /// 유효기간은 `decode` 가 아니라 `at` 이 본다 — 만료된 토큰도 설정 화면에서
+    /// 시작일·종료일을 보여 줘야 하기 때문이다.
+    #[test]
+    fn validity_window_is_checked_at_use_time() {
+        let c = perm::decode(&admin_token()).unwrap();
+        assert_eq!(perm::at(&c, NBF - 1), Perm::None(Reason::NotYet));
+        assert_eq!(perm::at(&c, NBF), Perm::Admin, "시작일 정각은 유효하다");
+        assert_eq!(perm::at(&c, MID), Perm::Admin);
+        assert_eq!(perm::at(&c, EXP), Perm::None(Reason::Expired), "종료 정각은 만료다");
+        assert_eq!(perm::at(&c, EXP + 1), Perm::None(Reason::Expired));
+    }
+
+    #[test]
+    fn wont_issue_a_token_nobody_can_use() {
+        assert!(jwt::sign_admin(EXP, NBF, &Perm::Admin).is_err(), "종료 < 시작");
+        assert!(jwt::sign_admin(NBF, NBF, &Perm::Admin).is_err(), "종료 = 시작");
+        assert!(
+            jwt::sign_admin(NBF, EXP, &Perm::Services(vec![])).is_err(),
+            "권한 service 가 없으면 아무것도 못 하는 토큰이다"
+        );
+    }
+
+    #[test]
+    fn allows_and_allow_blob_agree() {
+        let admin = Perm::Admin;
+        let scoped = Perm::Services(vec!["svc-a".into(), "svc-b".into()]);
+        let empty = Perm::Services(vec![]);
+        let none = Perm::None(Reason::Expired);
+
+        assert!(admin.is_admin() && !scoped.is_admin() && !none.is_admin());
+
+        assert!(admin.allows("anything") && admin.allows(""));
+        assert!(scoped.allows("svc-a") && scoped.allows("svc-b"));
+        assert!(!scoped.allows("svc-c"), "목록에 없는 service");
+        assert!(!scoped.allows("svc"), "접두사만 같은 id 가 걸리면 안 된다");
+        assert!(!scoped.allows(""), "service 없는 라우트");
+        assert!(!empty.allows("svc-a") && !none.allows("svc-a"));
+
+        // 허용목록 문자열 — 빈 문자열이 '제한 없음' 이다 (db::SERVICE_CLAUSE).
+        assert_eq!(admin.allow_blob(), "");
+        assert_eq!(scoped.allow_blob(), "\nsvc-a\nsvc-b\n");
+        assert_eq!(empty.allow_blob(), "\n", "무엇과도 맞지 않는 값");
+        assert_eq!(none.allow_blob(), "\n");
+    }
+
+    /// `perm` 클레임이 문자열도 배열도 아니거나 배열에 문자열이 아닌 것이 섞이면 거부한다 —
+    /// 조용히 넓게/좁게 해석하는 쪽 모두 위험하다.
+    #[test]
+    fn rejects_malformed_perm_claim() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let sign = |payload: &str| {
+            let h = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+            let p = URL_SAFE_NO_PAD.encode(payload);
+            let input = format!("{h}.{p}");
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(crate::perm::ADMIN_SECRET.as_bytes()).unwrap();
+            mac.update(input.as_bytes());
+            format!("{input}.{}", URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+        };
+
+        for bad in [
+            r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":"superuser"}"#,
+            r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":true}"#,
+            r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":["ok",7]}"#,
+            r#"{"key":"apisix-manage","nbf":0,"exp":9}"#,
+            r#"{"key":"apisix-manage","exp":9,"perm":"admin"}"#,
+        ] {
+            assert_eq!(
+                perm::decode(&sign(bad)).unwrap_err(),
+                Reason::NotJwt,
+                "거부되어야 한다: {bad}"
+            );
+        }
+
+        // 배열은 비어 있어도 유효한 클레임이다 — '권한 service 0개' 는 표현 가능한 상태다.
+        let c = perm::decode(&sign(r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":[]}"#)).unwrap();
+        assert_eq!(c.perm, Perm::Services(vec![]));
+    }
+}
+
 // ── 5. baseUrl 정규화 ────────────────────────────────────────
 
 #[test]
@@ -871,7 +1056,7 @@ fn admin_base_normalizes_input() {
     let mk = |u: &str| EnvConfig {
         base_url: u.into(),
         no_proxy: true,
-        insecure_tls: false,
+        insecure_tls: true,
     };
 
     assert_eq!(
@@ -894,6 +1079,38 @@ fn admin_base_normalizes_input() {
         "https://gw.internal.sds:9180/apisix/admin"
     );
     assert!(mk("   ").admin_base().is_err());
+}
+
+/// 예전 `settings.json` 에 `false` 로 저장돼 있던 토글 2종이 **읽을 때** 켜진다.
+///
+/// 저장 시점에만 강제하면, 앱을 업데이트하고 설정을 한 번도 저장하지 않은 사용자는
+/// 계속 프록시를 타거나 인증서 검증에 걸려 연결이 안 되는데 화면에는 그 토글이 없어서
+/// 원인을 알 방법이 없다 (`config.rs` 모듈 주석).
+#[test]
+fn stored_toggles_are_forced_on_when_read() {
+    use crate::config::Settings;
+
+    let legacy = json!({
+        "dev":  { "baseUrl": "http://dev:9080",  "noProxy": false, "insecureTls": false },
+        "prod": { "baseUrl": "http://prod:7096", "noProxy": true,  "insecureTls": false },
+    });
+    let mut s: Settings = serde_json::from_value(legacy).expect("예전 설정 형식을 읽을 수 있어야 한다");
+    s.force_toggles();
+
+    for cfg in [&s.dev, &s.prod] {
+        assert!(cfg.no_proxy, "프록시 우회는 항상 켜져 있어야 한다");
+        assert!(cfg.insecure_tls, "인증서 검증 건너뛰기는 항상 켜져 있어야 한다");
+    }
+    // baseUrl 은 사용자 값이므로 손대지 않는다.
+    assert_eq!(s.dev.base_url, "http://dev:9080");
+    assert_eq!(s.prod.base_url, "http://prod:7096");
+
+    // 기본값도 같다 — 설정 화면 placeholder 와 짝을 맞춘 사내 주소가 들어 있다.
+    let d = Settings::default();
+    assert_eq!(d.dev.base_url, "http://60.101.107.90:9080");
+    assert_eq!(d.prod.base_url, "http://60.101.207.91:7096");
+    assert!(d.dev.no_proxy && d.dev.insecure_tls);
+    assert!(d.prod.no_proxy && d.prod.insecure_tls);
 }
 
 // ── 6. 에러 분류 ─────────────────────────────────────────────
@@ -1585,27 +1802,27 @@ fn sqlite_search_and_counts_replace_the_old_array_filter() {
     .unwrap();
 
     // 검색어 없음 → 전체, 원래 순서 유지.
-    let page = db::query_routes(&c, "dev", "all", "", "", &ALL).unwrap();
+    let page = db::query_routes(&c, "dev", "all", "", "", &ALL, "").unwrap();
     assert_eq!(page.total, 3);
     assert_eq!(page.items.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["1", "2", "3"]);
 
     // 예전 필터가 JSON 전체를 훑었으므로 name·uri 어느 쪽으로도 잡혀야 한다.
-    assert_eq!(db::query_routes(&c, "dev", "all", "pet", "", &ALL).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "/orders", "", &ALL).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "API", "", &ALL).unwrap().total, 3, "대소문자 무시");
+    assert_eq!(db::query_routes(&c, "dev", "all", "pet", "", &ALL, "").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "/orders", "", &ALL, "").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "API", "", &ALL, "").unwrap().total, 3, "대소문자 무시");
 
     // '_' 가 LIKE 의 단일문자 와일드카드로 해석되면 안 된다.
-    assert_eq!(db::query_routes(&c, "dev", "all", "legacy_v1", "", &ALL).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "legacyXv1", "", &ALL).unwrap().total, 0);
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacy_v1", "", &ALL, "").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "legacyXv1", "", &ALL, "").unwrap().total, 0);
 
     // chip 은 status 로 나눈다.
-    assert_eq!(db::query_routes(&c, "dev", "on", "", "", &ALL).unwrap().total, 2);
-    assert_eq!(db::query_routes(&c, "dev", "off", "", "", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "on", "", "", &ALL, "").unwrap().total, 2);
+    assert_eq!(db::query_routes(&c, "dev", "off", "", "", &ALL, "").unwrap().total, 1);
 
     // counts 는 chip 을 빼고 검색어만 반영한다 — chip 을 눌러도 라벨 숫자가 흔들리지 않아야 한다.
-    let page = db::query_routes(&c, "dev", "off", "", "", &ALL).unwrap();
+    let page = db::query_routes(&c, "dev", "off", "", "", &ALL, "").unwrap();
     assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
-    let page = db::query_routes(&c, "dev", "all", "api", "", &ALL).unwrap();
+    let page = db::query_routes(&c, "dev", "all", "api", "", &ALL, "").unwrap();
     assert_eq!((page.counts.all, page.counts.on, page.counts.off), (3, 2, 1));
 
     // 단건 조회 (Import 결과 → 상세 이동 경로).
@@ -1614,7 +1831,7 @@ fn sqlite_search_and_counts_replace_the_old_array_filter() {
 
     // 재동기화는 전체 교체다 — 게이트웨이에서 사라진 라우트가 남으면 Import 가 잘못 판정한다.
     db::sync_routes(&c, "dev", &[mk("1", "order-api", "/orders", 1)]).unwrap();
-    assert_eq!(db::query_routes(&c, "dev", "all", "", "", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "", "", &ALL, "").unwrap().total, 1);
     assert!(db::route_view(&c, "dev", "2").unwrap().is_none());
 }
 
@@ -1650,7 +1867,7 @@ fn name_prefix_filters_by_start_of_name() {
     .unwrap();
 
     let ids = |pfx: &str| -> Vec<String> {
-        db::query_routes(&c, "dev", "all", "", pfx, &ALL)
+        db::query_routes(&c, "dev", "all", "", pfx, &ALL, "")
             .unwrap()
             .items
             .iter()
@@ -1672,14 +1889,126 @@ fn name_prefix_filters_by_start_of_name() {
     assert_eq!(ids("  EP_  "), ["1", "2"], "앞뒤 공백은 다듬는다");
 
     // 다른 축과는 AND 로 걸린다.
-    assert_eq!(db::query_routes(&c, "dev", "on", "", "EP_", &ALL).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "pets", "EP_", &ALL).unwrap().total, 1);
-    assert_eq!(db::query_routes(&c, "dev", "all", "orders", "V1/", &ALL).unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "on", "", "EP_", &ALL, "").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "pets", "EP_", &ALL, "").unwrap().total, 1);
+    assert_eq!(db::query_routes(&c, "dev", "all", "orders", "V1/", &ALL, "").unwrap().total, 1);
 
     // counts 는 chip 만 빼고 접두사는 반영한다. 반영하지 않으면 `?5` 가 여기서 바인딩되지 않아
     // rusqlite 가 InvalidParameterCount 를 던진다 — 이 assert 가 그것까지 잡는다.
-    let page = db::query_routes(&c, "dev", "on", "", "EP_", &ALL).unwrap();
+    let page = db::query_routes(&c, "dev", "on", "", "EP_", &ALL, "").unwrap();
     assert_eq!((page.counts.all, page.counts.on, page.counts.off), (2, 1, 1));
+}
+
+// ── 10-b. 관리 권한으로 조회 좁히기 (SERVICE_CLAUSE) ─────────
+
+/// 관리 토큰이 특정 service 만 담고 있으면 Route 조회의 모든 숫자가 그 범위로 좁아진다.
+///
+/// 목록 · chip 건수 · 좌측 패널 집계 · 대시보드 KPI 가 각자 다른 쿼리라, 하나만 좁히면
+/// 화면들이 서로 다른 답을 한다. 그 네 곳을 한 테스트에서 함께 본다.
+#[test]
+fn service_allowlist_narrows_every_route_count() {
+    use crate::apisix::models::{ConsumerView, RouteView};
+    use crate::db;
+    use crate::perm::{Perm, Reason};
+    use rusqlite::Connection;
+
+    const ALL: db::RouteScope = db::RouteScope::All;
+
+    let c = Connection::open_in_memory().unwrap();
+    db::init(&c).unwrap();
+
+    // svc-a 2건(1 활성 · 1 비활성) · svc-b 1건. 넷째는 service 도 권한그룹도 없는 라우트다
+    // — '그룹 제한 없음' 축과 허용목록이 겹칠 때를 보기 위한 것이다.
+    let mk = |id: &str, name: &str, svc: &str, status: i64| {
+        RouteView::from_value(&json!({
+            "id": id, "name": name, "uri": format!("/{name}"), "status": status,
+            "service_id": svc, "methods": ["GET"],
+            "plugins": { "shi-auth": { "allowed_groups": ["g1"] } },
+        }))
+    };
+    let orphan = RouteView::from_value(&json!({
+        "id": "4", "name": "orphan", "uri": "/orphan", "status": 1,
+        "service_id": "", "methods": ["GET"],
+    }));
+    db::sync_routes(
+        &c,
+        "dev",
+        &[
+            mk("1", "a-on", "svc-a", 1),
+            mk("2", "a-off", "svc-a", 0),
+            mk("3", "b-on", "svc-b", 1),
+            orphan,
+        ],
+    )
+    .unwrap();
+    db::sync_consumers(
+        &c,
+        "dev",
+        &[ConsumerView::from_value(&json!({
+            "username": "u",
+            "plugins": { "shi-auth": { "auth_groups": ["g1"] } },
+        }))],
+    )
+    .unwrap();
+
+    let blob = |p: &Perm| p.allow_blob();
+    let admin = blob(&Perm::Admin);
+    let only_a = blob(&Perm::Services(vec!["svc-a".into()]));
+    let a_and_b = blob(&Perm::Services(vec!["svc-a".into(), "svc-b".into()]));
+    let nothing = blob(&Perm::Services(vec![]));
+    let expired = blob(&Perm::None(Reason::Expired));
+
+    let total = |allow: &str| db::query_routes(&c, "dev", "all", "", "", &ALL, allow).unwrap().total;
+
+    // 전체 관리자는 제한이 없다 — service 없는 라우트까지 본다.
+    assert_eq!(total(&admin), 4);
+    assert_eq!(total(&only_a), 2);
+    assert_eq!(total(&a_and_b), 3, "service 없는 4번은 빠진다");
+
+    // 권한이 하나도 없으면 0건이어야 한다. 특히 service 없는 라우트가 새어 나오면 안 된다
+    // — 빈 허용목록의 바늘(`"\n\n"`)이 곧 그 라우트의 바늘이라 실수하기 쉬운 자리다.
+    assert_eq!(total(&nothing), 0);
+    assert_eq!(total(&expired), 0);
+
+    // 목록에 없는 service 로 걸러도 0건 (접두사만 같은 id 가 걸리는지도 함께 본다).
+    assert_eq!(total(&blob(&Perm::Services(vec!["svc".into()]))), 0);
+    assert_eq!(total(&blob(&Perm::Services(vec!["svc-c".into()]))), 0);
+
+    // chip 건수는 목록과 같은 범위여야 한다 — svc-a 는 활성 1 · 비활성 1.
+    let page = db::query_routes(&c, "dev", "on", "", "", &ALL, &only_a).unwrap();
+    assert_eq!(page.total, 1, "chip=on 은 활성만");
+    assert_eq!((page.counts.all, page.counts.on, page.counts.off), (2, 1, 1));
+
+    // 검색어·접두사와 함께 걸려도 축이 서로를 지우지 않는다.
+    assert_eq!(db::query_routes(&c, "dev", "all", "b-on", "", &ALL, &only_a).unwrap().total, 0);
+    assert_eq!(db::query_routes(&c, "dev", "all", "", "A-", &ALL, &only_a).unwrap().total, 2);
+
+    // 좌측 패널 집계도 같은 범위다.
+    let acc = db::consumer_access_counts(&c, "dev", &admin).unwrap();
+    assert_eq!((acc.all, acc.ungrouped), (4, 1));
+    let acc = db::consumer_access_counts(&c, "dev", &only_a).unwrap();
+    assert_eq!(acc.all, 2);
+    assert_eq!(acc.ungrouped, 0, "그룹 없는 4번은 service 도 없어 권한 밖이다");
+    assert_eq!(acc.items[0].count, 2, "g1 로 svc-a 두 건에 접근한다");
+    let acc = db::consumer_access_counts(&c, "dev", &nothing).unwrap();
+    assert_eq!((acc.all, acc.ungrouped), (0, 0));
+    assert_eq!(acc.items.len(), 1, "접근 가능 라우트가 0이어도 컨슈머는 목록에 남는다");
+    assert_eq!(acc.items[0].count, 0);
+
+    // 대시보드 KPI 도 같은 범위다 (컨슈머 건수는 좁히지 않는다).
+    let o = db::overview_counts(&c, "dev", &only_a).unwrap();
+    assert_eq!((o.routes, o.routes_active, o.routes_inactive), (2, 1, 1));
+    assert_eq!(o.consumers, 1);
+    let o = db::overview_counts(&c, "dev", &admin).unwrap();
+    assert_eq!(o.routes, 4);
+
+    // '그룹 제한 없음' 축과 겹쳐도 허용목록이 살아 있다 — 4번만 그룹이 없다.
+    let ung = db::query_routes(&c, "dev", "all", "", "", &db::RouteScope::Ungrouped, &admin)
+        .unwrap();
+    assert_eq!(ung.total, 1);
+    let ung = db::query_routes(&c, "dev", "all", "", "", &db::RouteScope::Ungrouped, &a_and_b)
+        .unwrap();
+    assert_eq!(ung.total, 0, "그룹 없는 라우트는 service 도 없어 권한 밖이다");
 }
 
 // ── 11. 담당자 (labels · name{n} / dept{n}) ──────────────────
@@ -1915,7 +2244,7 @@ mod access {
         .unwrap();
 
         let total =
-            |scope: &db::RouteScope| db::query_routes(&c, "dev", "all", "", "", scope).unwrap().total;
+            |scope: &db::RouteScope| db::query_routes(&c, "dev", "all", "", "", scope, "").unwrap().total;
 
         assert_eq!(total(&ALL), 3, "필터 없으면 전체");
         assert_eq!(total(&user("alpha")), 1);
@@ -1924,7 +2253,7 @@ mod access {
 
         // allowed_groups 가 빈 라우트는 어떤 컨슈머로도 걸리지 않는다.
         // (그래서 좌측 패널이 '그룹 제한 없음' 건수를 따로 보여 준다)
-        let names: Vec<String> = db::query_routes(&c, "dev", "all", "", "", &user("beta"))
+        let names: Vec<String> = db::query_routes(&c, "dev", "all", "", "", &user("beta"), "")
             .unwrap()
             .items
             .iter()
@@ -1941,7 +2270,7 @@ mod access {
         db::sync_routes(&c, "dev", &[route("1", "both", 1, json!(["a", "b"]))]).unwrap();
         db::sync_consumers(&c, "dev", &[consumer("u", json!(["a", "b"]))]).unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", "", &user("u")).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", "", &user("u"), "").unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.counts.all, 1);
@@ -1966,14 +2295,14 @@ mod access {
 
         // chip 을 눌러도 라벨 숫자는 그대로다.
         for chip in ["all", "on", "off"] {
-            let counts = db::query_routes(&c, "dev", chip, "", "", &user("alpha")).unwrap().counts;
+            let counts = db::query_routes(&c, "dev", chip, "", "", &user("alpha"), "").unwrap().counts;
             assert_eq!((counts.all, counts.on, counts.off), (2, 1, 1), "chip={chip}");
         }
         // 반면 total 은 chip 을 반영한다.
-        assert_eq!(db::query_routes(&c, "dev", "on", "", "", &user("alpha")).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "on", "", "", &user("alpha"), "").unwrap().total, 1);
 
         // 검색어도 반영한다.
-        let counts = db::query_routes(&c, "dev", "all", "partner-on", "", &user("alpha")).unwrap().counts;
+        let counts = db::query_routes(&c, "dev", "all", "partner-on", "", &user("alpha"), "").unwrap().counts;
         assert_eq!((counts.all, counts.on, counts.off), (1, 1, 0));
     }
 
@@ -2001,7 +2330,7 @@ mod access {
         )
         .unwrap();
 
-        let acc = db::consumer_access_counts(&c, "dev").unwrap();
+        let acc = db::consumer_access_counts(&c, "dev", "").unwrap();
         assert_eq!(acc.all, 3);
         assert_eq!(acc.ungrouped, 1, "allowed_groups 가 빈 라우트");
 
@@ -2022,8 +2351,8 @@ mod access {
         db::sync_routes(&c, "dev", &[route("1", "r", 1, json!(["Partner"]))]).unwrap();
         db::sync_consumers(&c, "dev", &[consumer("u", json!(["partner"]))]).unwrap();
 
-        assert_eq!(db::query_routes(&c, "dev", "all", "", "", &user("u")).unwrap().total, 0);
-        assert_eq!(db::consumer_access_counts(&c, "dev").unwrap().items[0].count, 0);
+        assert_eq!(db::query_routes(&c, "dev", "all", "", "", &user("u"), "").unwrap().total, 0);
+        assert_eq!(db::consumer_access_counts(&c, "dev", "").unwrap().items[0].count, 0);
     }
 
     /// to_string_list 는 중복을 제거하지 않는다. 정션 테이블이 OR IGNORE 가 아니면
@@ -2035,8 +2364,8 @@ mod access {
         // CSV 표기도 같은 경로를 탄다.
         db::sync_consumers(&c, "dev", &[consumer("u", json!("ops, ops"))]).unwrap();
 
-        assert_eq!(db::query_routes(&c, "dev", "all", "", "", &user("u")).unwrap().total, 1);
-        assert_eq!(db::consumer_access_counts(&c, "dev").unwrap().items[0].count, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "", "", &user("u"), "").unwrap().total, 1);
+        assert_eq!(db::consumer_access_counts(&c, "dev", "").unwrap().items[0].count, 1);
     }
 
     /// 캐시의 `view` 열 왕복이 무손실이어야 한다 (ConsumerView: Deserialize).
@@ -2103,11 +2432,11 @@ mod access {
         db::sync_routes(&c, "prod", &[route("9", "prod-r", 1, json!(["shared"]))]).unwrap();
         db::sync_consumers(&c, "dev", &[consumer("u", json!(["shared"]))]).unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", "", &user("u")).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", "", &user("u"), "").unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].name, "dev-r");
         // prod 에는 그 username 의 컨슈머가 없으니 아무것도 안 걸린다.
-        assert_eq!(db::query_routes(&c, "prod", "all", "", "", &user("u")).unwrap().total, 0);
+        assert_eq!(db::query_routes(&c, "prod", "all", "", "", &user("u"), "").unwrap().total, 0);
     }
 
     /// '그룹 제한 없음' 범위 — allowed_groups 가 빈 라우트만 남는다.
@@ -2129,29 +2458,29 @@ mod access {
         .unwrap();
         db::sync_consumers(&c, "dev", &[consumer("alpha", json!(["partner"]))]).unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", "", &UNGROUPED).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", "", &UNGROUPED, "").unwrap();
         assert_eq!(
             page.items.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
             ["free-on", "free-off"]
         );
         // 좌측 패널의 건수와 같은 것을 세고 있어야 한다.
-        assert_eq!(page.total, db::consumer_access_counts(&c, "dev").unwrap().ungrouped);
+        assert_eq!(page.total, db::consumer_access_counts(&c, "dev", "").unwrap().ungrouped);
 
         // chip · 검색어와 AND 로 겹친다.
-        assert_eq!(db::query_routes(&c, "dev", "on", "", "", &UNGROUPED).unwrap().total, 1);
-        assert_eq!(db::query_routes(&c, "dev", "all", "free-off", "", &UNGROUPED).unwrap().total, 1);
-        assert_eq!(db::query_routes(&c, "dev", "all", "partner", "", &UNGROUPED).unwrap().total, 0);
+        assert_eq!(db::query_routes(&c, "dev", "on", "", "", &UNGROUPED, "").unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "free-off", "", &UNGROUPED, "").unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "partner", "", &UNGROUPED, "").unwrap().total, 0);
 
         // chip 라벨의 숫자도 범위를 따라간다 — 컨슈머를 골랐을 때와 같은 이유다
         // (`counts_follow_the_selected_consumer_but_not_the_chip`). 여기서 `?4` 가
         // route_counts 에도 실제로 바인딩됐는지 드러난다.
         for chip in ["all", "on", "off"] {
-            let counts = db::query_routes(&c, "dev", chip, "", "", &UNGROUPED).unwrap().counts;
+            let counts = db::query_routes(&c, "dev", chip, "", "", &UNGROUPED, "").unwrap().counts;
             assert_eq!((counts.all, counts.on, counts.off), (2, 1, 1), "chip={chip}");
         }
 
         // 범위는 배타적이다 — 컨슈머를 고르면 그룹 없는 라우트는 안 보인다.
-        assert_eq!(db::query_routes(&c, "dev", "all", "", "", &user("alpha")).unwrap().total, 1);
+        assert_eq!(db::query_routes(&c, "dev", "all", "", "", &user("alpha"), "").unwrap().total, 1);
     }
 
     /// 새 절도 환경별로 격리돼야 한다 (`access_join_is_env_scoped` 와 같은 이유).
@@ -2166,10 +2495,10 @@ mod access {
         )
         .unwrap();
 
-        let page = db::query_routes(&c, "dev", "all", "", "", &UNGROUPED).unwrap();
+        let page = db::query_routes(&c, "dev", "all", "", "", &UNGROUPED, "").unwrap();
         assert_eq!(page.items.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["dev-free"]);
 
-        let page = db::query_routes(&c, "prod", "all", "", "", &UNGROUPED).unwrap();
+        let page = db::query_routes(&c, "prod", "all", "", "", &UNGROUPED, "").unwrap();
         assert_eq!(page.items.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["prod-free"]);
     }
 
@@ -2220,11 +2549,11 @@ mod access {
         )
         .unwrap();
 
-        let o = db::overview_counts(&c, "dev").unwrap();
+        let o = db::overview_counts(&c, "dev", "").unwrap();
         assert_eq!((o.routes, o.routes_active, o.routes_inactive), (3, 2, 1));
         assert_eq!((o.consumers, o.consumers_jwt), (2, 2));
 
-        let p = db::overview_counts(&c, "prod").unwrap();
+        let p = db::overview_counts(&c, "prod", "").unwrap();
         assert_eq!((p.consumers, p.consumers_jwt), (1, 0));
     }
 }

@@ -402,6 +402,22 @@ const ACCESS_CLAUSE: &str = " AND (?3 = '' OR EXISTS (
 const NAME_PREFIX_CLAUSE: &str =
     " AND (?5 = '' OR substr(lower(name), 1, length(?5)) = ?5)";
 
+/// 관리 권한이 있는 service 로 조회를 좁히는 조건 — Route 조회의 **다섯 번째 축**이다.
+///
+/// `?6` 은 `perm::Perm::allow_blob()` 이 만든다: `""` 는 제한 없음(전체 관리자),
+/// 그 외에는 `"\nid1\nid2\n"` 이라 `instr` 이 `"\n" || service_id || "\n"` 을 찾으면
+/// 정확히 한 항목에만 맞는다 (접두사가 같은 id 끼리 서로 걸리지 않는다).
+///
+/// `service_id IN (?,?,…)` 대신 이 모양을 쓴 이유는 위 `ACCESS_CLAUSE` 와 같다 —
+/// 플레이스홀더 개수가 조회마다 달라지면 `route_counts` 와 바인딩 수가 어긋나
+/// rusqlite 가 런타임에 `InvalidParameterCount` 를 던진다. 라우트는 수백 건 규모라
+/// `instr` 스캔 비용은 문제가 되지 않는다.
+///
+/// service 가 없는 라우트(`service_id = ''`)는 권한이 제한된 사용자에게 보이지 않는다.
+/// `"\n\n"` 을 찾게 되는데 허용목록에는 그런 자리가 없기 때문이다 — 의도한 동작이다.
+const SERVICE_CLAUSE: &str =
+    " AND (?6 = '' OR instr(?6, char(10) || service_id || char(10)) > 0)";
+
 /// chip 값(`all` / `on` / `off`)을 status 조건으로 바꾼다.
 fn status_clause(chip: &str) -> &'static str {
     match chip {
@@ -416,11 +432,14 @@ fn needle(q: &str) -> String {
     q.trim().to_lowercase()
 }
 
-/// 네 축(상태 chip · 검색어 · name 접두사 · 조회 범위)을 적용해 라우트를 조회한다.
+/// 다섯 축(상태 chip · 검색어 · name 접두사 · 조회 범위 · 관리 권한)을 적용해 라우트를 조회한다.
 ///
 /// `scope` 가 `Consumer` 면 그 컨슈머의 auth-groups 와 라우트의 allowed_groups 교집합이
 /// 비어 있지 않은 라우트만 남는다. allowed_groups 가 아예 없는 라우트는 어떤 컨슈머로도
 /// 걸리지 않으므로, 그것만 보는 `Ungrouped` 를 따로 둔다.
+///
+/// `allow` 는 `SERVICE_CLAUSE` 가 쓰는 관리 권한 허용목록이다. 사용자가 고르는 축이 아니라
+/// 토큰이 정하는 축이라 프런트에서 오지 않는다 — `commands.rs` 가 붙여 준다.
 pub fn query_routes(
     conn: &Connection,
     env: &str,
@@ -428,6 +447,7 @@ pub fn query_routes(
     q: &str,
     name_prefix: &str,
     scope: &RouteScope,
+    allow: &str,
 ) -> AppResult<RoutesPage> {
     let n = needle(q);
     let pfx = needle(name_prefix);
@@ -437,16 +457,17 @@ pub fn query_routes(
     // uri 에 밑줄이 흔하므로 검색어를 이스케이프해야 하는 부담을 아예 없앤다.
     let sql = format!(
         "SELECT view FROM routes
-          WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){}{}{}
+          WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){}{}{}{}
           ORDER BY seq",
         ACCESS_CLAUSE,
         NAME_PREFIX_CLAUSE,
+        SERVICE_CLAUSE,
         status_clause(chip)
     );
 
     let mut stmt = conn.prepare(&sql).map_err(sql_err)?;
     let rows = stmt
-        .query_map(params![env, &n, user, ungrouped, &pfx], |row| row.get::<_, String>(0))
+        .query_map(params![env, &n, user, ungrouped, &pfx, allow], |row| row.get::<_, String>(0))
         .map_err(sql_err)?;
 
     let mut items = Vec::new();
@@ -455,7 +476,7 @@ pub fn query_routes(
         items.push(serde_json::from_str::<RouteView>(&json)?);
     }
 
-    let counts = route_counts(conn, env, q, name_prefix, scope)?;
+    let counts = route_counts(conn, env, q, name_prefix, scope, allow)?;
     Ok(RoutesPage { total: items.len() as i64, items, counts })
 }
 
@@ -472,6 +493,7 @@ pub fn route_counts(
     q: &str,
     name_prefix: &str,
     scope: &RouteScope,
+    allow: &str,
 ) -> AppResult<RouteCounts> {
     let n = needle(q);
     let pfx = needle(name_prefix);
@@ -483,9 +505,10 @@ pub fn route_counts(
                     COALESCE(SUM(status <> 1), 0)
                FROM routes
               WHERE env = ?1
-                AND (?2 = '' OR instr(search, ?2) > 0){ACCESS_CLAUSE}{NAME_PREFIX_CLAUSE}"
+                AND (?2 = '' OR instr(search, ?2) > 0)
+                {ACCESS_CLAUSE}{NAME_PREFIX_CLAUSE}{SERVICE_CLAUSE}"
         ),
-        params![env, &n, user, ungrouped, &pfx],
+        params![env, &n, user, ungrouped, &pfx, allow],
         |row| Ok(RouteCounts { all: row.get(0)?, on: row.get(1)?, off: row.get(2)? }),
     )
     .map_err(sql_err)
@@ -607,18 +630,33 @@ pub struct AccessCounts {
 ///
 /// 검색어·status chip 을 **반영하지 않는다.** 이 숫자는 결과 요약이 아니라 범위 선택을 돕는
 /// 고정값이라, 타이핑할 때마다 패널의 모든 숫자가 흔들리면 고를 수가 없다.
-pub fn consumer_access_counts(conn: &Connection, env: &str) -> AppResult<AccessCounts> {
+pub fn consumer_access_counts(
+    conn: &Connection,
+    env: &str,
+    allow: &str,
+) -> AppResult<AccessCounts> {
+    // 관리 권한 허용목록(`allow`)을 세 쿼리 모두에 건다 — 목록에 8건만 보이는데 패널이
+    // "전체 312" 라고 말하면 두 화면이 서로 다른 답을 하는 셈이다.
+    // 여기서는 `?2` 가 허용목록이다 (`query_routes` 는 축이 더 많아 `?6` 이다).
+    const ALLOW: &str = " AND (?2 = '' OR instr(?2, char(10) || service_id || char(10)) > 0)";
+
     let all: i64 = conn
-        .query_row("SELECT COUNT(*) FROM routes WHERE env = ?1", params![env], |r| r.get(0))
+        .query_row(
+            &format!("SELECT COUNT(*) FROM routes WHERE env = ?1{ALLOW}"),
+            params![env, allow],
+            |r| r.get(0),
+        )
         .map_err(sql_err)?;
 
     let ungrouped: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM routes r
-              WHERE r.env = ?1
-                AND NOT EXISTS (SELECT 1 FROM route_groups rg
-                                 WHERE rg.env = r.env AND rg.route_id = r.id)",
-            params![env],
+            &format!(
+                "SELECT COUNT(*) FROM routes
+                  WHERE env = ?1{ALLOW}
+                    AND NOT EXISTS (SELECT 1 FROM route_groups rg
+                                     WHERE rg.env = routes.env AND rg.route_id = routes.id)"
+            ),
+            params![env, allow],
             |r| r.get(0),
         )
         .map_err(sql_err)?;
@@ -628,12 +666,22 @@ pub fn consumer_access_counts(conn: &Connection, env: &str) -> AppResult<AccessC
             // COUNT(DISTINCT …) 가 필수다: 컨슈머와 라우트가 그룹을 둘 이상 공유하면
             // 같은 (컨슈머, 라우트) 쌍이 조인 결과에 여러 행으로 나온다.
             // LEFT JOIN 이라 그룹이 없는 컨슈머도 0 으로 남는다.
-            "SELECT c.username, COUNT(DISTINCT rg.route_id)
+            //
+            // `routes` 를 한 번 더 LEFT JOIN 하는 이유는 허용목록이 라우트의 service_id 를
+            // 봐야 하기 때문이다. 그 조건은 **ON 절에** 둔다 — WHERE 로 옮기면 권한 밖
+            // 라우트만 가진 컨슈머의 모든 행이 걸러져 GROUP BY 에서 그 컨슈머 자체가
+            // 사라진다. 좌측 패널은 "접근 0건" 을 보여 줘야 하고, 행이 없는 것과 0 은 다르다.
+            // 세는 대상도 `rg.route_id` 가 아니라 `r.id` 다 — 조인에서 탈락한 라우트는
+            // NULL 이 되어 COUNT 에서 빠진다.
+            "SELECT c.username, COUNT(DISTINCT r.id)
                FROM consumers c
                LEFT JOIN consumer_groups cg
                       ON cg.env = c.env AND cg.username = c.username
                LEFT JOIN route_groups rg
                       ON rg.env = c.env AND rg.grp = cg.grp
+               LEFT JOIN routes r
+                      ON r.env = rg.env AND r.id = rg.route_id
+                     AND (?2 = '' OR instr(?2, char(10) || r.service_id || char(10)) > 0)
               WHERE c.env = ?1
               GROUP BY c.username
               ORDER BY c.username",
@@ -641,12 +689,15 @@ pub fn consumer_access_counts(conn: &Connection, env: &str) -> AppResult<AccessC
         .map_err(sql_err)?;
 
     let rows = stmt
-        .query_map(params![env], |r| {
+        .query_map(params![env, allow], |r| {
             Ok(ConsumerAccess { username: r.get(0)?, count: r.get(1)? })
         })
         .map_err(sql_err)?;
 
-    let items = rows.collect::<Result<Vec<_>, _>>().map_err(sql_err)?;
+    let mut items = Vec::new();
+    for r in rows {
+        items.push(r.map_err(sql_err)?);
+    }
     Ok(AccessCounts { all, ungrouped, items })
 }
 
@@ -663,12 +714,17 @@ pub struct OverviewCounts {
     pub consumers_jwt: i64,
 }
 
-pub fn overview_counts(conn: &Connection, env: &str) -> AppResult<OverviewCounts> {
+pub fn overview_counts(conn: &Connection, env: &str, allow: &str) -> AppResult<OverviewCounts> {
+    // 라우트 KPI 도 관리 권한 범위로 좁힌다 — 목록에서 8건만 볼 수 있는 사용자에게
+    // 대시보드가 312 를 보여 주면 두 화면이 서로 다른 답을 한다.
+    // (컨슈머 KPI 는 좁히지 않는다. 컨슈머는 service 에 매달린 리소스가 아니다)
     let (routes, routes_active, routes_inactive) = conn
         .query_row(
             "SELECT COUNT(*), COALESCE(SUM(status = 1), 0), COALESCE(SUM(status <> 1), 0)
-               FROM routes WHERE env = ?1",
-            params![env],
+               FROM routes
+              WHERE env = ?1
+                AND (?2 = '' OR instr(?2, char(10) || service_id || char(10)) > 0)",
+            params![env, allow],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(sql_err)?;

@@ -1,10 +1,18 @@
-/** 현재 환경에 관리 토큰이 없을 때 뜨는 잠금 화면 — 디자인 원본 그대로. */
+/**
+ * 현재 환경을 관리할 수 없을 때 뜨는 잠금 화면 — 디자인 원본에 사유 문구만 붙였다.
+ *
+ * 막히는 이유가 여섯 가지다 (토큰 미등록 · JWT 아님 · 서명 불일치 · key 불일치 ·
+ * 시작 전 · 만료). "토큰을 등록하세요" 한 문장으로 뭉치면 이미 등록한 사용자가
+ * 무엇을 해야 하는지 알 수 없다. 문구는 Rust `perm::Reason::message` 가 만든다.
+ */
 
-import { useStore } from "../store";
+import { selectPerm, useStore } from "../store";
 
 export default function LockedScreen() {
   const env = useStore((s) => s.env);
   const go = useStore((s) => s.go);
+  const perm = useStore(selectPerm);
+  const hasToken = useStore((s) => s.settings?.[s.env]?.hasToken ?? false);
 
   return (
     <div
@@ -48,8 +56,10 @@ export default function LockedScreen() {
           {env === "dev" ? "개발" : "운영"} 서버는 관리 불가 상태입니다
         </h4>
         <p className="text-md muted" style={{ margin: "0 0 20px" }}>
-          관리 토큰이 등록되지 않은 환경은 조회·변경할 수 없습니다. 설정 화면에서 baseUrl과 관리
-          토큰을 입력하세요.
+          {perm?.message || "관리 토큰이 등록되지 않았습니다."}{" "}
+          {hasToken
+            ? "설정 화면에서 새 관리 토큰을 등록하세요. 토큰은 공통담당자에게 요청합니다."
+            : "설정 화면에서 baseUrl과 관리 토큰을 입력하세요."}
         </p>
         <button className="btn md solid-primary" onClick={() => go("settings")}>
           설정으로 이동

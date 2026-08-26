@@ -195,69 +195,31 @@ export default function Dashboard() {
             </div>
           ))}
 
-          {dash?.noProxy === false ? (
+          {/* 프록시 우회 · 인증서 검증 건너뛰기는 고정값이다 (`config.rs` 모듈 주석).
+              예전에는 토글 상태에 따라 경고/확인 배너가 갈렸지만, 이제 껐다 켤 수 없으므로
+              무엇이 적용돼 있는지만 한 번 알려 준다. 만료되지 않는 경고 배너는 곧 배경이 된다. */}
+          <div
+            style={{
+              marginTop: 14,
+              padding: 12,
+              background: "var(--purple-25)",
+              border: "1px solid var(--purple-100)",
+              borderRadius: 8,
+            }}
+          >
             <div
-              style={{
-                marginTop: 14,
-                padding: 12,
-                background: "var(--yellow-50)",
-                border: "1px solid var(--yellow-200)",
-                borderRadius: 8,
-              }}
+              className="text-xs"
+              style={{ color: "var(--purple-800)", fontWeight: 500, marginBottom: 4 }}
             >
-              <div
-                className="text-xs"
-                style={{ color: "var(--yellow-800)", fontWeight: 500, marginBottom: 4 }}
-              >
-                시스템 프록시 사용 중
-              </div>
-              <div
-                className="font-mono"
-                style={{ fontSize: 11, lineHeight: "16px", color: "var(--gray-600)" }}
-              >
-                설정에서 '프록시 강제 우회'를 켜면 직접 호출합니다.
-              </div>
+              프록시 우회 · 인증서 검증 건너뛰기 적용됨
             </div>
-          ) : (
             <div
-              style={{
-                marginTop: 14,
-                padding: 12,
-                background: "var(--purple-25)",
-                border: "1px solid var(--purple-100)",
-                borderRadius: 8,
-              }}
+              className="font-mono"
+              style={{ fontSize: 11, lineHeight: "16px", color: "var(--gray-600)" }}
             >
-              <div
-                className="text-xs"
-                style={{ color: "var(--purple-800)", fontWeight: 500, marginBottom: 4 }}
-              >
-                프록시 우회 적용됨
-              </div>
-              <div
-                className="font-mono"
-                style={{ fontSize: 11, lineHeight: "16px", color: "var(--gray-600)" }}
-              >
-                no_proxy = * · reqwest.no_proxy()
-              </div>
+              reqwest.no_proxy() · danger_accept_invalid_certs(true)
             </div>
-          )}
-
-          {dash?.insecureTls && (
-            <div
-              style={{
-                marginTop: 10,
-                padding: 12,
-                background: "var(--yellow-50)",
-                border: "1px solid var(--yellow-200)",
-                borderRadius: 8,
-              }}
-            >
-              <div className="text-xs" style={{ color: "var(--yellow-800)", fontWeight: 500 }}>
-                인증서 검증 건너뛰기 켜짐
-              </div>
-            </div>
-          )}
+          </div>
         </div>
       </div>
     </div>

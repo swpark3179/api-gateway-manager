@@ -141,8 +141,11 @@ impl From<reqwest::Error> for AppError {
             || low.contains("self signed");
 
         if looks_tls {
-            return AppError::new(ErrorKind::Tls, "TLS 인증서 검증에 실패했습니다.").with_hint(
-                "사설/자체서명 인증서라면 설정에서 '인증서 검증 건너뛰기'를 켜거나, 사내 CA 를 Windows 인증서 저장소에 설치하세요.",
+            // 인증서 검증 건너뛰기가 항상 켜져 있으므로(`config.rs` `force_toggles`) 여기까지
+            // 오는 경우는 드물다. 남은 원인은 TLS 핸드셰이크 자체의 실패라, 이제 없는 토글을
+            // 안내하는 대신 실제로 손댈 수 있는 것을 말한다.
+            return AppError::new(ErrorKind::Tls, "TLS 연결에 실패했습니다.").with_hint(
+                "baseUrl 의 스킴(http / https)과 포트를 확인하세요. 사내 CA 를 Windows 인증서 저장소에 설치하면 더 안전합니다.",
             );
         }
 

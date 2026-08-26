@@ -15,14 +15,55 @@ export type Kind = "route" | "consumer" | "service" | "upstream";
 
 // ── 설정 ─────────────────────────────────────────────────────
 
+/** 관리 권한의 세 상태. `none` 이면 잠금 화면으로 간다. */
+export type PermKind = "admin" | "scoped" | "none";
+
+/** `kind === "none"` 이 된 이유 (Rust `perm::Reason`). */
+export type PermReason =
+  | "noToken"
+  | "notJwt"
+  | "badSignature"
+  | "badKey"
+  | "notYet"
+  | "expired";
+
+export interface PermService {
+  id: string;
+  /** 해당 환경의 캐시에서 찾은 service 이름. 못 찾으면 id 와 같다. */
+  name: string;
+}
+
+/**
+ * 관리 토큰(JWT)이 실어 온 권한. Rust `perm::PermView` 와 1:1 이다.
+ *
+ * 기간이 지나 `kind === "none"` 이어도 `hasClaims` 가 true 면 시작일·종료일·권한 서비스는
+ * 채워져 있다 — 설정 화면이 "왜 막혔는지" 를 보여 줘야 하기 때문이다.
+ */
+export interface PermView {
+  kind: PermKind;
+  reason?: PermReason;
+  /** 사유 설명. `kind !== "none"` 이면 빈 문자열. */
+  message: string;
+  hasClaims: boolean;
+  nbf: number;
+  exp: number;
+  nbfHuman: string;
+  expHuman: string;
+  /** admin 이면 빈 배열 */
+  services: PermService[];
+}
+
 export interface EnvConfigView {
   baseUrl: string;
+  /** 항상 true — 설정 화면에서 고를 수 없다 (Rust `config.rs` 모듈 주석) */
   noProxy: boolean;
+  /** 항상 true — 위와 같다 */
   insecureTls: boolean;
   hasToken: boolean;
-  /** 마스킹된 표시용 문자열. 원문 토큰은 프런트로 내려오지 않는다. */
+  /** 마스킹된 표시용 문자열. 원문은 `settingsRevealToken` 으로만 받는다. */
   tokenMasked: string;
   adminBase: string;
+  perm: PermView;
 }
 
 export interface SettingsView {
@@ -32,10 +73,19 @@ export interface SettingsView {
 
 export interface EnvPayload {
   baseUrl: string;
-  noProxy: boolean;
-  insecureTls: boolean;
   /** null = 기존 토큰 유지, "" = 삭제, 그 외 = 교체 */
   token: string | null;
+}
+
+/** 관리 토큰 발급 요청 (전체 관리자 전용). */
+export interface AdminTokenRequest {
+  /** 시작일 unix 초 */
+  nbf: number;
+  /** 종료일 unix 초 */
+  exp: number;
+  admin: boolean;
+  /** `admin === false` 일 때 권한을 줄 service id 목록 */
+  services: string[];
 }
 
 export interface TestResult {
