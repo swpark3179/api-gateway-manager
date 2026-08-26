@@ -50,6 +50,7 @@ import {
   upstreamToForm,
   type AccessCounts,
   type AdminTokenRequest,
+  type AdminTokenResult,
   type AppError,
   type CompareRow,
   type Contact,
@@ -326,11 +327,11 @@ interface AppState {
 
   saveSettings: (env: EnvKey, payload: EnvPayload) => Promise<boolean>;
   testSettings: (env: EnvKey, payload: EnvPayload) => Promise<TestResult>;
-  /** 설정 화면 `표시` 토글 — 저장된 관리 토큰의 원문. 실패하면 빈 문자열. */
+  /** 설정 화면 `표시` 토글 — 저장된 관리키의 원문. 실패하면 빈 문자열. */
   revealToken: (env: EnvKey) => Promise<string>;
-  /** 관리 토큰 발급 (전체 관리자 전용). 실패하면 null 을 주고 토스트로 알린다. */
-  createAdminToken: (env: EnvKey, req: AdminTokenRequest) => Promise<JwtResult | null>;
-  /** 발급한 관리 토큰을 클립보드로. */
+  /** 관리키 발급 (전체 관리자 전용). 실패하면 null 을 주고 토스트로 알린다. */
+  createAdminToken: (env: EnvKey, req: AdminTokenRequest) => Promise<AdminTokenResult | null>;
+  /** 발급한 관리키를 클립보드로. */
   copyText: (text: string, label: string) => Promise<void>;
 
   flash: (msg: string) => void;
@@ -1703,7 +1704,7 @@ function showMeta(
 /** 현재 환경의 관리 권한. 설정을 아직 못 읽었으면 null. */
 export const selectPerm = (s: AppState): PermView | null => s.settings?.[s.env]?.perm ?? null;
 
-/** 전체 관리자인가 — Upstream · Service 메뉴와 관리 토큰 발급 카드의 조건. */
+/** 전체 관리자인가 — Upstream · Service 메뉴와 관리키 발급 카드의 조건. */
 export const selectIsAdmin = (s: AppState): boolean => selectPerm(s)?.kind === "admin";
 
 /**

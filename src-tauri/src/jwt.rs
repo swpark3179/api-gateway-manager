@@ -5,7 +5,8 @@
 //! 동일해지도록 헤더·페이로드 JSON 을 **키 순서까지 맞춰** 직접 만든다.
 //! (serde_json 의 Map 은 기본이 정렬 저장이라 json! 매크로를 쓰면 키 순서가 달라진다)
 //!
-//! 관리 토큰의 해석·권한 판정은 `perm.rs` 가 한다. 여기는 만들기만 한다.
+//! 관리 토큰의 서명 secret 은 상수가 아니라 **호출부가 넘긴다** — 관리키(`secret$token`)에
+//! 실려 오기 때문이다. 관리키 조립·해석과 권한 판정은 `perm.rs` 가 한다. 여기는 만들기만 한다.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -16,7 +17,7 @@ use serde::Serialize;
 use sha2::Sha256;
 
 use crate::error::{AppError, AppResult};
-use crate::perm::{Perm, ADMIN_KEY, ADMIN_SECRET};
+use crate::perm::{Perm, ADMIN_KEY};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -129,10 +130,21 @@ pub fn sign(
 
 /// 관리 토큰(admin token) 을 발급한다 — `{key, nbf, exp, perm}`.
 ///
-/// key·secret 은 `perm::ADMIN_KEY` · `perm::ADMIN_SECRET` 고정이고, 여기서 만든 토큰은
-/// `perm::decode` 가 그대로 되읽는다. Consumer 토큰(`sign`)과 달리 유효기간이 인자다 —
-/// 관리 권한을 기간제로 주는 것이 이 토큰의 존재 이유이기 때문이다.
-pub fn sign_admin(nbf: i64, exp: i64, perm: &Perm) -> AppResult<JwtResult> {
+/// `key` 는 `perm::ADMIN_KEY` 고정이고, `secret` 은 발급하는 사람이 넣는다 —
+/// 게이트웨이의 관리 consumer 에 등록된 `jwt-auth.secret` 과 같아야 실제로 통한다.
+/// 여기서 만든 토큰은 `perm::decode` 가 같은 secret 으로 그대로 되읽는다.
+/// Consumer 토큰(`sign`)과 달리 유효기간이 인자다 — 관리 권한을 기간제로 주는 것이
+/// 이 토큰의 존재 이유이기 때문이다.
+pub fn sign_admin(secret: &str, nbf: i64, exp: i64, perm: &Perm) -> AppResult<JwtResult> {
+    let secret = secret.trim();
+    if secret.is_empty() {
+        return Err(AppError::config("관리 토큰을 발급하려면 secret 이 필요합니다."));
+    }
+    // `$` 는 관리키(`secret$token`)의 구분자다. 값에 섞이면 관리키가 어디서 갈리는지
+    // 모호해지므로 발급 시점에 거부해 알려 준다. (`perm::SEP`)
+    if secret.contains('$') {
+        return Err(AppError::config("secret 에는 $ 를 넣을 수 없습니다."));
+    }
     if exp <= nbf {
         return Err(AppError::config("종료일은 시작일보다 뒤여야 합니다."));
     }
@@ -182,7 +194,7 @@ pub fn sign_admin(nbf: i64, exp: i64, perm: &Perm) -> AppResult<JwtResult> {
         perm_pretty
     );
 
-    finish(ADMIN_SECRET, &payload_json, payload_pretty, nbf, exp)
+    finish(secret, &payload_json, payload_pretty, nbf, exp)
 }
 
 /// 디자인의 `genSecret()` 과 동일 — 16바이트 난수를 hex 32자로.

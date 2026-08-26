@@ -862,7 +862,7 @@ fn generated_secret_is_32_hex_chars() {
     assert_ne!(a, b, "매번 다른 값이 나와야 한다");
 }
 
-// ── 4-b. 관리 토큰 권한 (perm) ───────────────────────────────
+// ── 4-b. 관리키 · 관리 토큰 권한 (perm) ──────────────────────
 
 mod admin_token {
     use crate::jwt;
@@ -873,24 +873,33 @@ mod admin_token {
     const EXP: i64 = 1_767_312_000; // 2026-01-02T00:00:00Z
     const MID: i64 = 1_767_268_800; // 그 사이
 
+    /// 테스트용 서명 secret. 실제 secret 은 관리키가 실어 오므로 코드에 상수가 없다.
+    const SECRET: &str = "test-secret";
+
     fn admin_token() -> String {
-        jwt::sign_admin(NBF, EXP, &Perm::Admin).unwrap().token
+        jwt::sign_admin(SECRET, NBF, EXP, &Perm::Admin).unwrap().token
     }
 
     fn scoped_token(ids: &[&str]) -> String {
         let p = Perm::Services(ids.iter().map(|s| s.to_string()).collect());
-        jwt::sign_admin(NBF, EXP, &p).unwrap().token
+        jwt::sign_admin(SECRET, NBF, EXP, &p).unwrap().token
+    }
+
+    /// `{"key":"<ADMIN_KEY>",<rest>}` — key 값을 테스트마다 적지 않기 위한 조립기.
+    /// 상수 한 곳만 보게 해 두면 key 를 바꿀 때 테스트가 따라온다.
+    fn payload(rest: &str) -> String {
+        format!(r#"{{"key":"{}",{rest}}}"#, perm::ADMIN_KEY)
     }
 
     /// 발급한 토큰이 그대로 되읽힌다 — 이 왕복이 깨지면 발급 화면이 만든 토큰으로
     /// 아무도 로그인할 수 없게 된다.
     #[test]
     fn sign_admin_round_trips_through_decode() {
-        let c = perm::decode(&admin_token()).expect("admin 토큰 해석");
+        let c = perm::decode(&admin_token(), SECRET).expect("admin 토큰 해석");
         assert_eq!((c.nbf, c.exp), (NBF, EXP));
         assert_eq!(c.perm, Perm::Admin);
 
-        let c = perm::decode(&scoped_token(&["svc-b", "svc-a"])).expect("scoped 토큰 해석");
+        let c = perm::decode(&scoped_token(&["svc-b", "svc-a"]), SECRET).expect("scoped 토큰 해석");
         // 발급 시 정렬·중복 제거된다 — 같은 권한이면 같은 토큰이어야 한다.
         assert_eq!(c.perm, Perm::Services(vec!["svc-a".into(), "svc-b".into()]));
         assert_eq!(
@@ -900,6 +909,63 @@ mod admin_token {
         );
     }
 
+    /// 관리키(`secret$token`) 조립·분해. 사용자가 붙여넣는 문자열의 계약이라
+    /// 여기가 깨지면 모든 환경이 잠긴다.
+    #[test]
+    fn admin_key_round_trips() {
+        let t = admin_token();
+
+        let k = perm::split(&perm::join(SECRET, &t)).expect("관리키 분해");
+        assert_eq!((k.secret.as_str(), k.token.as_str()), (SECRET, t.as_str()));
+
+        // 앞뒤 공백은 분해가 한 번에 털어낸다 — 붙여넣기에 개행이 섞여 오는 일이 흔하고,
+        // 서명(`jwt::finish`)도 trim 한 secret 을 쓰므로 정규화 지점이 하나여야 한다.
+        let k = perm::split(&format!("  {SECRET} $ {t}\n")).expect("공백 섞인 관리키");
+        assert_eq!((k.secret.as_str(), k.token.as_str()), (SECRET, t.as_str()));
+
+        // secret 에 `$` 가 섞여도 **마지막** `$` 로 갈린다 — 토큰에는 `$` 가 없기 때문이다.
+        // (발급은 그런 secret 을 거부한다. 읽는 쪽은 관대하고 만드는 쪽이 엄격하다)
+        let k = perm::split(&perm::join("a$b", &t)).expect("secret 에 $ 가 있는 관리키");
+        assert_eq!((k.secret.as_str(), k.token.as_str()), ("a$b", t.as_str()));
+
+        // 형식이 아닌 것들 — 사유가 갈려야 잠금 화면이 무엇을 고치라고 말할 수 있다.
+        assert_eq!(perm::split(&t).unwrap_err(), Reason::NoSecret, "$ 없는 예전 평문 토큰");
+        assert_eq!(perm::split("").unwrap_err(), Reason::NoSecret);
+        assert_eq!(perm::split("   ").unwrap_err(), Reason::NoSecret);
+        assert_eq!(perm::split(&format!("${t}")).unwrap_err(), Reason::NoSecret, "secret 이 비었다");
+        assert_eq!(perm::split("secret$").unwrap_err(), Reason::NotJwt, "토큰이 비었다");
+    }
+
+    /// 게이트웨이(`X-API-KEY`)로 나가는 것은 토큰뿐이다.
+    ///
+    /// `config::resolve` 는 자격 증명 관리자가 필요해 단위 테스트가 되지 않으므로,
+    /// 그 계약을 실제로 지키는 이음새인 `split` 을 여기서 못 박는다. secret 이 섞여 나가면
+    /// 게이트웨이 로그와 프록시에 서명 키가 그대로 남는다.
+    #[test]
+    fn gateway_gets_the_token_only() {
+        let t = admin_token();
+        let sent = perm::split(&perm::join(SECRET, &t)).unwrap().token;
+
+        assert_eq!(sent, t);
+        assert!(!sent.contains('$'), "구분자가 남아 있으면 secret 도 붙어 있다는 뜻이다");
+        assert!(!sent.contains(SECRET), "secret 이 섞여 나가면 안 된다");
+        assert_eq!(sent.split('.').count(), 3, "JWT 세 세그먼트");
+    }
+
+    /// 서명은 그 관리키의 secret 으로만 맞는다.
+    #[test]
+    fn token_verifies_only_against_its_own_secret() {
+        let t = admin_token();
+        assert!(perm::decode(&t, SECRET).is_ok());
+        assert_eq!(perm::decode(&t, "other-secret").unwrap_err(), Reason::BadSignature);
+        assert_eq!(perm::decode(&t, "").unwrap_err(), Reason::BadSignature);
+
+        // 권한·기간이 같아도 secret 이 다르면 다른 토큰이다 — 게이트웨이가 그 차이를 본다.
+        let other = jwt::sign_admin("other-secret", NBF, EXP, &Perm::Admin).unwrap().token;
+        assert_ne!(other, t);
+        assert_eq!(perm::decode(&other, SECRET).unwrap_err(), Reason::BadSignature);
+    }
+
     #[test]
     fn payload_key_order_is_fixed() {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -907,10 +973,10 @@ mod admin_token {
 
         let t = admin_token();
         let parts: Vec<&str> = t.split('.').collect();
-        let payload = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+        let decoded = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
         assert_eq!(
-            String::from_utf8(payload).unwrap(),
-            format!(r#"{{"key":"apisix-manage","nbf":{NBF},"exp":{EXP},"perm":"admin"}}"#),
+            String::from_utf8(decoded).unwrap(),
+            payload(&format!(r#""nbf":{NBF},"exp":{EXP},"perm":"admin""#)),
             "키 순서가 바뀌면 같은 권한인데도 토큰 문자열이 달라진다"
         );
         assert!(!t.contains('='), "base64url 패딩이 없어야 한다");
@@ -918,56 +984,57 @@ mod admin_token {
 
     #[test]
     fn rejects_tampered_and_foreign_tokens() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+
         // 서명 위조 — 마지막 세그먼트를 갈아 끼운다.
         let t = admin_token();
         let head = t.rsplit_once('.').unwrap().0;
         assert_eq!(
-            perm::decode(&format!("{head}.YWFhYWFh")).unwrap_err(),
+            perm::decode(&format!("{head}.YWFhYWFh"), SECRET).unwrap_err(),
             Reason::BadSignature
         );
 
         // payload 를 고치면 서명이 먼저 깨진다 (권한 승격 시도).
         let forged = {
-            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-            use base64::Engine;
             let parts: Vec<&str> = t.split('.').collect();
             let evil = URL_SAFE_NO_PAD
-                .encode(r#"{"key":"apisix-manage","nbf":0,"exp":9999999999,"perm":"admin"}"#);
+                .encode(payload(r#""nbf":0,"exp":9999999999,"perm":"admin""#));
             format!("{}.{}.{}", parts[0], evil, parts[2])
         };
-        assert_eq!(perm::decode(&forged).unwrap_err(), Reason::BadSignature);
+        assert_eq!(perm::decode(&forged, SECRET).unwrap_err(), Reason::BadSignature);
 
         // 다른 secret 으로 서명된 토큰.
-        let other = jwt::sign("apisix-manage", "not-our-secret", Some(NBF), Some(EXP)).unwrap();
-        assert_eq!(perm::decode(&other.token).unwrap_err(), Reason::BadSignature);
+        let other = jwt::sign(perm::ADMIN_KEY, "not-our-secret", Some(NBF), Some(EXP)).unwrap();
+        assert_eq!(perm::decode(&other.token, SECRET).unwrap_err(), Reason::BadSignature);
 
         // key 가 다르다 — 서명은 맞지만 우리 관리 토큰이 아니다.
         // (`jwt::sign` 은 perm 을 싣지 않으므로 key 검사가 먼저 걸리는지도 함께 본다)
-        let wrong_key =
-            jwt::sign("someone-else", crate::perm::ADMIN_SECRET, Some(NBF), Some(EXP)).unwrap();
-        assert_eq!(perm::decode(&wrong_key.token).unwrap_err(), Reason::BadKey);
+        let wrong_key = jwt::sign("someone-else", SECRET, Some(NBF), Some(EXP)).unwrap();
+        assert_eq!(perm::decode(&wrong_key.token, SECRET).unwrap_err(), Reason::BadKey);
 
         // JWT 가 아예 아니다 — 예전 평문 X-API-KEY.
-        assert_eq!(perm::decode("edd1c9f034335f136f87ad84b625c8f1").unwrap_err(), Reason::NotJwt);
-        assert_eq!(perm::decode("a.b").unwrap_err(), Reason::NotJwt);
-        assert_eq!(perm::decode("").unwrap_err(), Reason::NotJwt);
+        assert_eq!(
+            perm::decode("edd1c9f034335f136f87ad84b625c8f1", SECRET).unwrap_err(),
+            Reason::NotJwt
+        );
+        assert_eq!(perm::decode("a.b", SECRET).unwrap_err(), Reason::NotJwt);
+        assert_eq!(perm::decode("", SECRET).unwrap_err(), Reason::NotJwt);
 
         // alg=none 은 서명 검증 전에 걷어낸다.
         let none_alg = {
-            use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-            use base64::Engine;
             let h = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
-            let p = URL_SAFE_NO_PAD.encode(r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":"admin"}"#);
+            let p = URL_SAFE_NO_PAD.encode(payload(r#""nbf":0,"exp":9,"perm":"admin""#));
             format!("{h}.{p}.x")
         };
-        assert_eq!(perm::decode(&none_alg).unwrap_err(), Reason::NotJwt);
+        assert_eq!(perm::decode(&none_alg, SECRET).unwrap_err(), Reason::NotJwt);
     }
 
     /// 유효기간은 `decode` 가 아니라 `at` 이 본다 — 만료된 토큰도 설정 화면에서
     /// 시작일·종료일을 보여 줘야 하기 때문이다.
     #[test]
     fn validity_window_is_checked_at_use_time() {
-        let c = perm::decode(&admin_token()).unwrap();
+        let c = perm::decode(&admin_token(), SECRET).unwrap();
         assert_eq!(perm::at(&c, NBF - 1), Perm::None(Reason::NotYet));
         assert_eq!(perm::at(&c, NBF), Perm::Admin, "시작일 정각은 유효하다");
         assert_eq!(perm::at(&c, MID), Perm::Admin);
@@ -977,11 +1044,19 @@ mod admin_token {
 
     #[test]
     fn wont_issue_a_token_nobody_can_use() {
-        assert!(jwt::sign_admin(EXP, NBF, &Perm::Admin).is_err(), "종료 < 시작");
-        assert!(jwt::sign_admin(NBF, NBF, &Perm::Admin).is_err(), "종료 = 시작");
+        assert!(jwt::sign_admin(SECRET, EXP, NBF, &Perm::Admin).is_err(), "종료 < 시작");
+        assert!(jwt::sign_admin(SECRET, NBF, NBF, &Perm::Admin).is_err(), "종료 = 시작");
         assert!(
-            jwt::sign_admin(NBF, EXP, &Perm::Services(vec![])).is_err(),
+            jwt::sign_admin(SECRET, NBF, EXP, &Perm::Services(vec![])).is_err(),
             "권한 service 가 없으면 아무것도 못 하는 토큰이다"
+        );
+
+        // secret 이 없으면 검증할 수 없는 관리키가 된다.
+        assert!(jwt::sign_admin("", NBF, EXP, &Perm::Admin).is_err(), "secret 없음");
+        assert!(jwt::sign_admin("   ", NBF, EXP, &Perm::Admin).is_err(), "공백뿐인 secret");
+        assert!(
+            jwt::sign_admin("a$b", NBF, EXP, &Perm::Admin).is_err(),
+            "$ 는 관리키 구분자라 secret 에 넣을 수 없다"
         );
     }
 
@@ -1017,34 +1092,57 @@ mod admin_token {
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
 
-        let sign = |payload: &str| {
+        let sign = |body: &str| {
             let h = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
-            let p = URL_SAFE_NO_PAD.encode(payload);
+            let p = URL_SAFE_NO_PAD.encode(payload(body));
             let input = format!("{h}.{p}");
-            let mut mac =
-                Hmac::<Sha256>::new_from_slice(crate::perm::ADMIN_SECRET.as_bytes()).unwrap();
+            let mut mac = Hmac::<Sha256>::new_from_slice(SECRET.as_bytes()).unwrap();
             mac.update(input.as_bytes());
             format!("{input}.{}", URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
         };
 
         for bad in [
-            r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":"superuser"}"#,
-            r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":true}"#,
-            r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":["ok",7]}"#,
-            r#"{"key":"apisix-manage","nbf":0,"exp":9}"#,
-            r#"{"key":"apisix-manage","exp":9,"perm":"admin"}"#,
+            r#""nbf":0,"exp":9,"perm":"superuser""#,
+            r#""nbf":0,"exp":9,"perm":true"#,
+            r#""nbf":0,"exp":9,"perm":["ok",7]"#,
+            r#""nbf":0,"exp":9"#,
+            r#""exp":9,"perm":"admin""#,
         ] {
             assert_eq!(
-                perm::decode(&sign(bad)).unwrap_err(),
+                perm::decode(&sign(bad), SECRET).unwrap_err(),
                 Reason::NotJwt,
                 "거부되어야 한다: {bad}"
             );
         }
 
         // 배열은 비어 있어도 유효한 클레임이다 — '권한 service 0개' 는 표현 가능한 상태다.
-        let c = perm::decode(&sign(r#"{"key":"apisix-manage","nbf":0,"exp":9,"perm":[]}"#)).unwrap();
+        let c = perm::decode(&sign(r#""nbf":0,"exp":9,"perm":[]"#), SECRET).unwrap();
         assert_eq!(c.perm, Perm::Services(vec![]));
     }
+}
+
+// ── 4-c. 관리키 마스킹 ───────────────────────────────────────
+
+/// 표시용 마스킹에 secret 이 섞이지 않는다.
+///
+/// 관리키의 앞부분이 곧 secret 이므로, 예전처럼 앞 6자를 자르면 설정 화면과 대시보드가
+/// secret 조각을 그대로 뿌린다. `config::mask` 는 토큰 쪽을 자른다.
+#[test]
+fn mask_never_leaks_the_secret() {
+    use crate::config::mask;
+    use crate::perm::Perm;
+
+    let secret = "edd1c9f034335f136f87ad84b625c8f1";
+    let token = crate::jwt::sign_admin(secret, 0, 9, &Perm::Admin).unwrap().token;
+    let masked = mask(&crate::perm::join(secret, &token));
+
+    assert!(!masked.contains(&secret[..6]), "secret 앞자리가 새면 안 된다: {masked}");
+    assert!(!masked.contains('$'), "구분자가 남으면 secret 도 붙어 있다는 뜻이다");
+    assert!(masked.starts_with(&token[..6]), "토큰 앞 6자를 보여 준다: {masked}");
+
+    // 관리키 형식이 아니면(예전 평문 토큰) 아무것도 드러내지 않는다.
+    assert!(!mask(secret).contains(&secret[..6]));
+    assert!(!mask("").is_empty(), "빈 값에도 표시 문자열은 있어야 한다");
 }
 
 // ── 5. baseUrl 정규화 ────────────────────────────────────────

@@ -8,7 +8,7 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorKind {
-    /// 401 / 403 — 관리 토큰 문제
+    /// 401 / 403 — 관리키 문제
     Unauthorized,
     /// TCP 연결 실패 · DNS 실패 · 타임아웃
     Connect,
@@ -80,7 +80,7 @@ impl AppError {
                 ErrorKind::Unauthorized,
                 "관리 토큰이 올바르지 않습니다.",
             )
-            .with_hint("설정 화면에서 X-API-KEY 를 다시 확인하세요.")
+            .with_hint("설정 화면에서 관리키를 다시 확인하세요.")
             .with_status(status),
 
             404 => AppError::new(ErrorKind::NotFound, "이미 삭제되었거나 존재하지 않는 항목입니다.")
@@ -178,7 +178,7 @@ impl From<keyring::Error> for AppError {
     fn from(e: keyring::Error) -> Self {
         match e {
             keyring::Error::NoEntry => {
-                AppError::new(ErrorKind::Config, "저장된 관리 토큰이 없습니다.")
+                AppError::new(ErrorKind::Config, "저장된 관리키가 없습니다.")
             }
             other => AppError::new(
                 ErrorKind::Internal,

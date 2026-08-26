@@ -6,15 +6,17 @@
  * (`src-tauri/src/config.rs` 모듈 주석). 고를 수 없는 값을 스위치로 보여 주면
  * "껐는데 왜 그대로냐" 는 질문만 남는다.
  *
- * 관리 토큰은 Windows 자격 증명 관리자에 저장되고 평소에는 마스킹된 값만 내려온다.
- * `표시` 를 누르면 `settings_reveal_token` 으로 원문을 받아 입력란에 채우고, 그 토큰이 담은
- * 권한(시작일 · 종료일 · 권한 service)을 함께 펼친다.
+ * 관리키(`secret$token`)는 Windows 자격 증명 관리자에 저장되고 평소에는 마스킹된 값만
+ * 내려온다. `표시` 를 누르면 `settings_reveal_token` 으로 원문을 받아 입력란에 채우고,
+ * 그 안의 관리 토큰이 담은 권한(시작일 · 종료일 · 권한 service)을 함께 펼친다.
+ *
+ * 게이트웨이로 나가는 `X-API-KEY` 는 관리키의 토큰 부분만이다 (Rust `config::resolve`).
  */
 
 import { useEffect, useMemo, useState } from "react";
 
 import { useStore, selectIsAdmin } from "../store";
-import type { AdminTokenRequest, EnvConfigView, EnvKey, JwtResult, PermView } from "../types";
+import type { AdminTokenRequest, AdminTokenResult, EnvConfigView, EnvKey, PermView } from "../types";
 
 /** 환경별 baseUrl 안내값. 초기값도 같아서(Rust `EnvConfig::default_for`) 비우면 이 값이 보인다. */
 const BASE_URL_PLACEHOLDER: Record<EnvKey, string> = {
@@ -22,7 +24,7 @@ const BASE_URL_PLACEHOLDER: Record<EnvKey, string> = {
   prod: "http://60.101.207.91:7096",
 };
 
-const TOKEN_PLACEHOLDER = "공통담당자에게 전달받은 관리용 토큰을 입력하세요";
+const TOKEN_PLACEHOLDER = "공통담당자에게 전달받은 관리키를 secret$token 형태로 입력하세요";
 
 const envLabel = (env: EnvKey) => (env === "dev" ? "개발" : "운영");
 
@@ -61,7 +63,7 @@ function isoDate(offsetDays: number): string {
 // ── 토큰이 담은 권한 상세 ────────────────────────────────────
 
 /**
- * `표시` 를 켰을 때 토큰 입력란 아래에 펼치는 카드.
+ * `표시` 를 켰을 때 관리키 입력란 아래에 펼치는 카드.
  *
  * 기간이 지난 토큰도 시작일 · 종료일 · 권한 service 를 보여 준다 — 사용자가 "왜 막혔는지"
  * 를 이 화면에서 알아야 하기 때문이다 (Rust `perm::view` 주석).
@@ -70,8 +72,8 @@ function PermDetail({ perm }: { perm: PermView }) {
   if (!perm.hasClaims) {
     return (
       <div style={noteStyle("yellow")}>
-        {perm.message} 관리 토큰은 <span className="font-mono">key=apisix-manage</span> 로 서명된
-        JWT 여야 합니다.
+        {perm.message} 관리키는 <span className="font-mono">secret$token</span> 형태여야 하고,
+        토큰은 그 secret 으로 서명된 JWT 여야 합니다.
       </div>
     );
   }
@@ -218,8 +220,8 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
               : cfg.perm.kind === "scoped"
                 ? "부분 관리"
                 : cfg.hasToken
-                  ? "토큰 사용 불가"
-                  : "토큰 미설정"}
+                  ? "관리키 사용 불가"
+                  : "관리키 미설정"}
           </span>
         </div>
         <span className="text-xs muted font-mono">
@@ -245,7 +247,7 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
 
         <div>
           <label className="field-label">
-            관리 토큰 (X-API-KEY) <span style={{ color: "var(--red-600)" }}>*</span>
+            관리키 (secret$token) <span style={{ color: "var(--red-600)" }}>*</span>
           </label>
           <input
             className="text-input font-mono"
@@ -260,15 +262,15 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
             </button>
             {cfg.hasToken && (
               <button className="btn sm ghost" onClick={() => void onClearToken()} disabled={busy}>
-                토큰 삭제
+                관리키 삭제
               </button>
             )}
             <span className="text-xs muted font-mono">{cfg.hasToken ? cfg.tokenMasked : ""}</span>
           </div>
           <div className="text-xs muted" style={{ marginTop: 6, lineHeight: "18px" }}>
             {cfg.hasToken
-              ? "토큰은 Windows 자격 증명 관리자에 보관됩니다. 비워 두면 기존 토큰이 유지됩니다."
-              : "미입력 시 해당 환경은 관리할 수 없습니다."}
+              ? "관리키는 Windows 자격 증명 관리자에 보관됩니다. 비워 두면 기존 관리키가 유지됩니다."
+              : "미입력 시 해당 환경은 관리할 수 없습니다. 게이트웨이로는 $ 뒤의 토큰만 나갑니다."}
           </div>
         </div>
 
@@ -290,29 +292,37 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
   );
 }
 
-// ── 관리 토큰 발급 (전체 관리자 전용) ────────────────────────
+// ── 관리키 발급 (전체 관리자 전용) ───────────────────────────
 
 /**
- * 새 관리 토큰(JWT)을 만든다. **서명만 한다** — 실제로 쓰려면 게이트웨이에
- * `key=apisix-manage` consumer 가 등록돼 있어야 한다. 화면에 그 안내를 붙인다.
+ * 새 관리키(`secret$token`)를 만든다. **서명만 한다** — 실제로 쓰려면 게이트웨이에 같은
+ * key·secret 의 consumer 가 등록돼 있어야 한다. 화면에 그 안내를 붙인다.
+ *
+ * secret 은 발급자가 직접 입력한다. 여기서 새로 만들어 주지 않는 이유는, 게이트웨이에
+ * 등록된 `jwt-auth.secret` 과 달라지면 발급한 관리키가 게이트웨이에서 거부되기 때문이다.
+ * secret 을 새로 만드는 자리는 Consumer 화면이다.
  *
  * 지금 보고 있는 환경의 service 목록에서 권한을 고른다. 개발과 운영의 service id 가
- * 다르므로, 어느 환경용 토큰인지가 카드 제목에 드러나야 한다.
+ * 다르므로, 어느 환경용 관리키인지가 카드 제목에 드러나야 한다.
  */
 function AdminTokenCard({ env }: { env: EnvKey }) {
   const services = useStore((s) => s.services);
   const createAdminToken = useStore((s) => s.createAdminToken);
   const copyText = useStore((s) => s.copyText);
 
+  const [secret, setSecret] = useState("");
   const [start, setStart] = useState(() => isoDate(0));
   const [end, setEnd] = useState(() => isoDate(365));
   const [admin, setAdmin] = useState(true);
   const [picked, setPicked] = useState<string[]>([]);
-  const [issued, setIssued] = useState<JwtResult | null>(null);
+  const [issued, setIssued] = useState<AdminTokenResult | null>(null);
   const [busy, setBusy] = useState(false);
 
   // 환경이 바뀌면 고른 service id 는 다른 게이트웨이의 것이라 의미가 없다.
+  // secret 도 게이트웨이마다 다르므로 같이 비운다 — 개발 secret 으로 운영 관리키를
+  // 발급하면 게이트웨이가 거부하는데, 그 사실은 배포한 뒤에야 드러난다.
   useEffect(() => {
+    setSecret("");
     setPicked([]);
     setIssued(null);
   }, [env]);
@@ -326,7 +336,14 @@ function AdminTokenCard({ env }: { env: EnvKey }) {
         ? "종료일은 시작일보다 뒤여야 합니다."
         : "";
   const pickError = !admin && picked.length === 0 ? "권한을 줄 service 를 하나 이상 고르세요." : "";
-  const blocked = rangeError || pickError;
+  // `$` 는 관리키 구분자다 — 값에 섞이면 관리키가 어디서 갈리는지 모호해진다 (Rust `perm::SEP`).
+  const secretError =
+    secret.trim() === ""
+      ? "secret 을 입력하세요."
+      : secret.includes("$")
+        ? "secret 에는 $ 를 넣을 수 없습니다."
+        : "";
+  const blocked = secretError || rangeError || pickError;
 
   const toggle = (id: string) =>
     setPicked((prev) => (prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]));
@@ -334,7 +351,13 @@ function AdminTokenCard({ env }: { env: EnvKey }) {
   const onCreate = async () => {
     if (blocked || nbf === null || exp === null) return;
     setBusy(true);
-    const req: AdminTokenRequest = { nbf, exp, admin, services: admin ? [] : picked };
+    const req: AdminTokenRequest = {
+      secret: secret.trim(),
+      nbf,
+      exp,
+      admin,
+      services: admin ? [] : picked,
+    };
     setIssued(await createAdminToken(env, req));
     setBusy(false);
   };
@@ -342,15 +365,32 @@ function AdminTokenCard({ env }: { env: EnvKey }) {
   return (
     <div className="card-surface" style={{ padding: 24, marginTop: 16 }}>
       <div className="row between" style={{ marginBottom: 6 }}>
-        <h5 className="h5">관리 토큰 발급</h5>
+        <h5 className="h5">관리키 발급</h5>
         <span className="badge primary font-mono">{envLabel(env)} 서버 기준</span>
       </div>
       <p className="page-sub" style={{ margin: "0 0 16px" }}>
-        기간과 권한을 담은 관리 토큰(JWT)을 만듭니다. 권한 service 는 지금 보고 있는{" "}
-        {envLabel(env)} 서버의 목록에서 고릅니다.
+        기간과 권한을 담은 관리키(<span className="font-mono">secret$token</span>)를 만듭니다.
+        권한 service 는 지금 보고 있는 {envLabel(env)} 서버의 목록에서 고릅니다.
       </p>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div>
+          <label className="field-label">
+            secret <span style={{ color: "var(--red-600)" }}>*</span>
+          </label>
+          <input
+            className="text-input font-mono"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            placeholder="게이트웨이 관리 consumer 의 jwt-auth.secret"
+          />
+          <div className="text-xs muted" style={{ marginTop: 6, lineHeight: "18px" }}>
+            {envLabel(env)} 게이트웨이에 등록된 관리 consumer 의{" "}
+            <span className="font-mono">jwt-auth.secret</span> 과 같아야 발급한 관리키가
+            통합니다. 값은 Consumer 화면에서 확인하고, 새로 만들 때도 거기서 바꿉니다.
+          </div>
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <div>
             <label className="field-label">시작일</label>
@@ -433,7 +473,7 @@ function AdminTokenCard({ env }: { env: EnvKey }) {
           {issued && (
             <button
               className="btn md outline"
-              onClick={() => void copyText(issued.token, "관리 토큰")}
+              onClick={() => void copyText(issued.adminKey, "관리키")}
             >
               복사
             </button>
@@ -445,18 +485,22 @@ function AdminTokenCard({ env }: { env: EnvKey }) {
 
         {issued && (
           <>
-            <div
-              className="selectable"
-              style={{
-                padding: "14px 16px",
-                background: "var(--gray-900)",
-                borderRadius: 8,
-                font: "400 12px/20px var(--font-mono)",
-                color: "var(--green-300)",
-                wordBreak: "break-all",
-              }}
-            >
-              {issued.token}
+            {/* 받는 사람이 붙여넣는 것은 관리키다 — 토큰만 건네면 secret 이 빠져 쓸 수 없다. */}
+            <div>
+              <label className="field-label">관리키 (이 값을 전달합니다)</label>
+              <div
+                className="selectable"
+                style={{
+                  padding: "14px 16px",
+                  background: "var(--gray-900)",
+                  borderRadius: 8,
+                  font: "400 12px/20px var(--font-mono)",
+                  color: "var(--green-300)",
+                  wordBreak: "break-all",
+                }}
+              >
+                {issued.adminKey}
+              </div>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <div style={boxStyle}>
@@ -488,9 +532,9 @@ function AdminTokenCard({ env }: { env: EnvKey }) {
         )}
 
         <div style={noteStyle("blue")}>
-          이 화면은 JWT 문자열만 만듭니다. 실제로 사용하려면 APISIX 서버에{" "}
-          <span className="font-mono">key=apisix-manage</span> consumer 가 등록되어 있어야 하며,
-          발급한 토큰을 사용자에게 전달해 설정 화면의 관리 토큰 란에 입력하도록 안내하세요.
+          이 화면은 문자열만 만듭니다. 실제로 사용하려면 APISIX 서버에 위 secret 을 쓰는 관리
+          consumer 가 등록되어 있어야 하며, 발급한 관리키를 사용자에게 전달해 설정 화면의
+          관리키 란에 입력하도록 안내하세요.
         </div>
       </div>
     </div>
@@ -506,7 +550,7 @@ export default function Settings() {
 
   const callRules = useMemo(
     () => [
-      { label: "인증 헤더", value: "X-API-KEY: <관리 토큰>" },
+      { label: "인증 헤더", value: "X-API-KEY: <관리키의 토큰>" },
       { label: "프록시 우회 · 인증서 검증", value: "항상 우회 · 항상 건너뜀 (고정)" },
       { label: "요청 경로", value: "{baseUrl}/apisix/admin/{resource}" },
     ],
@@ -521,7 +565,7 @@ export default function Settings() {
             설정
           </h2>
           <p className="page-sub">
-            개발 · 운영 게이트웨이의 Admin API 접속 정보를 각각 등록합니다. 관리 토큰이 담은
+            개발 · 운영 게이트웨이의 Admin API 접속 정보를 각각 등록합니다. 관리키가 담은
             기간과 권한이 각 환경에서 볼 수 있는 메뉴와 목록을 정합니다.
           </p>
         </div>

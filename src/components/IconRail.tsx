@@ -1,7 +1,7 @@
 /**
  * 좌측 64px 아이콘 레일 — 대시보드 / Route / Consumer / Upstream / Service / 설정.
  *
- * 전체 관리자가 아닌 관리 토큰이면 Upstream · Service 를 뺀다. 두 리소스는 게이트웨이
+ * 전체 관리자가 아닌 관리키면 Upstream · Service 를 뺀다. 두 리소스는 게이트웨이
  * 전체에 걸쳐 있어 특정 service 만 맡은 토큰이 건드릴 대상이 아니다
  * (`store.ts` 의 `ADMIN_ONLY` 주석). 개발과 운영의 권한이 다를 수 있으므로 환경을 바꾸면
  * 이 목록도 바뀐다 — 그래서 `setEnv` 가 홈으로 되돌린다.

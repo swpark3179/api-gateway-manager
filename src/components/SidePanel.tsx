@@ -324,7 +324,7 @@ export default function SidePanel() {
         <div style={{ padding: "6px 10px 0" }}>
           <span className={"badge " + (hasToken ? "success" : "warning")}>
             <span className="dot" />
-            {hasToken ? "관리 토큰 등록됨" : "관리 토큰 미설정"}
+            {hasToken ? "관리키 등록됨" : "관리키 미설정"}
           </span>
         </div>
       </div>
