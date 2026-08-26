@@ -21,6 +21,7 @@ export type PermKind = "admin" | "scoped" | "none";
 /** `kind === "none"` 이 된 이유 (Rust `perm::Reason`). */
 export type PermReason =
   | "noToken"
+  | "noSecret"
   | "notJwt"
   | "badSignature"
   | "badKey"
@@ -60,7 +61,7 @@ export interface EnvConfigView {
   /** 항상 true — 위와 같다 */
   insecureTls: boolean;
   hasToken: boolean;
-  /** 마스킹된 표시용 문자열. 원문은 `settingsRevealToken` 으로만 받는다. */
+  /** 마스킹된 표시용 문자열. secret 은 섞이지 않는다. 원문은 `settingsRevealToken` 으로만 받는다. */
   tokenMasked: string;
   adminBase: string;
   perm: PermView;
@@ -73,12 +74,17 @@ export interface SettingsView {
 
 export interface EnvPayload {
   baseUrl: string;
-  /** null = 기존 토큰 유지, "" = 삭제, 그 외 = 교체 */
+  /** 관리키(`secret$token`). null = 기존 관리키 유지, "" = 삭제, 그 외 = 교체 */
   token: string | null;
 }
 
-/** 관리 토큰 발급 요청 (전체 관리자 전용). */
+/** 관리키 발급 요청 (전체 관리자 전용). */
 export interface AdminTokenRequest {
+  /**
+   * 서명 secret. 게이트웨이의 관리 consumer 에 등록된 `jwt-auth.secret` 과 같아야
+   * 발급한 관리키가 실제로 통한다. `$` 는 관리키 구분자라 넣을 수 없다.
+   */
+  secret: string;
   /** 시작일 unix 초 */
   nbf: number;
   /** 종료일 unix 초 */
@@ -86,6 +92,17 @@ export interface AdminTokenRequest {
   admin: boolean;
   /** `admin === false` 일 때 권한을 줄 service id 목록 */
   services: string[];
+}
+
+/**
+ * 발급 결과 (Rust `commands::AdminTokenResult`). `JwtResult` 를 flatten 해 담는다.
+ *
+ * 화면이 보여 주고 복사하는 것은 `adminKey` 다 — 받는 사람이 설정 화면에 붙여넣는 값이고,
+ * `token` 만 건네면 secret 이 빠져 쓸 수 없다.
+ */
+export interface AdminTokenResult extends JwtResult {
+  /** 배포용 관리키 — `secret$token` */
+  adminKey: string;
 }
 
 export interface TestResult {

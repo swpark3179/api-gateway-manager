@@ -56,10 +56,10 @@ export default function LockedScreen() {
           {env === "dev" ? "개발" : "운영"} 서버는 관리 불가 상태입니다
         </h4>
         <p className="text-md muted" style={{ margin: "0 0 20px" }}>
-          {perm?.message || "관리 토큰이 등록되지 않았습니다."}{" "}
+          {perm?.message || "관리키가 등록되지 않았습니다."}{" "}
           {hasToken
-            ? "설정 화면에서 새 관리 토큰을 등록하세요. 토큰은 공통담당자에게 요청합니다."
-            : "설정 화면에서 baseUrl과 관리 토큰을 입력하세요."}
+            ? "설정 화면에서 새 관리키를 등록하세요. 관리키는 공통담당자에게 요청합니다."
+            : "설정 화면에서 baseUrl과 관리키를 입력하세요."}
         </p>
         <button className="btn md solid-primary" onClick={() => go("settings")}>
           설정으로 이동

@@ -59,7 +59,7 @@ fn require_admin(env: Env) -> AppResult<()> {
         crate::error::ErrorKind::Unauthorized,
         "이 작업은 전체 관리자 토큰으로만 할 수 있습니다.",
     )
-    .with_hint("설정 화면에서 관리 토큰을 확인하세요."))
+    .with_hint("설정 화면에서 관리키를 확인하세요."))
 }
 
 /// 이 service 를 만질 권한이 있는지.
@@ -88,21 +88,31 @@ pub fn settings_save(app: AppHandle<Wry>, env: Env, payload: EnvPayload) -> AppR
     payload.to_cfg().admin_base()?;
 
     if let Some(t) = &payload.token {
+        // 형식만 본다 — `secret$token` 이 아니면 저장 자체를 막아 잠금 화면까지 가지 않게 한다.
+        // 서명·기간은 검사하지 않는다: 만료된 관리키도 저장한 뒤 설정 화면에서 시작일·종료일과
+        // 사유를 보여 줘야 사용자가 왜 막혔는지 알 수 있다 (`perm::view`).
+        if !t.trim().is_empty() {
+            perm::split(t).map_err(|reason| {
+                AppError::config(reason.message())
+                    .with_hint("발급받은 관리키를 secret$token 형태 그대로 붙여넣으세요.")
+            })?;
+        }
         config::set_token(env, t)?;
     }
     config::save_env(&app, env, payload.to_cfg())?;
     Ok(config::settings_view(&app))
 }
 
-/// 설정 화면의 `표시` 토글이 부르는 커맨드 — 저장된 관리 토큰의 **원문**을 준다.
+/// 설정 화면의 `표시` 토글이 부르는 커맨드 — 저장된 관리키의 **원문**을 준다.
 ///
-/// 평소 프런트로는 마스킹 문자열만 내려가지만(`config::mask`), 사용자가 자기 토큰을
-/// 확인하고 복사할 수 있어야 표시/가리기 토글이 성립한다. 원문은 화면에서만 쓰이고
-/// 저장 경로는 그대로 자격 증명 관리자다. (README '보안' 절)
+/// 평소 프런트로는 마스킹 문자열만 내려가지만(`config::mask`), 사용자가 자기 관리키를
+/// 확인하고 복사할 수 있어야 표시/가리기 토글이 성립한다. secret 이 함께 나가지만
+/// 그것은 이 사용자가 이미 가진 자기 관리키이고, 원문은 화면에서만 쓰이며 저장 경로는
+/// 그대로 자격 증명 관리자다. (README '보안' 절)
 #[tauri::command]
 pub fn settings_reveal_token(env: Env) -> AppResult<String> {
     config::get_token(env).ok_or_else(|| {
-        AppError::config(format!("{} 서버에 저장된 관리 토큰이 없습니다.", env.label()))
+        AppError::config(format!("{} 서버에 저장된 관리키가 없습니다.", env.label()))
     })
 }
 
@@ -115,17 +125,23 @@ pub struct TestResult {
 }
 
 /// 연결 테스트는 **저장 전 입력값**으로 즉석 호출한다.
-/// token 이 null 이면 이미 저장된 토큰을 쓴다.
+/// token 이 null 이면 이미 저장된 관리키를 쓴다.
 #[tauri::command]
 pub async fn settings_test(app: AppHandle<Wry>, env: Env, payload: EnvPayload) -> TestResult {
-    let token = match &payload.token {
+    let raw = match &payload.token {
         Some(t) if !t.trim().is_empty() => t.clone(),
         _ => match config::get_token(env) {
             Some(t) => t,
             None => {
-                return TestResult { ok: false, text: "토큰이 없어 호출할 수 없습니다.".into() }
+                return TestResult { ok: false, text: "관리키가 없어 호출할 수 없습니다.".into() }
             }
         },
+    };
+
+    // 게이트웨이에는 관리키의 **토큰 부분만** 보낸다 (`config::resolve` 와 같은 규칙).
+    let token = match perm::split(&raw) {
+        Ok(k) => k.token,
+        Err(reason) => return TestResult { ok: false, text: reason.message().into() },
     };
 
     let cfg = payload.to_cfg();
@@ -489,12 +505,15 @@ pub fn gen_secret() -> String {
     jwt::gen_secret()
 }
 
-// ── 관리 토큰 발급 (전체 관리자 전용) ────────────────────────
+// ── 관리키 발급 (전체 관리자 전용) ───────────────────────────
 
 /// 발급 요청. `perm` 은 `"admin"` 이거나 service id 목록이다.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminTokenRequest {
+    /// 서명 secret. 발급자가 직접 입력한다 — 게이트웨이의 관리 consumer 에 등록된
+    /// `jwt-auth.secret` 과 같아야 발급한 관리키가 실제로 통한다.
+    pub secret: String,
     /// 시작일 unix 초 (로컬 자정)
     pub nbf: i64,
     /// 종료일 unix 초
@@ -505,18 +524,32 @@ pub struct AdminTokenRequest {
     pub services: Vec<String>,
 }
 
-/// 관리 토큰(JWT)을 발급한다. **서명만 한다** — 실제로 쓰려면 게이트웨이에
-/// `key=apisix-manage` consumer 가 등록돼 있어야 한다 (화면에 안내한다).
+/// 발급 결과. 화면이 보여 주고 복사하는 것은 `admin_key` — 받는 사람이 설정 화면에
+/// 그대로 붙여넣는 값이다. 토큰 하나만 건네면 secret 이 빠져 아무데도 쓸 수 없다.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminTokenResult {
+    /// 배포용 관리키 — `secret$token`.
+    pub admin_key: String,
+    /// 서명 결과 자체 (payload · nbf · exp 표시에 쓴다).
+    #[serde(flatten)]
+    pub jwt: JwtResult,
+}
+
+/// 관리키를 발급한다. **서명만 한다** — 실제로 쓰려면 게이트웨이에 같은 key·secret 의
+/// consumer 가 등록돼 있어야 한다 (화면에 안내한다).
 ///
 /// `env` 는 "누가 요청했는가" 를 판정하기 위한 것이다. 개발이 전체 관리자이고 운영이 아닐 수
-/// 있으므로, 지금 보고 있는 환경의 토큰이 admin 일 때만 발급을 허용한다.
+/// 있으므로, 지금 보고 있는 환경의 관리키가 admin 일 때만 발급을 허용한다.
 #[tauri::command]
-pub fn admin_token_create(env: Env, req: AdminTokenRequest) -> AppResult<JwtResult> {
+pub fn admin_token_create(env: Env, req: AdminTokenRequest) -> AppResult<AdminTokenResult> {
     require_admin(env)?;
-    // 정렬·중복 제거·빈 목록 거부는 `jwt::sign_admin` 이 한다 — 토큰 문자열의 모양을
-    // 정하는 곳이 한 군데여야 같은 권한이 언제나 같은 토큰이 된다.
+    // 정렬·중복 제거·빈 목록 거부와 secret 검사는 `jwt::sign_admin` 이 한다 — 토큰 문자열의
+    // 모양을 정하는 곳이 한 군데여야 같은 권한이 언제나 같은 토큰이 된다.
     let perm = if req.admin { Perm::Admin } else { Perm::Services(req.services) };
-    jwt::sign_admin(req.nbf, req.exp, &perm)
+    let jwt = jwt::sign_admin(&req.secret, req.nbf, req.exp, &perm)?;
+    // 합치는 규칙은 `perm::join` 이 정한다 — 쪼개는 `split` 과 짝이어야 한다.
+    Ok(AdminTokenResult { admin_key: perm::join(&req.secret, &jwt.token), jwt })
 }
 
 // ── 창 ───────────────────────────────────────────────────────

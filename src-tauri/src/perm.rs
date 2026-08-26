@@ -1,20 +1,31 @@
 //! 관리 토큰(JWT)이 실어 나르는 관리 권한.
 //!
-//! 관리 토큰은 `key=apisix-manage` / `secret=shi-api-secret` 으로 서명한 HS256 JWT 다.
-//! payload 에 유효기간(`nbf`·`exp`)과 권한(`perm`)이 들어 있고, 앱은 그것을 해석해
-//! 메뉴·목록·콤보박스를 제한한다.
+//! # 관리키 = `secret$token`
+//!
+//! 사용자가 붙여넣고 자격 증명 관리자에 저장되는 문자열을 **관리키**라 부른다.
+//! `$` 앞이 서명 검증에 쓰는 secret 이고, 뒤가 **관리 토큰**(HS256 JWT)이다.
+//! 서명 secret 을 바이너리에 상수로 두지 않기 위한 형식이다 — 저장소나 실행 파일만으로는
+//! 아무 토큰도 만들 수 없다. `split` · `join` 이 이 형식을 도맡는다.
+//!
+//! 토큰의 `key` 클레임은 `ADMIN_KEY` 로 고정이고, payload 에 유효기간(`nbf`·`exp`)과
+//! 권한(`perm`)이 들어 있다. 앱은 그것을 해석해 메뉴·목록·콤보박스를 제한한다.
 //!
 //! ```json
-//! { "key": "apisix-manage", "nbf": 1767225600, "exp": 1798761599, "perm": "admin" }
-//! { "key": "apisix-manage", "nbf": 1767225600, "exp": 1798761599, "perm": ["svc-a", "svc-b"] }
+//! { "key": "…", "nbf": 1767225600, "exp": 1798761599, "perm": "admin" }
+//! { "key": "…", "nbf": 1767225600, "exp": 1798761599, "perm": ["svc-a", "svc-b"] }
 //! ```
 //!
 //! # 이 권한 모델의 범위
 //!
 //! 여기서 하는 일은 **화면을 줄이는 것**뿐이다. 진짜 인가 경계는 APISIX 서버다 —
-//! 토큰이 `X-API-KEY` 로 그대로 나가고, 무엇을 허용할지는 게이트웨이가 정한다.
-//! 서명 secret 이 바이너리에 상수로 박혀 있어(`ADMIN_SECRET`) 추출하면 임의의 권한을 가진
-//! 토큰을 만들 수 있으므로, 이것을 보안 경계로 삼아서는 안 된다. (README '보안' 절)
+//! 관리키의 **토큰 부분만** `X-API-KEY` 로 나가고(secret 은 앱 밖으로 나가지 않는다),
+//! 무엇을 허용할지는 게이트웨이가 정한다.
+//!
+//! secret 과 토큰이 관리키에 **함께** 실려 오므로, 여기서 하는 서명 검증은 위조를 막지
+//! 못한다 — 자기 secret 으로 서명한 관리키는 언제나 자기 검증을 통과한다. 그것이 걸리는
+//! 곳은 게이트웨이다: `jwt-auth` 플러그인에 등록된 secret 과 다르면 거부된다. 즉 이 검증은
+//! "붙여넣은 관리키가 스스로 앞뒤가 맞는가" 를 보는 것이고, 보안 경계로 삼아서는 안 된다.
+//! (README '보안' 절)
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -29,8 +40,12 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// 관리 토큰 JWT 의 `key` 클레임. 게이트웨이의 consumer key 와 같아야 한다.
 pub const ADMIN_KEY: &str = "apisix-manage";
-/// 관리 토큰 JWT 의 서명 secret.
-pub const ADMIN_SECRET: &str = "shi-api-secret";
+
+/// 관리키의 secret 과 토큰을 가르는 문자.
+///
+/// base64url 알파벳(`A-Za-z0-9-_`)과 `.` 에 없는 문자를 골랐다 — 토큰 쪽에는 절대
+/// 나타나지 않으므로 `rsplit_once` 로 나누면 secret 에 `$` 가 섞여 있어도 정확히 갈린다.
+const SEP: char = '$';
 
 /// 토큰이 주는 관리 권한.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,13 +62,15 @@ pub enum Perm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Reason {
-    /// 아직 토큰을 등록하지 않았다.
+    /// 아직 관리키를 등록하지 않았다.
     NoToken,
+    /// 관리키에 secret 이 없다 — `secret$token` 형식이 아니다.
+    NoSecret,
     /// JWT 모양이 아니거나 payload 를 읽을 수 없다.
     NotJwt,
-    /// 서명이 `ADMIN_SECRET` 과 맞지 않는다.
+    /// 서명이 관리키에 실려 온 secret 과 맞지 않는다.
     BadSignature,
-    /// `key` 클레임이 `apisix-manage` 가 아니다.
+    /// `key` 클레임이 `ADMIN_KEY` 가 아니다.
     BadKey,
     /// `nbf` 가 아직 오지 않았다.
     NotYet,
@@ -65,10 +82,11 @@ impl Reason {
     /// 잠금 화면이 그대로 쓰는 설명. 프런트에 문구를 두 벌 두지 않으려고 여기서 만든다.
     pub fn message(self) -> &'static str {
         match self {
-            Reason::NoToken => "관리 토큰이 등록되지 않았습니다.",
-            Reason::NotJwt => "관리 토큰이 JWT 형식이 아닙니다.",
-            Reason::BadSignature => "관리 토큰의 서명이 올바르지 않습니다.",
-            Reason::BadKey => "관리 토큰의 key 가 apisix-manage 가 아닙니다.",
+            Reason::NoToken => "관리키가 등록되지 않았습니다.",
+            Reason::NoSecret => "관리키가 secret$token 형식이 아닙니다.",
+            Reason::NotJwt => "관리키의 토큰이 JWT 형식이 아닙니다.",
+            Reason::BadSignature => "관리 토큰의 서명이 관리키의 secret 과 맞지 않습니다.",
+            Reason::BadKey => "관리 토큰의 key 가 올바르지 않습니다.",
             Reason::NotYet => "관리 토큰의 사용 시작일이 아직 되지 않았습니다.",
             Reason::Expired => "관리 토큰의 사용 기간이 만료되었습니다.",
         }
@@ -82,6 +100,37 @@ pub struct Claims {
     pub exp: i64,
     /// 기간 검사를 하기 **전**의 권한. `Admin` 또는 `Services` 만 나온다.
     pub perm: Perm,
+}
+
+/// 관리키를 쪼갠 결과 — secret 과 관리 토큰.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminKey {
+    /// 서명 검증에 쓰는 secret. 게이트웨이 consumer 의 `jwt-auth.secret` 과 같아야 한다.
+    pub secret: String,
+    /// 관리 토큰(JWT). `X-API-KEY` 로 나가는 것은 이것뿐이다.
+    pub token: String,
+}
+
+/// `secret$token` 을 쪼갠다.
+///
+/// **마지막** `$` 로 나눈다 (`SEP` 주석 참조). 양쪽의 공백은 여기서 한 번만 털어낸다 —
+/// `jwt::finish` 가 HMAC 키를 `secret.trim()` 으로 만들므로, 서명하는 쪽과 검증하는 쪽이
+/// 같은 문자열을 보려면 정규화 지점이 하나여야 한다.
+pub fn split(raw: &str) -> Result<AdminKey, Reason> {
+    let (secret, token) = raw.trim().rsplit_once(SEP).ok_or(Reason::NoSecret)?;
+    let (secret, token) = (secret.trim(), token.trim());
+    if secret.is_empty() {
+        return Err(Reason::NoSecret);
+    }
+    if token.is_empty() {
+        return Err(Reason::NotJwt);
+    }
+    Ok(AdminKey { secret: secret.to_string(), token: token.to_string() })
+}
+
+/// secret 과 토큰을 관리키 한 줄로 합친다. `split` 의 역이다.
+pub fn join(secret: &str, token: &str) -> String {
+    format!("{}{SEP}{}", secret.trim(), token.trim())
 }
 
 fn b64d(s: &str) -> Option<Vec<u8>> {
@@ -110,10 +159,11 @@ fn read_perm(v: &serde_json::Value) -> Option<Perm> {
     }
 }
 
-/// 토큰 문자열을 해석한다. 서명(`ADMIN_SECRET`)과 `key` 클레임까지 검증하되
-/// **유효기간은 보지 않는다** — 만료된 토큰도 설정 화면에서 시작일·종료일을 보여 줘야 하므로,
-/// 기간 판정은 `resolve` 가 따로 한다.
-pub fn decode(token: &str) -> Result<Claims, Reason> {
+/// 관리 토큰을 해석한다. 서명과 `key` 클레임까지 검증하되 **유효기간은 보지 않는다** —
+/// 만료된 토큰도 설정 화면에서 시작일·종료일을 보여 줘야 하므로, 기간 판정은 `at` 이 따로 한다.
+///
+/// `secret` 은 관리키에서 온다(`split`). 상수가 아니라 인자인 이유는 모듈 주석 참조.
+pub fn decode(token: &str, secret: &str) -> Result<Claims, Reason> {
     let t = token.trim();
     let parts: Vec<&str> = t.split('.').collect();
     if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
@@ -134,8 +184,8 @@ pub fn decode(token: &str) -> Result<Claims, Reason> {
     // 서명 검증 — `verify_slice` 는 상수 시간 비교다.
     let sig = b64d(parts[2]).ok_or(Reason::NotJwt)?;
     let signing_input = format!("{}.{}", parts[0], parts[1]);
-    let mut mac =
-        HmacSha256::new_from_slice(ADMIN_SECRET.as_bytes()).map_err(|_| Reason::BadSignature)?;
+    let mut mac = HmacSha256::new_from_slice(secret.trim().as_bytes())
+        .map_err(|_| Reason::BadSignature)?;
     mac.update(signing_input.as_bytes());
     mac.verify_slice(&sig).map_err(|_| Reason::BadSignature)?;
 
@@ -165,10 +215,14 @@ pub fn at(claims: &Claims, now: i64) -> Perm {
 ///
 /// 앱 안에서 "이 사람이 무엇을 할 수 있는가" 를 묻는 곳은 전부 여기를 통한다.
 pub fn resolve(env: Env) -> Perm {
-    let Some(token) = config::get_token(env) else {
+    let Some(raw) = config::get_token(env) else {
         return Perm::None(Reason::NoToken);
     };
-    match decode(&token) {
+    let key = match split(&raw) {
+        Ok(k) => k,
+        Err(reason) => return Perm::None(reason),
+    };
+    match decode(&key.token, &key.secret) {
         Ok(claims) => at(&claims, chrono::Local::now().timestamp()),
         Err(reason) => Perm::None(reason),
     }
@@ -275,10 +329,14 @@ impl PermView {
 /// `names` 는 service id → name 을 찾아 주는 함수다. 호출부가 캐시를 들고 있고
 /// 이 모듈은 db 를 몰라도 되게 하려고 클로저로 받는다.
 pub fn view(env: Env, names: impl Fn(&str) -> Option<String>) -> PermView {
-    let Some(token) = config::get_token(env) else {
+    let Some(raw) = config::get_token(env) else {
         return PermView::empty(Reason::NoToken);
     };
-    let claims = match decode(&token) {
+    let key = match split(&raw) {
+        Ok(k) => k,
+        Err(reason) => return PermView::empty(reason),
+    };
+    let claims = match decode(&key.token, &key.secret) {
         Ok(c) => c,
         Err(reason) => return PermView::empty(reason),
     };
