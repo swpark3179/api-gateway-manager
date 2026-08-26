@@ -51,7 +51,7 @@ const ROUTE_COLS: Col[] = [
 const CONSUMER_COLS: Col[] = [
   { label: "desc" },
   { label: "username" },
-  { label: "권한그룹", width: "152px", title: "auth-groups" },
+  { label: "권한그룹", width: "152px", title: "auth_groups" },
   { label: "상태", width: "96px" },
   { label: "수정일시", width: "152px" },
 ];
