@@ -1,35 +1,148 @@
 /**
- * 설정 — 개발 / 운영 게이트웨이의 Admin API 접속 정보.
+ * 설정 — 개발 / 운영 게이트웨이의 Admin API 접속 정보와 관리 권한.
  *
- * 디자인 대비 추가된 것은 '인증서 검증 건너뛰기' 토글 하나다(기본 OFF).
- * 토큰은 Windows 자격 증명 관리자에 저장되고 프런트로는 마스킹된 값만 내려오므로,
- * 입력란을 비워 두면 '기존 토큰 유지'로 동작한다.
+ * 화면에 토글이 없다: `프록시 강제 우회` · `인증서 검증 건너뛰기` 는 사내 환경에서 둘 다
+ * 켜져 있어야만 게이트웨이에 닿으므로 Rust 가 항상 ON 으로 강제한다
+ * (`src-tauri/src/config.rs` 모듈 주석). 고를 수 없는 값을 스위치로 보여 주면
+ * "껐는데 왜 그대로냐" 는 질문만 남는다.
+ *
+ * 관리 토큰은 Windows 자격 증명 관리자에 저장되고 평소에는 마스킹된 값만 내려온다.
+ * `표시` 를 누르면 `settings_reveal_token` 으로 원문을 받아 입력란에 채우고, 그 토큰이 담은
+ * 권한(시작일 · 종료일 · 권한 service)을 함께 펼친다.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { switchKnobStyle, switchStyle } from "../lib/design";
-import { useStore } from "../store";
-import type { EnvConfigView, EnvKey, EnvPayload } from "../types";
+import { useStore, selectIsAdmin } from "../store";
+import type { AdminTokenRequest, EnvConfigView, EnvKey, JwtResult, PermView } from "../types";
 
-const rowBoxStyle: React.CSSProperties = {
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "space-between",
-  gap: 12,
-  padding: "14px 16px",
+/** 환경별 baseUrl 안내값. 초기값도 같아서(Rust `EnvConfig::default_for`) 비우면 이 값이 보인다. */
+const BASE_URL_PLACEHOLDER: Record<EnvKey, string> = {
+  dev: "http://60.101.107.90:9080",
+  prod: "http://60.101.207.91:7096",
+};
+
+const TOKEN_PLACEHOLDER = "공통담당자에게 전달받은 관리용 토큰을 입력하세요";
+
+const envLabel = (env: EnvKey) => (env === "dev" ? "개발" : "운영");
+
+const boxStyle: React.CSSProperties = {
+  padding: "12px 14px",
   background: "var(--gray-25)",
   border: "1px solid var(--gray-200)",
   borderRadius: 8,
 };
 
+const noteStyle = (tone: "blue" | "yellow"): React.CSSProperties => ({
+  padding: "10px 14px",
+  background: `var(--${tone}-50)`,
+  border: `1px solid var(--${tone}-200)`,
+  borderRadius: 8,
+  font: "400 12px/18px var(--font-sans)",
+  color: `var(--${tone}-800)`,
+});
+
+/** `YYYY-MM-DD` → 로컬 시각의 unix 초. 종료일은 그 날 끝까지 유효해야 하므로 23:59:59 로 잡는다. */
+function toUnix(date: string, edge: "start" | "end"): number | null {
+  if (!date) return null;
+  const ms = new Date(`${date}T${edge === "start" ? "00:00:00" : "23:59:59"}`).getTime();
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+/** 오늘부터 n일 뒤의 `YYYY-MM-DD` (발급 폼의 기본값). */
+function isoDate(offsetDays: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  // toISOString 은 UTC 라 날짜가 하루 밀릴 수 있다 — 로컬 값으로 직접 만든다.
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// ── 토큰이 담은 권한 상세 ────────────────────────────────────
+
+/**
+ * `표시` 를 켰을 때 토큰 입력란 아래에 펼치는 카드.
+ *
+ * 기간이 지난 토큰도 시작일 · 종료일 · 권한 service 를 보여 준다 — 사용자가 "왜 막혔는지"
+ * 를 이 화면에서 알아야 하기 때문이다 (Rust `perm::view` 주석).
+ */
+function PermDetail({ perm }: { perm: PermView }) {
+  if (!perm.hasClaims) {
+    return (
+      <div style={noteStyle("yellow")}>
+        {perm.message} 관리 토큰은 <span className="font-mono">key=apisix-manage</span> 로 서명된
+        JWT 여야 합니다.
+      </div>
+    );
+  }
+
+  const kindBadge =
+    perm.kind === "admin" ? (
+      <span className="badge primary">전체 관리자</span>
+    ) : perm.kind === "scoped" ? (
+      <span className="badge success">
+        <span className="dot" />
+        service {perm.services.length}개 관리
+      </span>
+    ) : (
+      <span className="badge warning">
+        <span className="dot" />
+        사용 불가
+      </span>
+    );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div style={boxStyle}>
+          <div className="text-xs muted">시작일</div>
+          <div className="font-mono" style={{ fontSize: 13, color: "var(--gray-900)" }}>
+            {perm.nbfHuman || "—"}
+          </div>
+        </div>
+        <div style={boxStyle}>
+          <div className="text-xs muted">종료일</div>
+          <div className="font-mono" style={{ fontSize: 13, color: "var(--gray-900)" }}>
+            {perm.expHuman || "—"}
+          </div>
+        </div>
+      </div>
+
+      <div style={boxStyle}>
+        <div className="row between" style={{ marginBottom: 8 }}>
+          <div className="text-xs muted">권한</div>
+          {kindBadge}
+        </div>
+        {perm.kind === "admin" ? (
+          <div className="text-xs muted">모든 service · Upstream · Service 메뉴를 관리합니다.</div>
+        ) : perm.services.length === 0 ? (
+          <div className="text-xs muted">권한이 부여된 service 가 없습니다.</div>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {/* 이름은 해당 환경의 로컬 캐시에서 찾는다. 아직 동기화하지 않은 환경이면
+                Rust 가 id 를 그대로 준다 (`config::service_namer`). */}
+            {perm.services.map((s) => (
+              <span key={s.id} className="badge neutral" title={s.id}>
+                {s.name}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {perm.kind === "none" && <div style={noteStyle("yellow")}>{perm.message}</div>}
+    </div>
+  );
+}
+
+// ── 환경 카드 ────────────────────────────────────────────────
+
 function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
   const saveSettings = useStore((s) => s.saveSettings);
   const testSettings = useStore((s) => s.testSettings);
+  const revealToken = useStore((s) => s.revealToken);
 
   const [baseUrl, setBaseUrl] = useState(cfg.baseUrl);
-  const [noProxy, setNoProxy] = useState(cfg.noProxy);
-  const [insecureTls, setInsecureTls] = useState(cfg.insecureTls);
   /** 빈 문자열 = 변경 없음 (저장된 토큰 유지) */
   const [token, setToken] = useState("");
   const [reveal, setReveal] = useState(false);
@@ -37,17 +150,16 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
   const [busy, setBusy] = useState(false);
 
   // 저장 후 서버 상태가 갱신되면 로컬 입력값도 맞춰 준다.
+  // `reveal` 도 되돌린다 — 저장으로 입력란이 비워지는데 '표시' 만 켜져 있으면
+  // 원문을 보여 주는 중인지 빈 칸인지 구별할 수 없다.
   useEffect(() => {
     setBaseUrl(cfg.baseUrl);
-    setNoProxy(cfg.noProxy);
-    setInsecureTls(cfg.insecureTls);
     setToken("");
-  }, [cfg.baseUrl, cfg.noProxy, cfg.insecureTls, cfg.hasToken]);
+    setReveal(false);
+  }, [cfg.baseUrl, cfg.hasToken, cfg.tokenMasked]);
 
-  const payload = (tokenOverride?: string | null): EnvPayload => ({
+  const payload = (tokenOverride?: string | null) => ({
     baseUrl,
-    noProxy,
-    insecureTls,
     token: tokenOverride !== undefined ? tokenOverride : token.trim() === "" ? null : token,
   });
 
@@ -73,14 +185,41 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
     setBusy(false);
   };
 
+  /**
+   * 표시 ⇄ 가리기.
+   *
+   * 예전에는 `type` 만 뒤집었는데, 입력값은 항상 빈 문자열이고 마스킹된 값은 placeholder 라
+   * `표시` 를 눌러도 보여 줄 것이 없었다. 이제 원문을 받아 입력란에 채운다 — 같은 값을 다시
+   * 저장해도 자격 증명 관리자에 같은 값이 덮여 쓰일 뿐이라 무해하다.
+   */
+  const onToggleReveal = async () => {
+    if (reveal) {
+      setReveal(false);
+      return;
+    }
+    if (token.trim() === "" && cfg.hasToken) {
+      setBusy(true);
+      const raw = await revealToken(env);
+      setBusy(false);
+      if (raw) setToken(raw);
+    }
+    setReveal(true);
+  };
+
   return (
     <div className="card-surface" style={{ padding: 24 }}>
       <div className="row between" style={{ marginBottom: 18 }}>
         <div className="row" style={{ gap: 10 }}>
-          <h5 className="h5">{env === "dev" ? "개발 서버" : "운영 서버"}</h5>
-          <span className={"badge " + (cfg.hasToken ? "success" : "warning")}>
+          <h5 className="h5">{envLabel(env)} 서버</h5>
+          <span className={"badge " + (cfg.perm.kind !== "none" ? "success" : "warning")}>
             <span className="dot" />
-            {cfg.hasToken ? "관리 가능" : "토큰 미설정"}
+            {cfg.perm.kind === "admin"
+              ? "전체 관리자"
+              : cfg.perm.kind === "scoped"
+                ? "부분 관리"
+                : cfg.hasToken
+                  ? "토큰 사용 불가"
+                  : "토큰 미설정"}
           </span>
         </div>
         <span className="text-xs muted font-mono">
@@ -97,7 +236,7 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
             className="text-input font-mono"
             value={baseUrl}
             onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://gw.example.com:9180"
+            placeholder={BASE_URL_PLACEHOLDER[env]}
           />
           <div className="text-xs muted" style={{ marginTop: 6 }}>
             경로 <span className="font-mono">/apisix/admin</span> 은 자동으로 붙습니다.
@@ -113,10 +252,10 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
             value={token}
             onChange={(e) => setToken(e.target.value)}
             type={reveal ? "text" : "password"}
-            placeholder={cfg.hasToken ? cfg.tokenMasked : "관리 토큰을 입력하세요"}
+            placeholder={TOKEN_PLACEHOLDER}
           />
           <div className="row" style={{ marginTop: 8, gap: 8, flexWrap: "wrap" }}>
-            <button className="btn sm outline" onClick={() => setReveal((v) => !v)}>
+            <button className="btn sm outline" onClick={() => void onToggleReveal()} disabled={busy}>
               {reveal ? "가리기" : "표시"}
             </button>
             {cfg.hasToken && (
@@ -124,71 +263,16 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
                 토큰 삭제
               </button>
             )}
-            <span className="text-xs muted">
-              {cfg.hasToken
-                ? "토큰은 Windows 자격 증명 관리자에 보관됩니다. 비워 두면 기존 토큰이 유지됩니다."
-                : "미입력 시 해당 환경은 관리할 수 없습니다."}
-            </span>
+            <span className="text-xs muted font-mono">{cfg.hasToken ? cfg.tokenMasked : ""}</span>
+          </div>
+          <div className="text-xs muted" style={{ marginTop: 6, lineHeight: "18px" }}>
+            {cfg.hasToken
+              ? "토큰은 Windows 자격 증명 관리자에 보관됩니다. 비워 두면 기존 토큰이 유지됩니다."
+              : "미입력 시 해당 환경은 관리할 수 없습니다."}
           </div>
         </div>
 
-        <div style={rowBoxStyle}>
-          <div>
-            <div style={{ font: "500 13px/18px var(--font-sans)", color: "var(--gray-900)" }}>
-              프록시 강제 우회
-            </div>
-            <div className="text-xs muted">시스템 프록시를 타지 않고 직접 호출합니다.</div>
-          </div>
-          <div onClick={() => setNoProxy((v) => !v)} style={switchStyle(noProxy)}>
-            <div style={switchKnobStyle} />
-          </div>
-        </div>
-
-        {!noProxy && (
-          <div
-            style={{
-              padding: "10px 14px",
-              background: "var(--yellow-50)",
-              border: "1px solid var(--yellow-200)",
-              borderRadius: 8,
-              font: "400 12px/18px var(--font-sans)",
-              color: "var(--yellow-800)",
-              marginTop: -8,
-            }}
-          >
-            끄면 Windows 시스템 프록시를 경유합니다. 사내 게이트웨이는 대개 프록시를 타면 연결되지
-            않습니다.
-          </div>
-        )}
-
-        <div style={rowBoxStyle}>
-          <div>
-            <div style={{ font: "500 13px/18px var(--font-sans)", color: "var(--gray-900)" }}>
-              인증서 검증 건너뛰기
-            </div>
-            <div className="text-xs muted">사설·자체서명 인증서를 쓰는 게이트웨이용입니다.</div>
-          </div>
-          <div onClick={() => setInsecureTls((v) => !v)} style={switchStyle(insecureTls)}>
-            <div style={switchKnobStyle} />
-          </div>
-        </div>
-
-        {insecureTls && (
-          <div
-            style={{
-              padding: "10px 14px",
-              background: "var(--yellow-50)",
-              border: "1px solid var(--yellow-200)",
-              borderRadius: 8,
-              font: "400 12px/18px var(--font-sans)",
-              color: "var(--yellow-800)",
-              marginTop: -8,
-            }}
-          >
-            서버 인증서를 검증하지 않습니다. 중간자 공격에 노출될 수 있으니 신뢰된 사내망에서만
-            사용하세요. 가능하면 사내 CA 를 Windows 인증서 저장소에 설치하는 편이 안전합니다.
-          </div>
-        )}
+        {reveal && cfg.hasToken && <PermDetail perm={cfg.perm} />}
 
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
           <button className="btn md outline" onClick={() => void onTest()} disabled={busy}>
@@ -206,14 +290,228 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
   );
 }
 
+// ── 관리 토큰 발급 (전체 관리자 전용) ────────────────────────
+
+/**
+ * 새 관리 토큰(JWT)을 만든다. **서명만 한다** — 실제로 쓰려면 게이트웨이에
+ * `key=apisix-manage` consumer 가 등록돼 있어야 한다. 화면에 그 안내를 붙인다.
+ *
+ * 지금 보고 있는 환경의 service 목록에서 권한을 고른다. 개발과 운영의 service id 가
+ * 다르므로, 어느 환경용 토큰인지가 카드 제목에 드러나야 한다.
+ */
+function AdminTokenCard({ env }: { env: EnvKey }) {
+  const services = useStore((s) => s.services);
+  const createAdminToken = useStore((s) => s.createAdminToken);
+  const copyText = useStore((s) => s.copyText);
+
+  const [start, setStart] = useState(() => isoDate(0));
+  const [end, setEnd] = useState(() => isoDate(365));
+  const [admin, setAdmin] = useState(true);
+  const [picked, setPicked] = useState<string[]>([]);
+  const [issued, setIssued] = useState<JwtResult | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // 환경이 바뀌면 고른 service id 는 다른 게이트웨이의 것이라 의미가 없다.
+  useEffect(() => {
+    setPicked([]);
+    setIssued(null);
+  }, [env]);
+
+  const nbf = toUnix(start, "start");
+  const exp = toUnix(end, "end");
+  const rangeError =
+    nbf === null || exp === null
+      ? "시작일과 종료일을 모두 고르세요."
+      : exp <= nbf
+        ? "종료일은 시작일보다 뒤여야 합니다."
+        : "";
+  const pickError = !admin && picked.length === 0 ? "권한을 줄 service 를 하나 이상 고르세요." : "";
+  const blocked = rangeError || pickError;
+
+  const toggle = (id: string) =>
+    setPicked((prev) => (prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]));
+
+  const onCreate = async () => {
+    if (blocked || nbf === null || exp === null) return;
+    setBusy(true);
+    const req: AdminTokenRequest = { nbf, exp, admin, services: admin ? [] : picked };
+    setIssued(await createAdminToken(env, req));
+    setBusy(false);
+  };
+
+  return (
+    <div className="card-surface" style={{ padding: 24, marginTop: 16 }}>
+      <div className="row between" style={{ marginBottom: 6 }}>
+        <h5 className="h5">관리 토큰 발급</h5>
+        <span className="badge primary font-mono">{envLabel(env)} 서버 기준</span>
+      </div>
+      <p className="page-sub" style={{ margin: "0 0 16px" }}>
+        기간과 권한을 담은 관리 토큰(JWT)을 만듭니다. 권한 service 는 지금 보고 있는{" "}
+        {envLabel(env)} 서버의 목록에서 고릅니다.
+      </p>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            <label className="field-label">시작일</label>
+            <input
+              className="text-input font-mono"
+              type="date"
+              value={start}
+              onChange={(e) => setStart(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="field-label">종료일</label>
+            <input
+              className="text-input font-mono"
+              type="date"
+              value={end}
+              onChange={(e) => setEnd(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className="field-label">권한</label>
+          <div className="row" style={{ gap: 8 }}>
+            <div className={"chip " + (admin ? "on" : "")} onClick={() => setAdmin(true)}>
+              전체 관리자
+            </div>
+            <div className={"chip " + (!admin ? "on" : "")} onClick={() => setAdmin(false)}>
+              service 지정
+            </div>
+          </div>
+        </div>
+
+        {!admin && (
+          <div>
+            <label className="field-label">권한 service ({picked.length}개 선택)</label>
+            {services.length === 0 ? (
+              <div className="text-xs muted">
+                등록된 Service 가 없습니다. Service 화면에서 먼저 생성하세요.
+              </div>
+            ) : (
+              <div
+                style={{
+                  ...boxStyle,
+                  maxHeight: 220,
+                  overflow: "auto",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                }}
+              >
+                {services.map((s) => (
+                  <label
+                    key={s.id}
+                    className="row"
+                    style={{ gap: 8, cursor: "pointer", alignItems: "baseline" }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={picked.includes(s.id)}
+                      onChange={() => toggle(s.id)}
+                    />
+                    <span style={{ font: "500 13px/18px var(--font-sans)" }}>{s.name || s.id}</span>
+                    <span className="text-xs muted font-mono">{s.id}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+          <button
+            className="btn md solid-primary"
+            onClick={() => void onCreate()}
+            disabled={busy || blocked !== ""}
+          >
+            생성
+          </button>
+          {issued && (
+            <button
+              className="btn md outline"
+              onClick={() => void copyText(issued.token, "관리 토큰")}
+            >
+              복사
+            </button>
+          )}
+          <span className="text-xs" style={{ color: "var(--red-600)" }}>
+            {blocked}
+          </span>
+        </div>
+
+        {issued && (
+          <>
+            <div
+              className="selectable"
+              style={{
+                padding: "14px 16px",
+                background: "var(--gray-900)",
+                borderRadius: 8,
+                font: "400 12px/20px var(--font-mono)",
+                color: "var(--green-300)",
+                wordBreak: "break-all",
+              }}
+            >
+              {issued.token}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div style={boxStyle}>
+                <div className="text-xs muted">nbf (시작)</div>
+                <div className="font-mono" style={{ fontSize: 13, color: "var(--gray-900)" }}>
+                  {issued.nbfHuman}
+                </div>
+              </div>
+              <div style={boxStyle}>
+                <div className="text-xs muted">exp (종료)</div>
+                <div className="font-mono" style={{ fontSize: 13, color: "var(--gray-900)" }}>
+                  {issued.expHuman}
+                </div>
+              </div>
+            </div>
+            <pre
+              className="selectable"
+              style={{
+                margin: 0,
+                ...boxStyle,
+                font: "400 12.5px/20px var(--font-mono)",
+                color: "var(--gray-800)",
+                overflow: "auto",
+              }}
+            >
+              {issued.payload}
+            </pre>
+          </>
+        )}
+
+        <div style={noteStyle("blue")}>
+          이 화면은 JWT 문자열만 만듭니다. 실제로 사용하려면 APISIX 서버에{" "}
+          <span className="font-mono">key=apisix-manage</span> consumer 가 등록되어 있어야 하며,
+          발급한 토큰을 사용자에게 전달해 설정 화면의 관리 토큰 란에 입력하도록 안내하세요.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── 화면 ─────────────────────────────────────────────────────
+
 export default function Settings() {
   const settings = useStore((s) => s.settings);
+  const env = useStore((s) => s.env);
+  const isAdmin = useStore(selectIsAdmin);
 
-  const callRules = [
-    { label: "인증 헤더", value: "X-API-KEY: <관리 토큰>" },
-    { label: "프록시 우회", value: "reqwest::ClientBuilder::no_proxy()" },
-    { label: "요청 경로", value: "{baseUrl}/apisix/admin/{resource}" },
-  ];
+  const callRules = useMemo(
+    () => [
+      { label: "인증 헤더", value: "X-API-KEY: <관리 토큰>" },
+      { label: "프록시 우회 · 인증서 검증", value: "항상 우회 · 항상 건너뜀 (고정)" },
+      { label: "요청 경로", value: "{baseUrl}/apisix/admin/{resource}" },
+    ],
+    [],
+  );
 
   return (
     <div data-screen-label="설정" style={{ padding: "24px 28px 56px", maxWidth: 1120 }}>
@@ -223,8 +521,8 @@ export default function Settings() {
             설정
           </h2>
           <p className="page-sub">
-            개발 · 운영 게이트웨이의 Admin API 접속 정보를 각각 등록합니다. 토큰이 없는 환경은
-            관리할 수 없습니다.
+            개발 · 운영 게이트웨이의 Admin API 접속 정보를 각각 등록합니다. 관리 토큰이 담은
+            기간과 권한이 각 환경에서 볼 수 있는 메뉴와 목록을 정합니다.
           </p>
         </div>
       </div>
@@ -241,21 +539,15 @@ export default function Settings() {
         {settings && <EnvCard env="prod" cfg={settings.prod} />}
       </div>
 
+      {isAdmin && <AdminTokenCard env={env} />}
+
       <div className="card-surface" style={{ padding: "22px 24px", marginTop: 16 }}>
         <h5 className="h5" style={{ marginBottom: 10 }}>
           호출 규칙
         </h5>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12 }}>
           {callRules.map((c) => (
-            <div
-              key={c.label}
-              style={{
-                padding: "14px 16px",
-                background: "var(--gray-25)",
-                border: "1px solid var(--gray-200)",
-                borderRadius: 8,
-              }}
-            >
+            <div key={c.label} style={boxStyle}>
               <div
                 style={{
                   font: "500 12px/16px var(--font-sans)",
@@ -282,6 +574,7 @@ export default function Settings() {
         <div className="text-xs muted" style={{ marginTop: 12, lineHeight: "18px" }}>
           모든 게이트웨이 호출은 앱 백엔드(Rust)에서 나갑니다. 웹뷰는 외부로 직접 통신하지 않도록
           CSP 로 차단되어 있어, 시스템 프록시가 설정돼 있어도 우회 경로가 생기지 않습니다.
+          프록시 우회와 인증서 검증 건너뛰기는 선택 항목이 아니라 항상 적용됩니다.
         </div>
       </div>
     </div>

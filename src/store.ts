@@ -49,6 +49,7 @@ import {
   serviceToForm,
   upstreamToForm,
   type AccessCounts,
+  type AdminTokenRequest,
   type AppError,
   type CompareRow,
   type Contact,
@@ -61,6 +62,7 @@ import {
   type JwtResult,
   type Kind,
   type OasDoc,
+  type PermView,
   type RouteCounts,
   type RouteFormState,
   type RouteScope,
@@ -324,6 +326,12 @@ interface AppState {
 
   saveSettings: (env: EnvKey, payload: EnvPayload) => Promise<boolean>;
   testSettings: (env: EnvKey, payload: EnvPayload) => Promise<TestResult>;
+  /** 설정 화면 `표시` 토글 — 저장된 관리 토큰의 원문. 실패하면 빈 문자열. */
+  revealToken: (env: EnvKey) => Promise<string>;
+  /** 관리 토큰 발급 (전체 관리자 전용). 실패하면 null 을 주고 토스트로 알린다. */
+  createAdminToken: (env: EnvKey, req: AdminTokenRequest) => Promise<JwtResult | null>;
+  /** 발급한 관리 토큰을 클립보드로. */
+  copyText: (text: string, label: string) => Promise<void>;
 
   flash: (msg: string) => void;
   setMaxHover: (v: boolean) => void;
@@ -415,6 +423,15 @@ const LIST_RESET = {
   error: null,
   ...IMPORT_RESET,
 };
+
+/**
+ * 전체 관리자 토큰만 들어갈 수 있는 섹션.
+ *
+ * Upstream · Service 는 게이트웨이 전체에 걸친 리소스다 — 특정 service 만 관리하는 토큰이
+ * 이것들을 고치면 자기 권한 밖의 route 까지 영향을 받는다. 그래서 메뉴 자체를 숨긴다.
+ * (`IconRail` 이 같은 배열로 레일을 걸러 낸다)
+ */
+export const ADMIN_ONLY: Section[] = ["upstreams", "services"];
 
 /** 정수 문자열인가 — Upstream 폼의 숫자 칸은 문자열로 들고 있다 (types.ts 주석 참조). */
 function intText(v: string): boolean {
@@ -512,8 +529,11 @@ export const useStore = create<AppState>((set, get) => ({
    */
   async bootstrap(variant = "overlay") {
     const { env, settings } = get();
-    // 토큰이 없는 환경은 잠금 화면이 뜨므로 호출하지 않는다. 에러도 세우지 않는다.
-    if (!settings?.[env]?.hasToken) return;
+    // 관리할 수 없는 환경은 잠금 화면이 뜨므로 호출하지 않는다. 에러도 세우지 않는다.
+    // 토큰이 없는 경우만이 아니다 — 만료·형식 오류 토큰으로 호출하면 커맨드마다 같은
+    // Config 에러가 돌아와 잠금 화면 위에 에러 배너가 겹친다 (`config::resolve`).
+    const cfg = settings?.[env];
+    if (!cfg?.hasToken || cfg.perm.kind === "none") return;
 
     const token = ++bootToken;
     let firstError: AppError | null = null;
@@ -615,8 +635,13 @@ export const useStore = create<AppState>((set, get) => ({
     if (get().env === env) return;
     // 환경이 바뀌면 다른 게이트웨이다 — 캐시에서 읽어 온 것을 모두 버린다.
     // username 은 환경 스코프라 routeScope 도 같이 지운다 (LIST_RESET 이 처리한다).
+    //
+    // `section: "dash"` 로 홈으로 되돌리는 이유: 두 환경의 관리 권한이 다를 수 있다.
+    // 개발이 전체 관리자라 Service 화면을 보던 중 운영(일반 권한)으로 넘어가면 그 화면은
+    // 접근 권한이 없는 화면이 된다. 전환할 때마다 홈에서 다시 시작하면 그 상태 자체가 없다.
     set({
       env,
+      section: "dash",
       ...LIST_RESET,
       routes: [],
       routesTotal: 0,
@@ -636,15 +661,19 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   go(section) {
-    set({ section, ...LIST_RESET });
+    // 레일에서 숨겨도 다른 경로(화면 안 버튼 · 환경 전환 직후)로 도달할 수 있으므로 여기서
+    // 한 번 더 본다. 커맨드도 각자 확인하지만(`commands::require_admin`), 화면이 먼저 막아야
+    // 빈 목록에 에러 배너만 뜨는 상태를 안 만든다.
+    const to: Section = ADMIN_ONLY.includes(section) && !selectIsAdmin(get()) ? "dash" : section;
+    set({ section: to, ...LIST_RESET });
     // 목록은 캐시만 본다. 대시보드는 version·latency 가 라이브라야 의미가 있어 예외다.
-    if (section === "routes") {
+    if (to === "routes") {
       void get().queryRoutes();
-    } else if (section === "consumers") {
+    } else if (to === "consumers") {
       void get().loadConsumers();
-    } else if (section === "upstreams") {
+    } else if (to === "upstreams") {
       void get().loadUpstreams();
-    } else if (section === "services") {
+    } else if (to === "services") {
       void get().loadServices();
     } else {
       void get().refresh();
@@ -707,8 +736,9 @@ export const useStore = create<AppState>((set, get) => ({
     }
     if (section !== "dash") return;
 
-    // 토큰이 없는 환경은 잠금 화면이 뜨므로 호출하지 않는다.
-    if (!settings?.[env]?.hasToken) return;
+    // 관리할 수 없는 환경은 잠금 화면이 뜨므로 호출하지 않는다 (`bootstrap` 과 같은 이유).
+    const cfg = settings?.[env];
+    if (!cfg?.hasToken || cfg.perm.kind === "none") return;
 
     set({ loading: true, error: null });
     try {
@@ -1548,14 +1578,7 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   async copyJwt() {
-    const { jwt } = get();
-    if (!jwt?.token) return;
-    try {
-      await writeText(jwt.token);
-      get().flash("JWT 토큰을 클립보드에 복사했습니다.");
-    } catch {
-      get().flash("클립보드 복사에 실패했습니다.");
-    }
+    await get().copyText(get().jwt?.token ?? "", "JWT 토큰");
   },
 
   // ── 설정 ──────────────────────────────────────────────────
@@ -1564,6 +1587,11 @@ export const useStore = create<AppState>((set, get) => ({
       const settings = await api.settingsSave(env, payload);
       set({ settings, error: null });
       get().flash(`${env === "dev" ? "개발" : "운영"} 서버 설정이 저장되었습니다.`);
+      // 토큰을 바꾸면 권한도 바뀐다. 전체 관리자였다가 아니게 되면 지금 보고 있는 섹션이
+      // 접근 권한 밖일 수 있으므로 홈으로 물러난다 (`setEnv` 가 환경 전환에서 하는 것과 같다).
+      if (ADMIN_ONLY.includes(get().section) && !selectIsAdmin(get())) {
+        set({ section: "dash", ...LIST_RESET });
+      }
       // 섹션 진입이 더 이상 게이트웨이를 부르지 않으므로, 토큰이 방금 생겼다면 여기서
       // 캐시를 채워 줘야 한다. 안 그러면 사용자는 새로고침 아이콘을 찾아낼 때까지
       // 빈 목록만 보게 된다.
@@ -1582,6 +1610,36 @@ export const useStore = create<AppState>((set, get) => ({
       return await api.settingsTest(env, payload);
     } catch (e) {
       return { ok: false, text: api.toAppError(e).message };
+    }
+  },
+
+  async revealToken(env) {
+    try {
+      return await api.settingsRevealToken(env);
+    } catch (e) {
+      get().flash(api.toAppError(e).message);
+      return "";
+    }
+  },
+
+  async createAdminToken(env, req) {
+    try {
+      return await api.adminTokenCreate(env, req);
+    } catch (e) {
+      const err = api.toAppError(e);
+      set({ error: err });
+      get().flash(err.message);
+      return null;
+    }
+  },
+
+  async copyText(text, label) {
+    if (!text) return;
+    try {
+      await writeText(text);
+      get().flash(`${label}을 클립보드에 복사했습니다.`);
+    } catch {
+      get().flash("클립보드 복사에 실패했습니다.");
     }
   },
 
@@ -1642,10 +1700,22 @@ function showMeta(
 
 // ── 파생 셀렉터 (디자인의 renderVals() 에 해당) ───────────────
 
-/** 현재 환경에 관리 토큰이 없으면 잠금 */
+/** 현재 환경의 관리 권한. 설정을 아직 못 읽었으면 null. */
+export const selectPerm = (s: AppState): PermView | null => s.settings?.[s.env]?.perm ?? null;
+
+/** 전체 관리자인가 — Upstream · Service 메뉴와 관리 토큰 발급 카드의 조건. */
+export const selectIsAdmin = (s: AppState): boolean => selectPerm(s)?.kind === "admin";
+
+/**
+ * 현재 환경을 관리할 수 없으면 잠금.
+ *
+ * 토큰이 없는 경우 말고도, 토큰이 JWT 가 아니거나 서명이 맞지 않거나 유효기간을 벗어난
+ * 경우가 모두 여기로 온다 — 판정은 Rust `perm::resolve` 가 하고 이유는 `perm.message` 에 있다.
+ */
 export const selectLocked = (s: AppState): boolean => {
   const cfg = s.settings?.[s.env];
-  return !cfg?.hasToken;
+  if (!cfg?.hasToken) return true;
+  return cfg.perm.kind === "none";
 };
 
 /** 잠금 화면을 실제로 띄울지 — 설정 화면은 잠금 대상이 아니다 */

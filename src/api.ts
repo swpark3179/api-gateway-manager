@@ -9,6 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AccessCounts,
+  AdminTokenRequest,
   AppError,
   CompareRow,
   ConsumerFormState,
@@ -58,6 +59,19 @@ export const settingsSave = (env: EnvKey, payload: EnvPayload) =>
 
 export const settingsTest = (env: EnvKey, payload: EnvPayload) =>
   call<TestResult>("settings_test", { env, payload });
+
+/**
+ * 저장된 관리 토큰의 **원문**. 설정 화면의 `표시` 토글만 부른다.
+ *
+ * 평소 내려오는 것은 마스킹 문자열(`tokenMasked`)뿐이다 — 원문이 필요한 곳이 이 한 곳이라
+ * 설정 뷰에 싣지 않고 별도 커맨드로 뺐다.
+ */
+export const settingsRevealToken = (env: EnvKey) =>
+  call<string>("settings_reveal_token", { env });
+
+/** 관리 토큰(JWT) 발급 — 현재 환경의 토큰이 전체 관리자일 때만 성공한다. */
+export const adminTokenCreate = (env: EnvKey, req: AdminTokenRequest) =>
+  call<JwtResult>("admin_token_create", { env, req });
 
 // ── Route ────────────────────────────────────────────────────
 

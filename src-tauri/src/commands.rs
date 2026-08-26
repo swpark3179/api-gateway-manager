@@ -19,6 +19,7 @@ use crate::error::{AppError, AppResult};
 use crate::history::{self, EntryView};
 use crate::jwt::{self, JwtResult};
 use crate::oas::{self, OasDoc};
+use crate::perm::{self, Perm};
 
 // ── 설정 ─────────────────────────────────────────────────────
 
@@ -26,21 +27,51 @@ use crate::oas::{self, OasDoc};
 #[serde(rename_all = "camelCase")]
 pub struct EnvPayload {
     pub base_url: String,
-    pub no_proxy: bool,
-    pub insecure_tls: bool,
     /// `null` = 기존 토큰 유지, `""` = 삭제, 그 외 = 교체
     #[serde(default)]
     pub token: Option<String>,
 }
 
 impl EnvPayload {
+    /// 프록시 우회 · 인증서 검증 건너뛰기는 설정 화면에서 고를 수 없다 — 항상 켠다
+    /// (`config.rs` 모듈 주석).
     fn to_cfg(&self) -> EnvConfig {
         EnvConfig {
             base_url: self.base_url.trim().to_string(),
-            no_proxy: self.no_proxy,
-            insecure_tls: self.insecure_tls,
+            no_proxy: true,
+            insecure_tls: true,
         }
     }
+}
+
+// ── 관리 권한 ────────────────────────────────────────────────
+//
+// 화면은 이미 메뉴를 숨기고 목록을 걸러 주지만, 커맨드도 각자 확인한다 — 화면 상태와
+// 무관하게 IPC 는 호출될 수 있고, 권한 판정을 한 층에만 두면 그 층을 건너뛰는 경로가
+// 생기는 순간 조용히 뚫린다. (실제 인가 경계는 게이트웨이다 — `perm.rs` 모듈 주석)
+
+/// 전체 관리자 전용 커맨드의 문턱.
+fn require_admin(env: Env) -> AppResult<()> {
+    if perm::resolve(env).is_admin() {
+        return Ok(());
+    }
+    Err(AppError::new(
+        crate::error::ErrorKind::Unauthorized,
+        "이 작업은 전체 관리자 토큰으로만 할 수 있습니다.",
+    )
+    .with_hint("설정 화면에서 관리 토큰을 확인하세요."))
+}
+
+/// 이 service 를 만질 권한이 있는지.
+fn require_service(env: Env, service_id: &str) -> AppResult<()> {
+    if perm::resolve(env).allows(service_id) {
+        return Ok(());
+    }
+    Err(AppError::new(
+        crate::error::ErrorKind::Unauthorized,
+        "관리 권한이 없는 service 입니다.",
+    )
+    .with_hint("관리 토큰에 포함된 service 만 다룰 수 있습니다."))
 }
 
 #[tauri::command]
@@ -61,6 +92,18 @@ pub fn settings_save(app: AppHandle<Wry>, env: Env, payload: EnvPayload) -> AppR
     }
     config::save_env(&app, env, payload.to_cfg())?;
     Ok(config::settings_view(&app))
+}
+
+/// 설정 화면의 `표시` 토글이 부르는 커맨드 — 저장된 관리 토큰의 **원문**을 준다.
+///
+/// 평소 프런트로는 마스킹 문자열만 내려가지만(`config::mask`), 사용자가 자기 토큰을
+/// 확인하고 복사할 수 있어야 표시/가리기 토글이 성립한다. 원문은 화면에서만 쓰이고
+/// 저장 경로는 그대로 자격 증명 관리자다. (README '보안' 절)
+#[tauri::command]
+pub fn settings_reveal_token(env: Env) -> AppResult<String> {
+    config::get_token(env).ok_or_else(|| {
+        AppError::config(format!("{} 서버에 저장된 관리 토큰이 없습니다.", env.label()))
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -116,6 +159,8 @@ pub async fn settings_test(app: AppHandle<Wry>, env: Env, payload: EnvPayload) -
 
 #[tauri::command]
 pub async fn route_save(app: AppHandle<Wry>, env: Env, form: RouteForm) -> AppResult<RouteView> {
+    // 콤보에 권한 있는 service 만 담아 두지만, 저장 본문은 그것과 무관하게 올 수 있다.
+    require_service(env, &form.service_id)?;
     routes::save(&app, env, form).await
 }
 
@@ -126,6 +171,11 @@ pub async fn route_delete(
     id: String,
     name: Option<String>,
 ) -> AppResult<()> {
+    // 목록에 안 보이는 라우트를 id 로 지우는 경로를 막는다. 캐시에 없으면(동기화 전) 통과시킨다
+    // — 게이트웨이가 404 로 답할 몫이고, 여기서 막으면 정상 삭제까지 못 하게 된다.
+    if let Some(rv) = cache(&app)?.with(|conn| db::route_view(conn, env.as_str(), &id))? {
+        require_service(env, &rv.service_id)?;
+    }
     routes::delete(&app, env, &id, name.as_deref().unwrap_or("")).await
 }
 
@@ -169,8 +219,10 @@ pub fn routes_query(
     name_prefix: String,
     scope: RouteScope,
 ) -> AppResult<RoutesPage> {
+    // 다섯 번째 축은 프런트가 고르는 것이 아니라 토큰이 정한다 (`db::SERVICE_CLAUSE`).
+    let allow = perm::resolve(env).allow_blob();
     cache(&app)?
-        .with(|conn| db::query_routes(conn, env.as_str(), &chip, &q, &name_prefix, &scope))
+        .with(|conn| db::query_routes(conn, env.as_str(), &chip, &q, &name_prefix, &scope, &allow))
 }
 
 /// 게이트웨이에서 Consumer 전체 목록을 다시 받아 캐시를 갱신하고, 그 목록을 돌려준다.
@@ -194,7 +246,8 @@ pub fn consumers_cached(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<Consumer
 /// 뒤에 부른다.
 #[tauri::command]
 pub fn consumer_access_counts(app: AppHandle<Wry>, env: Env) -> AppResult<AccessCounts> {
-    cache(&app)?.with(|conn| db::consumer_access_counts(conn, env.as_str()))
+    let allow = perm::resolve(env).allow_blob();
+    cache(&app)?.with(|conn| db::consumer_access_counts(conn, env.as_str(), &allow))
 }
 
 /// 캐시에서 라우트 한 건. 목록이 필터돼 있어도 상세로 갈 수 있게 해 준다.
@@ -264,6 +317,7 @@ pub fn oas_compare(
     if service_id.trim().is_empty() {
         return Err(AppError::config("비교할 service 를 선택하세요."));
     }
+    require_service(env, &service_id)?;
     cache(&app)?.with(|conn| db::compare(conn, env.as_str(), service_id.trim(), &prefix))
 }
 
@@ -284,6 +338,10 @@ pub async fn consumer_delete(app: AppHandle<Wry>, env: Env, username: String) ->
 }
 
 // ── Upstream ─────────────────────────────────────────────────
+//
+// 전체 관리자가 아니면 레일에서 Upstream 메뉴가 사라지지만, **조회는 막지 않는다** —
+// Service 콤보의 `(host:port)` 라벨이 upstream 캐시에서 오므로 부트스트랩이 이걸 돌려야
+// Route 폼의 service 목록이 온전해진다. 변경(save · delete)만 admin 전용이다.
 
 /// 게이트웨이에서 Upstream 전체 목록을 다시 받아 캐시를 갱신하고, 그 목록을 돌려준다.
 ///
@@ -308,6 +366,7 @@ pub async fn upstream_save(
     env: Env,
     form: UpstreamForm,
 ) -> AppResult<UpstreamView> {
+    require_admin(env)?;
     upstreams::save(&app, env, form).await
 }
 
@@ -318,6 +377,7 @@ pub async fn upstream_delete(
     id: String,
     name: Option<String>,
 ) -> AppResult<()> {
+    require_admin(env)?;
     upstreams::delete(&app, env, &id, name.as_deref().unwrap_or("")).await
 }
 
@@ -332,14 +392,19 @@ pub async fn upstream_delete(
 pub async fn services_sync(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<ServiceView>> {
     let ups = cached_upstreams(&app, env)?;
     let items = services::list(&app, env, &ups).await?;
+    // 캐시에는 **전체**를 넣는다 — Route 목록의 name 접두사, upstream 라벨, OAS 비교가
+    // 권한과 무관하게 전체 service 를 참조한다. 프런트로는 권한 있는 것만 내려보낸다.
     cache(&app)?.with(|conn| db::sync_services(conn, env.as_str(), &items))?;
-    Ok(items)
+    Ok(perm::resolve(env).filter_services(items))
 }
 
 /// 캐시의 Service 전체 목록 (게이트웨이 호출 없음).
 #[tauri::command]
 pub fn services_cached(app: AppHandle<Wry>, env: Env) -> AppResult<Vec<ServiceView>> {
-    cache(&app)?.with(|conn| db::services_cached(conn, env.as_str()))
+    let items = cache(&app)?.with(|conn| db::services_cached(conn, env.as_str()))?;
+    // 프런트의 `services` 배열은 Service 화면 · Route 폼의 콤보 · Import 화면이 함께 읽는다.
+    // 여기서 한 번 걸러 두면 세 화면이 각자 필터를 들 필요가 없다.
+    Ok(perm::resolve(env).filter_services(items))
 }
 
 #[tauri::command]
@@ -348,6 +413,7 @@ pub async fn service_save(
     env: Env,
     form: ServiceForm,
 ) -> AppResult<ServiceView> {
+    require_admin(env)?;
     let ups = cached_upstreams(&app, env)?;
     services::save(&app, env, form, &ups).await
 }
@@ -359,6 +425,7 @@ pub async fn service_delete(
     id: String,
     name: Option<String>,
 ) -> AppResult<()> {
+    require_admin(env)?;
     services::delete(&app, env, &id, name.as_deref().unwrap_or("")).await
 }
 
@@ -385,7 +452,8 @@ pub struct DashboardPayload {
 pub async fn dashboard(app: AppHandle<Wry>, env: Env) -> AppResult<DashboardPayload> {
     // KPI 중 route·consumer 건수는 캐시에서 센다 — 대시보드를 열 때마다 전체 목록을 다시
     // 받으면 "기동 시 1회 조회"가 무의미해진다. 잠금은 await 전에 풀어 둔다.
-    let counts = cache(&app)?.with(|conn| db::overview_counts(conn, env.as_str()))?;
+    let allow = perm::resolve(env).allow_blob();
+    let counts = cache(&app)?.with(|conn| db::overview_counts(conn, env.as_str(), &allow))?;
     let overview = meta::overview(&app, env, counts).await?;
     let settings = config::load(&app);
     let cfg = settings.get(env);
@@ -419,6 +487,36 @@ pub fn jwt_sign(
 #[tauri::command]
 pub fn gen_secret() -> String {
     jwt::gen_secret()
+}
+
+// ── 관리 토큰 발급 (전체 관리자 전용) ────────────────────────
+
+/// 발급 요청. `perm` 은 `"admin"` 이거나 service id 목록이다.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminTokenRequest {
+    /// 시작일 unix 초 (로컬 자정)
+    pub nbf: i64,
+    /// 종료일 unix 초
+    pub exp: i64,
+    /// true 면 전체 관리자 토큰, false 면 `services` 에 나열한 service 만
+    pub admin: bool,
+    #[serde(default)]
+    pub services: Vec<String>,
+}
+
+/// 관리 토큰(JWT)을 발급한다. **서명만 한다** — 실제로 쓰려면 게이트웨이에
+/// `key=apisix-manage` consumer 가 등록돼 있어야 한다 (화면에 안내한다).
+///
+/// `env` 는 "누가 요청했는가" 를 판정하기 위한 것이다. 개발이 전체 관리자이고 운영이 아닐 수
+/// 있으므로, 지금 보고 있는 환경의 토큰이 admin 일 때만 발급을 허용한다.
+#[tauri::command]
+pub fn admin_token_create(env: Env, req: AdminTokenRequest) -> AppResult<JwtResult> {
+    require_admin(env)?;
+    // 정렬·중복 제거·빈 목록 거부는 `jwt::sign_admin` 이 한다 — 토큰 문자열의 모양을
+    // 정하는 곳이 한 군데여야 같은 권한이 언제나 같은 토큰이 된다.
+    let perm = if req.admin { Perm::Admin } else { Perm::Services(req.services) };
+    jwt::sign_admin(req.nbf, req.exp, &perm)
 }
 
 // ── 창 ───────────────────────────────────────────────────────

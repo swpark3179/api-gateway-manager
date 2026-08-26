@@ -8,6 +8,7 @@ mod error;
 mod history;
 mod jwt;
 mod oas;
+mod perm;
 
 #[cfg(windows)]
 mod win;
@@ -96,6 +97,7 @@ pub fn run() {
             commands::settings_get,
             commands::settings_save,
             commands::settings_test,
+            commands::settings_reveal_token,
             commands::route_save,
             commands::route_delete,
             commands::routes_sync,
@@ -119,6 +121,7 @@ pub fn run() {
             commands::dashboard,
             commands::jwt_sign,
             commands::gen_secret,
+            commands::admin_token_create,
             commands::app_ready,
         ])
         .run(tauri::generate_context!())
