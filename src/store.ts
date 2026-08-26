@@ -108,6 +108,21 @@ function writePanelOpen(open: boolean): void {
 
 export type BootVariant = "overlay" | "bar";
 
+/**
+ * 부트스트랩의 한 단계.
+ *
+ * `essential` 이 갈림길이다. Route · Consumer 는 목록 화면 자체가 그 캐시를 읽으므로 실패하면
+ * 사용자에게 알려야 한다. Upstream · Service · 접근 집계는 **게이트웨이 전역 리소스**라
+ * service 지정 토큰에게 거부될 수 있고, 거부돼도 목록은 성립한다 — 그 실패를 `error` 로
+ * 세우면 정상적으로 갱신된 새로고침이 "관리 토큰이 올바르지 않습니다" 로 보인다.
+ * (Rust `meta::overview` 가 대시보드에서 같은 판단을 이미 하고 있다)
+ */
+interface BootStep {
+  label: string;
+  essential: boolean;
+  run: () => Promise<void>;
+}
+
 interface AppState {
   // ── 내비게이션 ──
   env: EnvKey;
@@ -170,8 +185,6 @@ interface AppState {
   importRows: CompareRow[];
   importService: string;
   importPrefix: string;
-  /** service 의 spec_url 은 사외 주소일 수 있어 게이트웨이와 별도로 정한다 */
-  importNoProxy: boolean;
   importBusy: boolean;
   importError: AppError | null;
   importChip: RowVerdict | "all";
@@ -213,6 +226,13 @@ interface AppState {
   bootStep: number;
   bootTotal: number;
   bootLabel: string;
+  /**
+   * 마지막 부트스트랩에서 실패한 **부가** 단계 이름 (`BootStep.essential === false`).
+   *
+   * `error` 와 따로 두는 이유: 이 실패는 목록을 못 쓰게 만들지 않으므로 에러가 아니지만,
+   * Service 콤보가 낡거나 좌측 패널 숫자가 비는 이유를 사용자가 알 수는 있어야 한다.
+   */
+  bootAux: string[];
   /** 환경별 마지막 동기화 시각. route·consumer 단계가 **모두** 성공했을 때만 찍는다. */
   syncedAt: Record<EnvKey, number | null>;
 
@@ -278,7 +298,6 @@ interface AppState {
   runCompare: () => Promise<void>;
   setImportService: (id: string) => void;
   setImportPrefix: (prefix: string) => void;
-  setImportNoProxy: (v: boolean) => void;
   setImportChip: (chip: RowVerdict | "all") => void;
   setImportQ: (q: string) => void;
   /** 첨부 파일 초기화(`×`). 선택된 service 가 있으면 그 spec_url 로 되돌아간다 */
@@ -488,7 +507,6 @@ export const useStore = create<AppState>((set, get) => ({
   importRows: [],
   importService: "",
   importPrefix: "",
-  importNoProxy: true,
   importFileName: "",
   importBusy: false,
   importError: null,
@@ -509,6 +527,7 @@ export const useStore = create<AppState>((set, get) => ({
   bootStep: 0,
   bootTotal: 0,
   bootLabel: "",
+  bootAux: [],
   syncedAt: { dev: null, prod: null },
 
   // ── 초기화 ────────────────────────────────────────────────
@@ -525,8 +544,10 @@ export const useStore = create<AppState>((set, get) => ({
    * 게이트웨이 전체 조회 → 캐시 갱신. 단계별로 진행률을 갱신한다.
    *
    * 단계를 배열로 두는 이유: `bootTotal` 을 손으로 관리하면 단계가 하나 늘 때 반드시 어긋난다.
-   * 단계별 실패는 흡수하고 계속 간다(첫 에러만 남긴다) — services 를 못 받았다고 목록까지
-   * 못 볼 이유는 없다. 다만 `syncedAt` 은 route·consumer 가 **모두** 성공했을 때만 찍는다.
+   * 단계별 실패는 흡수하고 계속 간다 — services 를 못 받았다고 목록까지 못 볼 이유는 없다.
+   * 다만 **실패를 어떻게 보고하는지가 단계마다 다르다** (`BootStep.essential` 주석):
+   * 필수 단계는 첫 에러만 `error` 로 남기고 어느 조회였는지를 문구에 붙이며, 부가 단계는
+   * `bootAux` 에 이름만 모은다. `syncedAt` 은 route·consumer 가 **모두** 성공했을 때만 찍는다.
    */
   async bootstrap(variant = "overlay") {
     const { env, settings } = get();
@@ -538,44 +559,51 @@ export const useStore = create<AppState>((set, get) => ({
 
     const token = ++bootToken;
     let firstError: AppError | null = null;
+    /** 실패해도 목록이 성립하는 단계의 이름들 (`essential: false`) */
+    const auxFailed: string[] = [];
     let routesOk = false;
     let consumersOk = false;
 
-    const steps: Array<[string, () => Promise<void>]> = [
-      [
-        "Route 목록 조회",
-        async () => {
+    const steps: BootStep[] = [
+      {
+        label: "Route 목록 조회",
+        essential: true,
+        run: async () => {
           await api.routesSync(env);
           routesOk = true;
         },
-      ],
-      [
-        "Consumer 목록 조회",
-        async () => {
+      },
+      {
+        label: "Consumer 목록 조회",
+        essential: true,
+        run: async () => {
           set({ consumers: await api.consumersSync(env) });
           consumersOk = true;
         },
-      ],
+      },
       // Upstream 이 Service 보다 먼저다 — service 라벨의 (host:port) 를 캐시된 upstream 에서
       // 찾아 오므로 순서가 뒤바뀌면 라벨의 그 조각이 빈다 (commands::services_sync 주석).
-      [
-        "Upstream 목록 조회",
-        async () => {
+      {
+        label: "Upstream 목록 조회",
+        essential: false,
+        run: async () => {
           set({ upstreams: await api.upstreamsSync(env) });
         },
-      ],
-      [
-        "Service 목록 조회",
-        async () => {
+      },
+      {
+        label: "Service 목록 조회",
+        essential: false,
+        run: async () => {
           set({ services: await api.servicesSync(env) });
         },
-      ],
-      [
-        "접근 권한 집계",
-        async () => {
+      },
+      {
+        label: "접근 권한 집계",
+        essential: false,
+        run: async () => {
           set({ access: await api.consumerAccessCounts(env) });
         },
-      ],
+      },
     ];
 
     set({
@@ -583,22 +611,31 @@ export const useStore = create<AppState>((set, get) => ({
       bootVariant: variant,
       bootStep: 0,
       bootTotal: steps.length,
-      bootLabel: steps[0][0],
+      bootLabel: steps[0].label,
       error: null,
+      bootAux: [],
     });
 
     try {
       for (let i = 0; i < steps.length; i += 1) {
-        const [label, run] = steps[i];
+        const { label, essential, run } = steps[i];
         if (token !== bootToken) return; // 더 최신 부트스트랩이 시작됐다 — 이 결과는 버린다
         set({ bootStep: i, bootLabel: label });
         try {
           await run();
         } catch (e) {
-          firstError = firstError ?? api.toAppError(e);
+          if (essential) {
+            // 어느 조회가 막혔는지를 문구에 남긴다 — 메시지만으로는(게이트웨이가 주는 401 은
+            // 전부 같은 문구다) 어느 호출이 거부됐는지 알 수 없다.
+            const err = api.toAppError(e);
+            firstError = firstError ?? { ...err, message: `${label} 실패 — ${err.message}` };
+          } else {
+            auxFailed.push(label);
+          }
         }
       }
       if (token !== bootToken) return;
+      set({ bootAux: auxFailed });
 
       set({
         bootStep: steps.length,
@@ -620,8 +657,12 @@ export const useStore = create<AppState>((set, get) => ({
             ? (access?.ungrouped ?? 0) === 0
             : false;
       if (gone) set({ routeScope: ALL_ROUTES });
-      // 서비스 기본값 — 아직 고르지 않았다면 첫 항목.
-      set({ importService: get().importService || get().services[0]?.id || "" });
+      // 서비스 기본값 — 아직 고르지 않았거나, 지금 권한 밖인 값이 남아 있으면 첫 항목으로.
+      const options = serviceOptions(get().services, selectPerm(get()));
+      const picked = options.some((o) => o.id === get().importService)
+        ? get().importService
+        : "";
+      set({ importService: picked || options[0]?.id || "" });
 
       // queryRoutes 가 성공하면 error 를 null 로 밀어 버리므로, 단계 에러는 그 **뒤에** 세운다.
       // (Consumer 조회만 실패했을 때 빈 패널이 아무 설명 없이 남는 것을 막는다.)
@@ -852,19 +893,33 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  /**
+   * 상단 새로고침 버튼.
+   *
+   * **부가 단계 실패로 실패 토스트를 띄우지 않는다.** service 지정 토큰에게는 게이트웨이가
+   * `GET /upstreams` · `GET /services` 를 거부할 수 있는데, 예전에는 그 401 이 `error` 로
+   * 올라와 Route · Consumer 가 멀쩡히 갱신됐는데도 "관리 토큰이 올바르지 않습니다" 만 떴다.
+   * 지금은 필수 단계(Route · Consumer)가 성공하면 성공 토스트를 띄우고, 조회하지 못한 것이
+   * 있으면 무엇인지 덧붙인다 (`BootStep.essential` 주석).
+   */
   async hardRefresh() {
     const before = get().syncedAt[get().env];
     await get().bootstrap("bar");
 
-    const { env, error, syncedAt, access, consumers } = get();
+    const { env, error, syncedAt, access, consumers, bootAux } = get();
     if (error) {
       get().flash(error.message);
       return;
     }
     // 토큰이 없어 bootstrap 이 조용히 반환한 경우는 토스트도 띄우지 않는다.
     if (syncedAt[env] === before) return;
+    const aux =
+      bootAux.length > 0
+        ? ` 다만 ${bootAux.join(" · ")}는 이 관리 토큰으로 조회할 수 없습니다.`
+        : "";
     get().flash(
-      `게이트웨이와 동기화했습니다. (Route ${access?.all ?? 0}건 · Consumer ${consumers.length}건)`,
+      `게이트웨이와 동기화했습니다. (Route ${access?.all ?? 0}건 · Consumer ${consumers.length}건)` +
+        aux,
     );
     if (get().section === "dash") await get().refresh();
   },
@@ -1000,8 +1055,11 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   newItem() {
-    const { section, services, upstreams } = get();
+    const st = get();
+    const { section, upstreams } = st;
     const kind = kindOf(section);
+    // 신규 Route 의 service_id 기본값은 폼의 콤보와 같은 목록에서 나와야 한다 —
+    // 콤보에 없는 값이 미리 골라져 있으면 저장에서야 권한 오류가 난다.
     const form: FormState =
       kind === "consumer"
         ? emptyConsumerForm()
@@ -1009,7 +1067,7 @@ export const useStore = create<AppState>((set, get) => ({
           ? emptyServiceForm(upstreams[0]?.id ?? "")
           : kind === "upstream"
             ? emptyUpstreamForm()
-            : emptyRouteForm(services[0]?.id ?? "");
+            : emptyRouteForm(serviceOptions(st.services, selectPerm(st))[0]?.id ?? "");
 
     set({
       view: "create",
@@ -1066,7 +1124,12 @@ export const useStore = create<AppState>((set, get) => ({
 
   // ── OAS Import ────────────────────────────────────────────
   openImport() {
-    const { services, importService, settings, env } = get();
+    const st = get();
+    // 기본값도 콤보와 같은 목록에서 고른다 — 화면에 없는 service 가 골라져 있으면 안 된다.
+    // 직전에 골라 둔 값도 그대로 믿지 않는다: 관리키가 바뀌었으면 그 id 는 이제 권한 밖이고,
+    // 콤보에 없는 값으로 비교를 돌리면 `oas_compare` 가 권한 오류로 답한다.
+    const options = serviceOptions(st.services, selectPerm(st));
+    const kept = options.some((o) => o.id === st.importService) ? st.importService : "";
     set({
       section: "routes",
       view: "import",
@@ -1075,10 +1138,8 @@ export const useStore = create<AppState>((set, get) => ({
       jwt: null,
       error: null,
       ...IMPORT_RESET,
-      importService: importService || services[0]?.id || "",
+      importService: kept || options[0]?.id || "",
       importPrefix: "",
-      // 게이트웨이 설정을 기본값으로 주되, 스펙 주소는 사외일 수 있어 화면에서 바꿀 수 있다.
-      importNoProxy: settings?.[env]?.noProxy ?? true,
     });
 
     // 파일 첨부 없이 들어온 상태다 — 고른 service 에 spec_url 이 있으면 바로 읽어 준다.
@@ -1166,19 +1227,26 @@ export const useStore = create<AppState>((set, get) => ({
     const url = svc?.specUrl?.trim() ?? "";
     if (!url) {
       // 파일도 없고 주소도 없으면 비교할 근거가 없다. 어디서 채우면 되는지 알려 준다.
+      // 게이트웨이에서 service 를 아예 못 읽은 경우와 구별한다 — 전자는 등록하면 되지만
+      // 후자는 등록돼 있어도 알 수 없다 (`serviceOptions` 의 합성 항목).
+      const unread = svc === undefined;
       set({
         importDoc: null,
         importRows: [],
         importError: {
           kind: "config",
-          message: "이 service 에는 spec_url 이 없습니다.",
-          hint: "Service 화면에서 spec_url 을 등록하거나, 위에 스펙 파일을 첨부하세요.",
+          message: unread
+            ? "Service 목록을 조회하지 못해 이 service 의 spec_url 을 알 수 없습니다."
+            : "이 service 에는 spec_url 이 없습니다.",
+          hint: unread
+            ? "위에 스펙 파일을 첨부해 비교하세요."
+            : "Service 화면에서 spec_url 을 등록하거나, 위에 스펙 파일을 첨부하세요.",
         },
       });
       return;
     }
 
-    await get().loadOas({ kind: "url", value: url, noProxy: get().importNoProxy });
+    await get().loadOas({ kind: "url", value: url });
   },
 
   /**
@@ -1199,10 +1267,6 @@ export const useStore = create<AppState>((set, get) => ({
     prefixTimer = setTimeout(() => void get().runCompare(), SEARCH_DEBOUNCE_MS);
   },
 
-  setImportNoProxy(v) {
-    set({ importNoProxy: v });
-  },
-
   setImportChip(chip) {
     set({ importChip: chip });
   },
@@ -1212,8 +1276,10 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   createRouteFromOas(row) {
-    const { importService, services } = get();
-    const form = routeFormFromOas(row, importService || services[0]?.id || "");
+    const st = get();
+    const options = serviceOptions(st.services, selectPerm(st));
+    const kept = options.some((o) => o.id === st.importService) ? st.importService : "";
+    const form = routeFormFromOas(row, kept || options[0]?.id || "");
     set({
       section: "routes",
       view: "create",
@@ -1584,12 +1650,40 @@ export const useStore = create<AppState>((set, get) => ({
 
   // ── 설정 ──────────────────────────────────────────────────
   async saveSettings(env, payload) {
+    // 저장 뒤에는 새 설정으로 덮이므로, 무엇이 바뀌는지는 지금 봐 둬야 한다.
+    const prevBaseUrl = get().settings?.[env]?.baseUrl ?? "";
     try {
       const settings = await api.settingsSave(env, payload);
       set({ settings, error: null });
       get().flash(`${env === "dev" ? "개발" : "운영"} 서버 설정이 저장되었습니다.`);
-      // 토큰을 바꾸면 권한도 바뀐다. 전체 관리자였다가 아니게 되면 지금 보고 있는 섹션이
-      // 접근 권한 밖일 수 있으므로 홈으로 물러난다 (`setEnv` 가 환경 전환에서 하는 것과 같다).
+
+      // 관리키를 바꾸면(`token !== null`) 볼 수 있는 범위 자체가 달라지고, baseUrl 을 바꾸면
+      // 아예 다른 게이트웨이다. 어느 쪽이든 **직전 토큰으로 받아 둔 것은 전부 버린다** —
+      // 남겨 두면 `bootstrap` 의 해당 단계가 실패했을 때 이전 목록이 그대로 남아,
+      // 권한 밖 service 가 콤보에 보이거나 없는 route 가 목록에 남는다.
+      // (`setEnv` 가 환경 전환에서 하는 것과 같은 초기화다)
+      const scopeChanged =
+        env === get().env &&
+        (payload.token !== null || payload.baseUrl.trim() !== prevBaseUrl.trim());
+      if (scopeChanged) {
+        set({
+          ...LIST_RESET,
+          routes: [],
+          routesTotal: 0,
+          routeCounts: NO_COUNTS,
+          access: null,
+          consumers: [],
+          services: [],
+          upstreams: [],
+          dash: null,
+          importService: "",
+          importPrefix: "",
+          syncedAt: { ...get().syncedAt, [env]: null },
+        });
+      }
+
+      // 전체 관리자였다가 아니게 되면 지금 보고 있는 섹션이 접근 권한 밖일 수 있으므로
+      // 홈으로 물러난다.
       if (ADMIN_ONLY.includes(get().section) && !selectIsAdmin(get())) {
         set({ section: "dash", ...LIST_RESET });
       }
@@ -1722,6 +1816,60 @@ export const selectLocked = (s: AppState): boolean => {
 /** 잠금 화면을 실제로 띄울지 — 설정 화면은 잠금 대상이 아니다 */
 export const selectShowLock = (s: AppState): boolean =>
   selectLocked(s) && s.section !== "settings";
+
+/**
+ * service 콤보에 담을 목록 — `services` 배열과 관리 토큰의 권한을 교차시킨 결과.
+ *
+ * `services` 는 이미 Rust 가 권한으로 걸러 내려보낸다 (`commands::services_cached`).
+ * 그런데도 여기서 한 번 더 교차하는 이유는 **그 배열이 낡을 수 있기 때문**이다:
+ * `bootstrap` 은 성공했을 때만 배열을 갈아 끼우므로, 게이트웨이가 이 토큰의
+ * `GET /services` 를 거부하면 직전 토큰(전체 관리자)이 받아 둔 목록이 그대로 남아
+ * 권한 밖 service 가 콤보에 보인다.
+ *
+ * 같은 이유로 **모자란 쪽도 채운다**: 토큰의 `perm` 클레임에는 있는데 배열에 없는 service 는
+ * 최소 항목으로 만들어 붙인다. 목록 조회가 막혀도 자기 service 는 고를 수 있어야 한다.
+ * 합성 항목은 게이트웨이에서 읽은 값이 아니므로 `specUrl` · `namePrefix` 가 비어 있고,
+ * Import 화면이 그것을 구분해 안내한다 (`ImportScreen` 의 service_id 안내 문구).
+ *
+ * 새 배열을 만들므로 zustand 구독(`useStore(selectServiceOptions)`)으로 쓰면 매 렌더
+ * 재계산된다. 화면에서는 `services` 와 `perm` 을 각각 구독하고 `useMemo` 로 감싼다.
+ */
+export function serviceOptions(services: ServiceView[], perm: PermView | null): ServiceView[] {
+  if (perm?.kind !== "scoped") return services;
+
+  const allowed = new Set(perm.services.map((p) => p.id));
+  const kept = services.filter((s) => allowed.has(s.id));
+  const known = new Set(kept.map((s) => s.id));
+
+  const missing = perm.services
+    .filter((p) => !known.has(p.id))
+    .map((p) => emptyServiceView(p.id, p.name));
+
+  return [...kept, ...missing];
+}
+
+/**
+ * 권한 클레임만으로 만든 service 항목. **게이트웨이에서 읽은 값이 아니다** —
+ * id 와 이름 말고는 아는 것이 없으므로 나머지는 비워 둔다 (`serviceOptions` 주석).
+ */
+function emptyServiceView(id: string, name: string): ServiceView {
+  return {
+    id,
+    // `perm::view` 는 캐시에서 이름을 못 찾으면 id 를 그대로 넣는다 — 그때는 라벨을 겹치지 않게 한다.
+    name: name === id ? "" : name,
+    desc: "",
+    upstreamId: "",
+    specUrl: "",
+    namePrefix: "",
+    logKey: "",
+    hasJwtAuth: false,
+    upstreamLabel: "",
+    optionLabel: name && name !== id ? `${id} · ${name}` : id,
+    updateTime: null,
+    updated: "",
+    raw: null,
+  };
+}
 
 /** '그룹 없음' 버킷의 chip 키. 실제 그룹 이름과 겹치지 않도록 예약어를 쓴다. */
 export const NO_GROUP = " none";

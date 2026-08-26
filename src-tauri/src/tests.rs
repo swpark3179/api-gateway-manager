@@ -1234,6 +1234,35 @@ fn http_status_maps_to_actionable_error() {
     assert!(e.message.contains("503"));
 }
 
+/// 스펙 주소 조회는 `X-API-KEY` 를 보내지 않으므로(`client::fetch_text`) 그 401 / 403 을
+/// 관리키 탓으로 돌려서는 안 된다. Import 화면에서 service 를 무엇으로 바꿔도 "관리 토큰이
+/// 올바르지 않습니다" 가 뜨던 원인이라 문구를 못 박아 둔다.
+#[test]
+fn spec_fetch_denial_does_not_blame_the_admin_token() {
+    use crate::error::{AppError, ErrorKind};
+
+    for status in [401u16, 403] {
+        let e = AppError::from_spec_status(status, "");
+        assert_eq!(e.kind, ErrorKind::Unauthorized);
+        assert_eq!(e.status, Some(status));
+        assert!(
+            !e.message.contains("관리 토큰") && !e.message.contains("관리키"),
+            "스펙 조회 실패({status})를 관리키 문제로 보고하고 있다: {}",
+            e.message
+        );
+        // 상태 코드를 문구에 남긴다 — 스펙 서버가 401 인지 403 인지가 대응을 바꾼다.
+        assert!(e.message.contains(&status.to_string()));
+        let hint = e.hint.unwrap_or_default();
+        assert!(hint.contains("관리 토큰과 무관"), "무엇을 하면 되는지 알려 주지 않는다: {hint}");
+    }
+
+    // 401 / 403 밖의 상태는 게이트웨이 경로와 같은 분류를 그대로 쓴다.
+    let e = AppError::from_spec_status(404, "");
+    assert_eq!(e.kind, ErrorKind::NotFound);
+    let e = AppError::from_spec_status(503, "spec host down");
+    assert_eq!(e.kind, ErrorKind::Gateway);
+}
+
 // ── 7. OAS 파싱 ──────────────────────────────────────────────
 
 mod oas_parse {

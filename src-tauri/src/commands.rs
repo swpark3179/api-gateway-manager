@@ -284,9 +284,6 @@ pub fn route_cached(app: AppHandle<Wry>, env: Env, id: String) -> AppResult<Opti
 pub struct ImportSource {
     pub kind: String,
     pub value: String,
-    /// `url` 일 때만 의미 있다. 미지정이면 해당 환경의 설정을 따른다.
-    #[serde(default)]
-    pub no_proxy: Option<bool>,
 }
 
 /// URL 로 받는 스펙의 크기 상한. 이보다 큰 OAS 문서는 실무에서 나오지 않는다.
@@ -305,12 +302,11 @@ pub async fn oas_load(app: AppHandle<Wry>, env: Env, source: ImportSource) -> Ap
             .with_hint("파일이 이동·삭제되지 않았는지 확인하세요.")
         })?,
         "url" => {
+            // 프록시 우회는 화면에서 고르지 않는다 — `config::load` 가 항상 켜 두고
+            // (`config.rs` 모듈 주석), 스펙 조회도 게이트웨이와 같은 정책을 따른다.
             let settings = config::load(&app);
-            let mut cfg = settings.get(env).clone();
-            if let Some(np) = source.no_proxy {
-                cfg.no_proxy = np;
-            }
-            client::fetch_text(&cfg, &source.value, MAX_SPEC_BYTES).await?
+            let cfg = settings.get(env);
+            client::fetch_text(cfg, &source.value, MAX_SPEC_BYTES).await?
         }
         other => {
             return Err(AppError::internal(format!("알 수 없는 입력 방식입니다: {other}")));

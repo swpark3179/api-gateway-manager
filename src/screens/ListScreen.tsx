@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 
 import { syncLabel } from "../lib/design";
-import { filterConsumers, kindOf, NO_GROUP, useStore } from "../store";
+import { filterConsumers, kindOf, NO_GROUP, selectPerm, serviceOptions, useStore } from "../store";
 import BadgeList from "../components/BadgeList";
 import { Cell } from "../components/Cell";
 import GroupCombo from "../components/GroupCombo";
@@ -120,7 +120,8 @@ export default function ListScreen() {
   const namePrefix = useStore((s) => s.namePrefix);
   const setNamePrefix = useStore((s) => s.setNamePrefix);
   // 접두사 후보는 Service 의 `labels.name_prefix` 다 — 이미 메모리에 있어 새 IPC 가 없다.
-  const services = useStore((s) => s.services);
+  const allServices = useStore((s) => s.services);
+  const perm = useStore(selectPerm);
   // Route 는 내장 SQLite 가 이미 필터링해 준 결과다 (store.ts 모듈 주석 참조).
   const routes = useStore((s) => s.routes);
   const routesTotal = useStore((s) => s.routesTotal);
@@ -156,9 +157,13 @@ export default function ListScreen() {
   const prefixOptions = useMemo(
     () =>
       Array.from(
-        new Set(services.map((v) => v.namePrefix.trim()).filter(Boolean)),
+        new Set(
+          serviceOptions(allServices, perm)
+            .map((v) => v.namePrefix.trim())
+            .filter(Boolean),
+        ),
       ).sort(),
-    [services],
+    [allServices, perm],
   );
 
   const chipKeys: Array<[string, string]> = useMemo(

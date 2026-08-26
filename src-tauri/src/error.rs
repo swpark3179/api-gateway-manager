@@ -106,6 +106,28 @@ impl AppError {
             }
         }
     }
+
+    /// OAS 스펙 주소(`spec_url`) 조회 실패용. `from_status` 와 **401 / 403 만** 다르다.
+    ///
+    /// 스펙 조회는 `X-API-KEY` 를 붙이지 않으므로(`client::fetch_text`) 그 거부는 관리키와
+    /// 아무 관계가 없다. 그런데도 `from_status` 를 그대로 쓰면 "관리 토큰이 올바르지
+    /// 않습니다 / 설정 화면에서 관리키를 다시 확인하세요" 가 떠서, Import 화면에서 service 를
+    /// 무엇으로 바꿔도 같은 문구가 나오고 사용자는 멀쩡한 관리키를 의심하게 된다.
+    /// 나머지 상태 코드(404 · 400 계열 · 5xx)의 분류는 스펙 조회에도 그대로 맞으므로 재사용한다.
+    pub fn from_spec_status(status: u16, body: &str) -> Self {
+        match status {
+            401 | 403 => AppError::new(
+                ErrorKind::Unauthorized,
+                format!("스펙 주소가 접근을 거부했습니다. (HTTP {status})"),
+            )
+            .with_hint(
+                "이 주소는 관리 토큰과 무관합니다. 스펙 파일을 첨부하거나, \
+                 인증 없이 열리는 주소를 Service 의 spec_url 에 등록하세요.",
+            )
+            .with_status(status),
+            _ => Self::from_status(status, body),
+        }
+    }
 }
 
 impl std::fmt::Display for AppError {
