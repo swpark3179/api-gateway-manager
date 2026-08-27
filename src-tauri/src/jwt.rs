@@ -166,8 +166,10 @@ pub fn sign_admin(secret: &str, nbf: i64, exp: i64, perm: &Perm) -> AppResult<Jw
             }
             Some(v)
         }
-        Perm::None(_) => {
-            return Err(AppError::internal("권한 없음 상태로는 토큰을 발급할 수 없습니다."))
+        // 발급 폼은 '전체 관리자 / service 지정' 둘만 만든다. 나머지는 읽는 쪽 상태라
+        // 여기까지 올 일이 없지만, 조용히 admin 으로 흘려보내지 않도록 막아 둔다.
+        Perm::Opaque(_) | Perm::None(_) => {
+            return Err(AppError::internal("이 권한 상태로는 토큰을 발급할 수 없습니다."))
         }
     };
 

@@ -48,7 +48,10 @@ export default function Dashboard() {
 
   const health: Array<{ label: string; value: string }> = [
     { label: "Admin API", value: dash?.baseUrl || "—" },
-    { label: "X-API-KEY", value: dash?.tokenMasked || "미설정" },
+    // 라벨이 `X-API-KEY` 가 아닌 이유: 헤더로는 관리키 전체가 나가지만(Rust
+    // `config::api_key`), 여기 뿌리는 마스킹 값은 secret 을 가리려고 `$` 뒤만 자른다
+    // (`config::mask`). 같은 이름을 붙이면 두 값이 같아 보인다.
+    { label: "관리키", value: dash?.tokenMasked || "미설정" },
     { label: "APISIX 버전", value: o?.version ?? "—" },
     { label: "Service", value: o ? `${o.services}개 · Upstream ${o.upstreams}개` : "—" },
     { label: "응답 시간", value: o?.latencyMs != null ? `${o.latencyMs}ms` : "—" },
