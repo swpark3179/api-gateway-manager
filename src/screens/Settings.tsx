@@ -6,20 +6,29 @@
  * (`src-tauri/src/config.rs` 모듈 주석). 고를 수 없는 값을 스위치로 보여 주면
  * "껐는데 왜 그대로냐" 는 질문만 남는다.
  *
- * 관리키(`secret$token`)는 Windows 자격 증명 관리자에 저장된다. 이 화면에 들어오면
+ * 관리키는 Windows 자격 증명 관리자에 저장된다. 이 화면에 들어오면
  * `settings_reveal_token` 으로 원문을 받아 입력란에 채우고 `type="password"` 로 가려 둔다 —
  * `표시` 는 그 `type` 만 뒤집는다. 값을 채우지 않으면 미표시 모드가 **빈 칸**이 되어
  * 관리키가 등록돼 있는지조차 보이지 않는다. 손대지 않은 값은 저장에서 `null`(유지)로
  * 나가므로(`payload`) 화면을 열었다 닫는 것만으로 자격 증명이 다시 쓰이지는 않는다.
  * 관리 토큰이 담은 권한(시작일 · 종료일 · 권한 service)은 그 아래에 항상 펼친다.
  *
- * 게이트웨이로 나가는 `X-API-KEY` 는 관리키의 토큰 부분만이다 (Rust `config::resolve`).
+ * 게이트웨이로 나가는 `X-API-KEY` 는 **입력한 관리키 그대로**다 (Rust `config::resolve`).
+ * `secret$token` 형태면 `$` 앞의 secret 으로 기간 · 권한까지 읽어 보여 주고, 그 형태가
+ * 아니면 그 칸만 채우지 못한다 — 연결은 그대로 된다 (Rust `perm::Perm::Opaque`).
  */
 
 import { useEffect, useMemo, useState } from "react";
 
 import { useStore, selectIsAdmin } from "../store";
-import type { AdminTokenRequest, AdminTokenResult, EnvConfigView, EnvKey, PermView } from "../types";
+import type {
+  AdminTokenRequest,
+  AdminTokenResult,
+  EnvConfigView,
+  EnvKey,
+  PermKind,
+  PermView,
+} from "../types";
 
 /** 환경별 baseUrl 안내값. 초기값도 같아서(Rust `EnvConfig::default_for`) 비우면 이 값이 보인다. */
 const BASE_URL_PLACEHOLDER: Record<EnvKey, string> = {
@@ -27,7 +36,7 @@ const BASE_URL_PLACEHOLDER: Record<EnvKey, string> = {
   prod: "http://60.101.207.91:7096",
 };
 
-const TOKEN_PLACEHOLDER = "공통담당자에게 전달받은 관리키를 secret$token 형태로 입력하세요";
+const TOKEN_PLACEHOLDER = "게이트웨이에 보낼 관리키를 그대로 입력하세요 (예: secret$token)";
 
 const envLabel = (env: EnvKey) => (env === "dev" ? "개발" : "운영");
 
@@ -63,6 +72,18 @@ function isoDate(offsetDays: number): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/**
+ * 환경 카드 제목 옆 뱃지. `none` 인데 관리키가 없는 경우만 카드 쪽에서 문구를 바꾼다 —
+ * 미등록과 "등록했는데 기간이 지났다" 는 사용자가 할 일이 다르다.
+ */
+const PERM_BADGE: Record<PermKind, { tone: string; text: string }> = {
+  admin: { tone: "success", text: "전체 관리자" },
+  scoped: { tone: "success", text: "부분 관리" },
+  // 연결은 되므로 경고색을 쓰지 않는다. 권한을 못 읽었다는 사실만 알린다.
+  opaque: { tone: "neutral", text: "권한 확인 불가" },
+  none: { tone: "warning", text: "관리키 사용 불가" },
+};
+
 // ── 토큰이 담은 권한 상세 ────────────────────────────────────
 
 /**
@@ -76,13 +97,21 @@ function isoDate(offsetDays: number): string {
  * 를 이 화면에서 알아야 하기 때문이다 (Rust `perm::view` 주석).
  */
 function PermDetail({ perm }: { perm: PermView }) {
-  if (!perm.hasClaims) {
+  // 해석하지 못한 관리키 — 오류가 아니다. 관리키 전체가 그대로 나가므로 연결은 되고,
+  // 이 카드가 채우지 못하는 것은 기간과 권한뿐이다 (Rust `perm::Perm::Opaque`).
+  if (perm.kind === "opaque") {
     return (
-      <div style={noteStyle("yellow")}>
-        {perm.message} 관리키는 <span className="font-mono">secret$token</span> 형태여야 하고,
-        토큰은 그 secret 으로 서명된 JWT 여야 합니다.
+      <div style={noteStyle("blue")}>
+        {perm.message} 입력한 관리키 전체가 <span className="font-mono">X-API-KEY</span> 로
+        나가므로 연결은 그대로 됩니다. 기간과 권한까지 보려면 관리키가{" "}
+        <span className="font-mono">secret$token</span> 형태여야 하고, 뒤쪽 토큰이 그 secret 으로
+        서명된 관리 토큰이어야 합니다.
       </div>
     );
+  }
+
+  if (!perm.hasClaims) {
+    return <div style={noteStyle("yellow")}>{perm.message}</div>;
   }
 
   const kindBadge =
@@ -237,15 +266,11 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
       <div className="row between" style={{ marginBottom: 18 }}>
         <div className="row" style={{ gap: 10 }}>
           <h5 className="h5">{envLabel(env)} 서버</h5>
-          <span className={"badge " + (cfg.perm.kind !== "none" ? "success" : "warning")}>
+          <span className={"badge " + PERM_BADGE[cfg.perm.kind].tone}>
             <span className="dot" />
-            {cfg.perm.kind === "admin"
-              ? "전체 관리자"
-              : cfg.perm.kind === "scoped"
-                ? "부분 관리"
-                : cfg.hasToken
-                  ? "관리키 사용 불가"
-                  : "관리키 미설정"}
+            {cfg.perm.kind === "none" && !cfg.hasToken
+              ? "관리키 미설정"
+              : PERM_BADGE[cfg.perm.kind].text}
           </span>
         </div>
         <span className="text-xs muted font-mono">
@@ -271,7 +296,7 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
 
         <div>
           <label className="field-label">
-            관리키 (secret$token) <span style={{ color: "var(--red-600)" }}>*</span>
+            관리키 (X-API-KEY) <span style={{ color: "var(--red-600)" }}>*</span>
           </label>
           <input
             className="text-input font-mono"
@@ -293,7 +318,7 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
           <div className="text-xs muted" style={{ marginTop: 6, lineHeight: "18px" }}>
             {cfg.hasToken
               ? "관리키는 Windows 자격 증명 관리자에 보관됩니다. 값을 고치지 않고 저장하면 기존 관리키가 그대로 유지됩니다."
-              : "미입력 시 해당 환경은 관리할 수 없습니다. 게이트웨이로는 $ 뒤의 토큰만 나갑니다."}
+              : "미입력 시 해당 환경은 관리할 수 없습니다. 입력한 값 전체가 X-API-KEY 로 나갑니다."}
           </div>
         </div>
 
@@ -573,7 +598,7 @@ export default function Settings() {
 
   const callRules = useMemo(
     () => [
-      { label: "인증 헤더", value: "X-API-KEY: <관리키의 토큰>" },
+      { label: "인증 헤더", value: "X-API-KEY: <입력한 관리키 전체>" },
       { label: "프록시 우회 · 인증서 검증", value: "항상 우회 · 항상 건너뜀 (고정)" },
       { label: "요청 경로", value: "{baseUrl}/apisix/admin/{resource}" },
     ],

@@ -1,12 +1,14 @@
 //! 환경(개발/운영)별 접속 설정.
 //!
-//! baseUrl 은 tauri-plugin-store 의 `settings.json` 에, 관리키(`secret$token`)는
-//! **Windows 자격 증명 관리자**에 따로 보관한다. 평소 프런트로는 마스킹된 표시용
-//! 문자열만 내려가고, 설정 화면에서 사용자가 `표시` 를 눌렀을 때만
-//! `settings_reveal_token` 커맨드가 원문을 준다 (README '보안' 절).
+//! baseUrl 은 tauri-plugin-store 의 `settings.json` 에, 관리키는 **Windows 자격 증명
+//! 관리자**에 따로 보관한다. 평소 프런트로는 마스킹된 표시용 문자열만 내려가고,
+//! 설정 화면에서 사용자가 `표시` 를 눌렀을 때만 `settings_reveal_token` 커맨드가 원문을
+//! 준다 (README '보안' 절).
 //!
-//! 게이트웨이로 나가는 `X-API-KEY` 는 관리키의 **토큰 부분만**이다 (`resolve`). secret 은
-//! 서명 검증에만 쓰이고 앱 밖으로 나가지 않으며, 마스킹 문자열에도 섞이지 않는다 (`mask`).
+//! 게이트웨이로 나가는 `X-API-KEY` 는 **사용자가 입력한 관리키 그대로**다 (`resolve`) —
+//! `secret$token` 이든 평범한 admin key 한 줄이든 자르지 않는다. `$` 앞의 secret 은 그와
+//! 별개로 권한을 읽는 데 쓰인다 (`perm.rs`). 다만 **마스킹 문자열에는 secret 이 섞이지
+//! 않는다** (`mask`) — 화면에 뿌리는 값과 게이트웨이로 보내는 값은 서로 다른 문제다.
 //!
 //! `no_proxy` · `insecure_tls` 는 더 이상 사용자가 고르지 않는다 — 사내 환경에서 둘 다
 //! 켜져 있어야만 게이트웨이에 닿으므로 항상 `true` 로 강제한다. `load()` 가 읽는 즉시
@@ -185,12 +187,26 @@ pub fn set_token(env: Env, token: &str) -> AppResult<()> {
     }
 }
 
-/// 표시용 마스킹. 디자인의 `cfg.token.slice(0,6) + '••••••••••••'` 규칙을 따르되,
-/// 자르는 대상은 관리키가 아니라 그 안의 **토큰**이다 — 관리키의 앞부분은 secret 이라
-/// 앞 6자를 그대로 보여 주면 secret 을 흘리게 된다.
+/// 저장된 관리키에서 `X-API-KEY` 에 실을 값을 뽑는다 — **자르지 않는다**.
 ///
-/// 관리키 형식이 아니면(예전 평문 토큰) 무엇도 드러내지 않고 점만 돌려준다. 어느 쪽이든
-/// 등록 여부는 `has_token` 이 말해 주므로 표시 문자열이 값을 알려 줄 필요는 없다.
+/// 한 줄짜리 함수지만 이름을 붙여 둔다. 예전에는 여기서 `secret$token` 을 쪼개 뒤쪽만
+/// 보냈고, 그 규칙이 `resolve` 와 `settings_test` 두 곳에 각각 적혀 있었다 — 한쪽만 고치면
+/// "테스트는 되는데 저장하면 안 되는" 상태가 생긴다. 관리키가 어떤 모양이어야 하는지는
+/// 게이트웨이가 정한다 (`perm.rs` 모듈 주석).
+///
+/// 앞뒤 공백만 터는 이유: 붙여넣기에 개행이 섞이는 일이 흔하고, 그 한 글자 때문에
+/// 게이트웨이가 401 을 주면 원인을 찾기 어렵다.
+pub fn api_key(raw: &str) -> &str {
+    raw.trim()
+}
+
+/// 표시용 마스킹. 디자인의 `cfg.token.slice(0,6) + '••••••••••••'` 규칙을 따르되,
+/// 자르는 대상은 관리키가 아니라 그 안의 **토큰**이다 — `secret$token` 형태라면 앞부분이
+/// secret 이므로, 앞 6자를 그대로 보여 주면 secret 을 흘리게 된다.
+///
+/// 그 형태가 아니면 무엇도 드러내지 않고 점만 돌려준다 — 관리키 전체가 게이트웨이로 나가는
+/// 자격 증명이라 앞자리도 보여 줄 이유가 없다. 어느 쪽이든 등록 여부는 `has_token` 이
+/// 말해 주므로 표시 문자열이 값을 알려 줄 필요는 없다.
 pub fn mask(raw: &str) -> String {
     let Ok(key) = perm::split(raw) else {
         return "••••••••••••••••••".to_string();
@@ -268,7 +284,7 @@ fn service_namer(app: &AppHandle<Wry>, env: Env) -> impl Fn(&str) -> Option<Stri
 /// 게이트웨이를 호출하기 위한 확정된 접속 정보. 관리키가 없으면 Config 에러.
 pub struct Resolved {
     pub admin_base: String,
-    /// `X-API-KEY` 에 실을 값 — 관리키의 **토큰 부분**이다. secret 은 여기 없다.
+    /// `X-API-KEY` 에 실을 값 — 사용자가 입력한 **관리키 전체**다 (앞뒤 공백만 턴다).
     pub token: String,
     pub cfg: EnvConfig,
 }
@@ -281,18 +297,12 @@ pub fn resolve(app: &AppHandle<Wry>, env: Env) -> AppResult<Resolved> {
         AppError::config(format!("{} 서버의 관리키가 등록되지 않았습니다.", env.label()))
             .with_hint("설정 화면에서 관리키를 입력하세요.")
     })?;
-    // 만료·형식 오류 토큰으로 게이트웨이를 두드려 401 을 받는 대신 여기서 이유를 말해 준다.
+    // 기간이 지난 관리 토큰으로 게이트웨이를 두드려 401 을 받는 대신 여기서 이유를 말해 준다.
+    // **형식 오류는 여기 걸리지 않는다** — 해석하지 못한 관리키는 `Perm::Opaque` 라 그대로
+    // 나간다. 관리키가 어떤 모양이어야 하는지는 게이트웨이가 정한다 (`perm.rs` 모듈 주석).
     if let Perm::None(reason) = perm::resolve(env) {
         return Err(AppError::config(format!("{} {}", env.label(), reason.message()))
             .with_hint("설정 화면에서 관리키를 다시 등록하세요."));
     }
-    // `Perm::None` 이 아니었으므로 `split` 은 이미 통과한 관리키다. 그래도 `?` 로 받아
-    // 두 판정이 어긋날 여지를 남기지 않는다.
-    let token = perm::split(&raw)
-        .map_err(|reason| {
-            AppError::config(format!("{} {}", env.label(), reason.message()))
-                .with_hint("설정 화면에서 관리키를 다시 등록하세요.")
-        })?
-        .token;
-    Ok(Resolved { admin_base, token, cfg })
+    Ok(Resolved { admin_base, token: api_key(&raw).to_string(), cfg })
 }

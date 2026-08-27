@@ -15,10 +15,15 @@ export type Kind = "route" | "consumer" | "service" | "upstream";
 
 // ── 설정 ─────────────────────────────────────────────────────
 
-/** 관리 권한의 세 상태. `none` 이면 잠금 화면으로 간다. */
-export type PermKind = "admin" | "scoped" | "none";
+/**
+ * 관리 권한의 네 상태. `none` 이면 잠금 화면으로 간다.
+ *
+ * `opaque` 는 관리키를 관리 토큰으로 **해석하지 못한** 상태다 — 기간·권한을 표시하지 못할
+ * 뿐 잠금은 아니고, 앱은 아무것도 제한하지 않는다 (Rust `perm::Perm::Opaque`).
+ */
+export type PermKind = "admin" | "scoped" | "opaque" | "none";
 
-/** `kind === "none"` 이 된 이유 (Rust `perm::Reason`). */
+/** `kind` 가 `none`(잠금) · `opaque`(해석 불가) 가 된 이유 (Rust `perm::Reason`). */
 export type PermReason =
   | "noToken"
   | "noSecret"
@@ -39,11 +44,14 @@ export interface PermService {
  *
  * 기간이 지나 `kind === "none"` 이어도 `hasClaims` 가 true 면 시작일·종료일·권한 서비스는
  * 채워져 있다 — 설정 화면이 "왜 막혔는지" 를 보여 줘야 하기 때문이다.
+ *
+ * `kind === "opaque"` 면 `hasClaims` 가 false 다. 그때 `message` 는 오류가 아니라 무엇을
+ * 읽지 못했는지의 설명이다 — 연결 자체는 된다.
  */
 export interface PermView {
   kind: PermKind;
   reason?: PermReason;
-  /** 사유 설명. `kind !== "none"` 이면 빈 문자열. */
+  /** 사유 설명. `admin` · `scoped` 면 빈 문자열. */
   message: string;
   hasClaims: boolean;
   nbf: number;
@@ -74,7 +82,10 @@ export interface SettingsView {
 
 export interface EnvPayload {
   baseUrl: string;
-  /** 관리키(`secret$token`). null = 기존 관리키 유지, "" = 삭제, 그 외 = 교체 */
+  /**
+   * 관리키 — 입력한 그대로 `X-API-KEY` 가 된다 (Rust `config::resolve`).
+   * null = 기존 관리키 유지, "" = 삭제, 그 외 = 교체
+   */
   token: string | null;
 }
 

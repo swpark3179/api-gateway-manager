@@ -928,7 +928,8 @@ mod admin_token {
         let k = perm::split(&perm::join("a$b", &t)).expect("secret 에 $ 가 있는 관리키");
         assert_eq!((k.secret.as_str(), k.token.as_str()), ("a$b", t.as_str()));
 
-        // 형식이 아닌 것들 — 사유가 갈려야 잠금 화면이 무엇을 고치라고 말할 수 있다.
+        // 형식이 아닌 것들 — 사유가 갈려야 설정 화면이 무엇을 못 읽었는지 말할 수 있다.
+        // (잠금은 아니다. `unreadable_admin_key_connects_without_limits` 참조)
         assert_eq!(perm::split(&t).unwrap_err(), Reason::NoSecret, "$ 없는 예전 평문 토큰");
         assert_eq!(perm::split("").unwrap_err(), Reason::NoSecret);
         assert_eq!(perm::split("   ").unwrap_err(), Reason::NoSecret);
@@ -936,20 +937,67 @@ mod admin_token {
         assert_eq!(perm::split("secret$").unwrap_err(), Reason::NotJwt, "토큰이 비었다");
     }
 
-    /// 게이트웨이(`X-API-KEY`)로 나가는 것은 토큰뿐이다.
+    /// 게이트웨이(`X-API-KEY`)로 나가는 것은 **입력한 관리키 전체**다.
     ///
-    /// `config::resolve` 는 자격 증명 관리자가 필요해 단위 테스트가 되지 않으므로,
-    /// 그 계약을 실제로 지키는 이음새인 `split` 을 여기서 못 박는다. secret 이 섞여 나가면
-    /// 게이트웨이 로그와 프록시에 서명 키가 그대로 남는다.
+    /// `config::resolve` 는 자격 증명 관리자가 필요해 단위 테스트가 되지 않으므로, 그 계약을
+    /// 실제로 지키는 이음새인 `config::api_key` 를 여기서 못 박는다. 예전에는 `$` 뒤만
+    /// 보냈는데, 그러면 관리키의 모양을 게이트웨이가 아니라 앱이 규정하게 된다.
     #[test]
-    fn gateway_gets_the_token_only() {
-        let t = admin_token();
-        let sent = perm::split(&perm::join(SECRET, &t)).unwrap().token;
+    fn gateway_gets_the_whole_admin_key() {
+        use crate::config::api_key;
 
-        assert_eq!(sent, t);
-        assert!(!sent.contains('$'), "구분자가 남아 있으면 secret 도 붙어 있다는 뜻이다");
-        assert!(!sent.contains(SECRET), "secret 이 섞여 나가면 안 된다");
-        assert_eq!(sent.split('.').count(), 3, "JWT 세 세그먼트");
+        let key = perm::join(SECRET, &admin_token());
+        assert_eq!(api_key(&key), key, "쪼개지 않는다");
+        assert!(api_key(&key).contains(SECRET), "secret 도 함께 나간다 — 그것이 관리키다");
+
+        // 관리키가 아닌 값도 그대로다. 평범한 APISIX admin key 한 줄로 쓸 수 있어야 한다.
+        let plain = "edd1c9f034335f136f87ad84b625c8f1";
+        assert_eq!(api_key(plain), plain);
+
+        // 앞뒤 공백만 턴다 — 붙여넣기에 섞여 오는 개행 때문에 401 을 받는 일을 막는다.
+        assert_eq!(api_key(&format!("  {plain}\n")), plain);
+    }
+
+    /// 해석하지 못한 관리키는 **잠금이 아니다** — 앱은 제한하지 않고 그대로 연결한다.
+    ///
+    /// 이 앱이 아는 `secret$token` 이 아니어도 게이트웨이에서는 멀쩡한 `X-API-KEY` 일 수
+    /// 있다. 읽지 못한 것을 "권한 없음" 으로 취급하면 그런 관리키로는 연결조차 못 한다.
+    #[test]
+    fn unreadable_admin_key_connects_without_limits() {
+        let signed_elsewhere = jwt::sign_admin("other-secret", NBF, EXP, &Perm::Admin).unwrap().token;
+        let wrong_key = jwt::sign("someone-else", SECRET, Some(NBF), Some(EXP)).unwrap().token;
+
+        for (raw, want) in [
+            // 예전 평문 X-API-KEY — `$` 가 없다.
+            ("edd1c9f034335f136f87ad84b625c8f1".to_string(), Reason::NoSecret),
+            // `$` 는 있는데 뒤가 JWT 가 아니다.
+            (perm::join(SECRET, "not-a-jwt"), Reason::NotJwt),
+            // 서명이 앞의 secret 과 맞지 않는다.
+            (perm::join(SECRET, &signed_elsewhere), Reason::BadSignature),
+            // 서명은 맞지만 우리 관리 토큰이 아니다.
+            (perm::join(SECRET, &wrong_key), Reason::BadKey),
+        ] {
+            let p = perm::from_key(&raw, MID);
+            assert_eq!(p, Perm::Opaque(want), "해석 실패는 Opaque 다: {raw}");
+            assert!(p.is_admin(), "메뉴를 빼면 이 관리키로는 아무것도 못 한다");
+            assert!(p.allows("svc-a") && p.allows(""), "제한할 근거가 없다");
+            assert_eq!(p.allow_blob(), "", "목록을 좁히지 않는다");
+        }
+    }
+
+    /// 잠기는 것은 두 가지뿐이다 — 관리키가 없거나, 토큰이 스스로 기간 밖이라고 말하거나.
+    #[test]
+    fn only_missing_or_out_of_period_keys_lock() {
+        assert_eq!(perm::from_key("", MID), Perm::None(Reason::NoToken));
+        assert_eq!(perm::from_key("   ", MID), Perm::None(Reason::NoToken));
+
+        let key = perm::join(SECRET, &admin_token());
+        assert_eq!(perm::from_key(&key, NBF - 1), Perm::None(Reason::NotYet));
+        assert_eq!(perm::from_key(&key, EXP), Perm::None(Reason::Expired));
+        assert_eq!(perm::from_key(&key, MID), Perm::Admin);
+
+        let scoped = perm::join(SECRET, &scoped_token(&["svc-a"]));
+        assert_eq!(perm::from_key(&scoped, MID), Perm::Services(vec!["svc-a".into()]));
     }
 
     /// 서명은 그 관리키의 secret 으로만 맞는다.
@@ -1066,10 +1114,14 @@ mod admin_token {
         let scoped = Perm::Services(vec!["svc-a".into(), "svc-b".into()]);
         let empty = Perm::Services(vec![]);
         let none = Perm::None(Reason::Expired);
+        // 해석하지 못한 관리키는 admin 과 똑같이 움직인다 — 다른 곳은 설정 화면뿐이다.
+        let opaque = Perm::Opaque(Reason::NoSecret);
 
         assert!(admin.is_admin() && !scoped.is_admin() && !none.is_admin());
+        assert!(opaque.is_admin());
 
         assert!(admin.allows("anything") && admin.allows(""));
+        assert!(opaque.allows("anything") && opaque.allows(""));
         assert!(scoped.allows("svc-a") && scoped.allows("svc-b"));
         assert!(!scoped.allows("svc-c"), "목록에 없는 service");
         assert!(!scoped.allows("svc"), "접두사만 같은 id 가 걸리면 안 된다");
@@ -1078,6 +1130,7 @@ mod admin_token {
 
         // 허용목록 문자열 — 빈 문자열이 '제한 없음' 이다 (db::SERVICE_CLAUSE).
         assert_eq!(admin.allow_blob(), "");
+        assert_eq!(opaque.allow_blob(), "");
         assert_eq!(scoped.allow_blob(), "\nsvc-a\nsvc-b\n");
         assert_eq!(empty.allow_blob(), "\n", "무엇과도 맞지 않는 값");
         assert_eq!(none.allow_blob(), "\n");
@@ -1140,7 +1193,8 @@ fn mask_never_leaks_the_secret() {
     assert!(!masked.contains('$'), "구분자가 남으면 secret 도 붙어 있다는 뜻이다");
     assert!(masked.starts_with(&token[..6]), "토큰 앞 6자를 보여 준다: {masked}");
 
-    // 관리키 형식이 아니면(예전 평문 토큰) 아무것도 드러내지 않는다.
+    // `secret$token` 형태가 아니면 아무것도 드러내지 않는다 — 관리키 전체가 게이트웨이로
+    // 나가는 자격 증명이므로 앞자리도 보여 줄 이유가 없다.
     assert!(!mask(secret).contains(&secret[..6]));
     assert!(!mask("").is_empty(), "빈 값에도 표시 문자열은 있어야 한다");
 }

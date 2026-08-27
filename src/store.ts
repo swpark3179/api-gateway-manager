@@ -552,8 +552,9 @@ export const useStore = create<AppState>((set, get) => ({
   async bootstrap(variant = "overlay") {
     const { env, settings } = get();
     // 관리할 수 없는 환경은 잠금 화면이 뜨므로 호출하지 않는다. 에러도 세우지 않는다.
-    // 토큰이 없는 경우만이 아니다 — 만료·형식 오류 토큰으로 호출하면 커맨드마다 같은
+    // 토큰이 없는 경우만이 아니다 — 기간을 벗어난 관리 토큰으로 호출하면 커맨드마다 같은
     // Config 에러가 돌아와 잠금 화면 위에 에러 배너가 겹친다 (`config::resolve`).
+    // 해석하지 못한 관리키(`opaque`)는 여기 걸리지 않는다 — 게이트웨이에 물어봐야 안다.
     const cfg = settings?.[env];
     if (!cfg?.hasToken || cfg.perm.kind === "none") return;
 
@@ -1798,14 +1799,25 @@ function showMeta(
 /** 현재 환경의 관리 권한. 설정을 아직 못 읽었으면 null. */
 export const selectPerm = (s: AppState): PermView | null => s.settings?.[s.env]?.perm ?? null;
 
-/** 전체 관리자인가 — Upstream · Service 메뉴와 관리키 발급 카드의 조건. */
-export const selectIsAdmin = (s: AppState): boolean => selectPerm(s)?.kind === "admin";
+/**
+ * 전체 관리자로 다뤄도 되는가 — Upstream · Service 메뉴와 관리키 발급 카드의 조건.
+ *
+ * `opaque`(관리키를 해석하지 못한 상태)도 포함한다. 권한을 읽지 못했다고 메뉴를 빼면
+ * 그 관리키로는 아무것도 할 수 없는데, 정작 게이트웨이에서는 전체 관리자일 수 있다.
+ * 판정 자체는 Rust `perm::Perm::is_admin` 이 같은 규칙으로 한다 — 커맨드도 각자 확인하므로
+ * 둘이 어긋나면 화면은 열리는데 저장이 막힌다.
+ */
+export const selectIsAdmin = (s: AppState): boolean => {
+  const kind = selectPerm(s)?.kind;
+  return kind === "admin" || kind === "opaque";
+};
 
 /**
  * 현재 환경을 관리할 수 없으면 잠금.
  *
- * 토큰이 없는 경우 말고도, 토큰이 JWT 가 아니거나 서명이 맞지 않거나 유효기간을 벗어난
- * 경우가 모두 여기로 온다 — 판정은 Rust `perm::resolve` 가 하고 이유는 `perm.message` 에 있다.
+ * 잠기는 것은 두 가지뿐이다: 관리키가 없거나, 읽어 낸 관리 토큰이 스스로 기간 밖이라고
+ * 말하거나. **해석하지 못한 관리키(`opaque`)는 잠기지 않는다** — 기간·권한을 표시하지 못할
+ * 뿐 연결은 된다. 판정은 Rust `perm::from_key` 가 하고 이유는 `perm.message` 에 있다.
  */
 export const selectLocked = (s: AppState): boolean => {
   const cfg = s.settings?.[s.env];

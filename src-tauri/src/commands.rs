@@ -88,15 +88,10 @@ pub fn settings_save(app: AppHandle<Wry>, env: Env, payload: EnvPayload) -> AppR
     payload.to_cfg().admin_base()?;
 
     if let Some(t) = &payload.token {
-        // 형식만 본다 — `secret$token` 이 아니면 저장 자체를 막아 잠금 화면까지 가지 않게 한다.
-        // 서명·기간은 검사하지 않는다: 만료된 관리키도 저장한 뒤 설정 화면에서 시작일·종료일과
-        // 사유를 보여 줘야 사용자가 왜 막혔는지 알 수 있다 (`perm::view`).
-        if !t.trim().is_empty() {
-            perm::split(t).map_err(|reason| {
-                AppError::config(reason.message())
-                    .with_hint("발급받은 관리키를 secret$token 형태 그대로 붙여넣으세요.")
-            })?;
-        }
+        // 관리키의 모양은 검사하지 않는다. 그 값이 유효한 `X-API-KEY` 인지 아는 것은
+        // 게이트웨이뿐이고, 앱이 `secret$token` 만 받으면 평범한 admin key 한 줄로는
+        // 연결조차 못 하게 된다 (`perm.rs` 모듈 주석). 해석되지 않는 관리키는 저장된 뒤
+        // 설정 화면이 "기간·권한을 읽을 수 없다" 로 알려 준다 (`perm::view`).
         config::set_token(env, t)?;
     }
     config::save_env(&app, env, payload.to_cfg())?;
@@ -125,7 +120,7 @@ pub struct TestResult {
 }
 
 /// 연결 테스트는 **저장 전 입력값**으로 즉석 호출한다.
-/// token 이 null 이면 이미 저장된 관리키를 쓴다.
+/// token 이 null 이면 이미 저장된 관리키를 쓴다. 입력값은 그대로 `X-API-KEY` 가 된다.
 #[tauri::command]
 pub async fn settings_test(app: AppHandle<Wry>, env: Env, payload: EnvPayload) -> TestResult {
     let raw = match &payload.token {
@@ -138,11 +133,9 @@ pub async fn settings_test(app: AppHandle<Wry>, env: Env, payload: EnvPayload) -
         },
     };
 
-    // 게이트웨이에는 관리키의 **토큰 부분만** 보낸다 (`config::resolve` 와 같은 규칙).
-    let token = match perm::split(&raw) {
-        Ok(k) => k.token,
-        Err(reason) => return TestResult { ok: false, text: reason.message().into() },
-    };
+    // 저장 후와 같은 값을 보낸다 — 관리키 전체다. 뽑는 규칙은 `config::api_key` 한 곳이다.
+    // 여기서 형식을 따지면 "테스트는 막히는데 저장하면 되는" 상태가 생긴다.
+    let token = config::api_key(&raw).to_string();
 
     let cfg = payload.to_cfg();
     match client::test_connection(&cfg, &token).await {
