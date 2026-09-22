@@ -114,6 +114,8 @@ export const routeSave = (env: EnvKey, f: RouteFormState) =>
       // 이 줄을 빠뜨리면 Rust 가 빈 문자열을 "groups" 로 읽어 전체 허용이 무시된다
       // (누락이 권한을 조용히 푸는 쪽으로 떨어지지 않게 한 기본값이다 — routes.rs 주석).
       authMode: f.authMode,
+      // 이 줄을 빠뜨리면 Rust 가 None 으로 읽어 토글과 무관하게 플러그인을 그대로 둔다.
+      personalAuth: f.personalAuth,
       status: f.status,
       groupsLocation: f.groupsLocation,
     },
@@ -163,6 +165,9 @@ export const consumerSave = (env: EnvKey, f: ConsumerFormState) =>
       // 이 줄을 빠뜨리면 Rust 쪽 contacts 가 null 로 들어가 "labels 를 건드리지 않는다"가 된다.
       // 지워지는 게 아니라 유지되는 쪽으로 degrade 하도록 Option<Vec<_>> 으로 받는다.
       contacts: f.contacts,
+      // 빠뜨리면 Rust 가 None 으로 읽어 shi-personal-auth 를 건드리지 않는다 (지우지도 않는다).
+      personalAuth: f.personalAuth,
+      personalSecret: f.personalSecret,
     },
   });
 
@@ -229,6 +234,8 @@ export const serviceSave = (env: EnvKey, f: ServiceFormState) =>
       logKey: f.logKey,
       // 이 줄을 빠뜨리면 Rust 의 기본값(true)으로 떨어져 토글을 끈 게 무시된다.
       jwtAuth: f.jwtAuth,
+      // 빠뜨리면 Rust 가 None 으로 읽어 토글과 무관하게 플러그인을 그대로 둔다.
+      personalAuth: f.personalAuth,
     },
   });
 

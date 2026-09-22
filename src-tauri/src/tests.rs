@@ -135,6 +135,7 @@ fn route_save_preserves_unknown_plugins() {
         auth_mode: String::new(),
         status: Some(0),
         groups_location: None,
+        personal_auth: None,
     };
 
     let body = apply_route_form_for_test(existing, &form, false);
@@ -180,6 +181,7 @@ fn new_route_is_always_active() {
         auth_mode: String::new(),
         status: None,
         groups_location: None,
+        personal_auth: None,
     };
 
     let body = apply_route_form_for_test(json!({}), &form, true);
@@ -228,6 +230,7 @@ fn rewrite_modes_are_mutually_exclusive() {
         auth_mode: String::new(),
         status: None,
         groups_location: None,
+        personal_auth: None,
     };
 
     // regex 모드 → regex_uri 만 남고 uri 는 사라진다.
@@ -281,6 +284,7 @@ fn rewrite_regex_keeps_extra_pairs() {
         auth_mode: String::new(),
         status: None,
         groups_location: None,
+        personal_auth: None,
     };
 
     let body = apply_route_form_for_test(json!({}), &form, false);
@@ -311,6 +315,7 @@ fn blank_regex_pair_removes_the_key() {
         auth_mode: String::new(),
         status: None,
         groups_location: None,
+        personal_auth: None,
     };
     let base = || json!({ "plugins": { "proxy-rewrite": { "regex_uri": ["^/x/(.*)", "/y/$1"] } } });
 
@@ -371,6 +376,7 @@ fn public_route_drops_the_auth_plugin() {
         auth_mode: "public".into(),
         status: Some(1),
         groups_location: None,
+        personal_auth: None,
     };
 
     let body = apply_route_form_for_test(existing, &form, false);
@@ -406,6 +412,7 @@ fn public_route_without_other_plugins_drops_the_plugins_key() {
         auth_mode: "public".into(),
         status: None,
         groups_location: None,
+        personal_auth: None,
     };
 
     let body = apply_route_form_for_test(json!({}), &form, true);
@@ -435,6 +442,7 @@ fn public_route_clears_nonstandard_group_fields() {
         auth_mode: "public".into(),
         status: None,
         groups_location: Some(loc),
+        personal_auth: None,
     };
 
     // (1) 최상위 필드에 있던 경우
@@ -481,6 +489,7 @@ fn groups_mode_keeps_an_empty_allowed_groups() {
         auth_mode: "groups".into(),
         status: None,
         groups_location: None,
+        personal_auth: None,
     };
 
     let body = apply_route_form_for_test(json!({ "plugins": { "shi-auth": {} } }), &form, false);
@@ -545,6 +554,8 @@ fn consumer_save_preserves_jwt_auth_extras() {
         is_new: false,
         groups_location: None,
         contacts: None,
+        personal_auth: None,
+        personal_secret: String::new(),
     };
 
     let body = apply_consumer_form_for_test(existing, &form);
@@ -652,6 +663,8 @@ fn saves_auth_groups_back_to_where_they_were_found() {
         is_new: false,
         groups_location: Some(view.groups_location.clone()),
         contacts: None,
+        personal_auth: None,
+        personal_secret: String::new(),
     };
 
     let body = apply_consumer_form_for_test(existing, &form);
@@ -677,6 +690,8 @@ fn saves_auth_groups_back_to_where_they_were_found() {
         is_new: false,
         groups_location: Some(csv_loc),
         contacts: None,
+        personal_auth: None,
+        personal_secret: String::new(),
     };
     let body = apply_consumer_form_for_test(json!({}), &form);
     assert_eq!(body.pointer("/plugins/jwt-auth/auth-groups").unwrap(), "a,b");
@@ -697,6 +712,8 @@ fn new_consumer_writes_groups_where_the_gateway_reads_them() {
         is_new: true,
         groups_location: None,
         contacts: None,
+        personal_auth: None,
+        personal_secret: String::new(),
     };
 
     let body = apply_consumer_form_for_test(json!({}), &form);
@@ -2246,6 +2263,8 @@ fn contacts_write_back_preserves_other_labels() {
         is_new: false,
         groups_location: None,
         contacts: Some(vec![Contact { name: "박민수".into(), dept: "결제".into() }]),
+        personal_auth: None,
+        personal_secret: String::new(),
     };
 
     let body = apply_consumer_form_for_test(existing, &form);
@@ -2278,6 +2297,8 @@ fn contacts_renumber_densely_and_allow_dept_only() {
             // 완전히 빈 행은 버린다 (그리드에서 행만 추가하고 안 채운 경우)
             Contact::default(),
         ]),
+        personal_auth: None,
+        personal_secret: String::new(),
     };
 
     let body = apply_consumer_form_for_test(json!({}), &form);
@@ -2304,6 +2325,8 @@ fn empty_contacts_removes_the_labels_key() {
         is_new: false,
         groups_location: None,
         contacts,
+        personal_auth: None,
+        personal_secret: String::new(),
     };
 
     // 담당자 라벨만 있던 경우 → labels 키 자체가 사라진다 ("labels": {} 를 남기지 않는다)
@@ -2341,6 +2364,8 @@ fn contacts_none_preserves_existing_labels() {
         is_new: false,
         groups_location: None,
         contacts: None,
+        personal_auth: None,
+        personal_secret: String::new(),
     };
 
     let body = apply_consumer_form_for_test(existing.clone(), &form);
@@ -3269,5 +3294,245 @@ mod meta_cache {
         let ids: Vec<String> =
             db::upstreams_cached(&c, "dev").unwrap().into_iter().map(|u| u.id).collect();
         assert_eq!(ids, vec!["b", "a", "c"], "seq 로 게이트웨이 순서를 유지한다");
+    }
+}
+
+// ── 16. 개인 식별기능 (shi-personal-auth) ───────────────────
+
+mod personal_auth {
+    use crate::apisix::consumers::{
+        apply_consumer_form_for_test, validate_for_test as validate_consumer, ConsumerForm,
+    };
+    use crate::apisix::models::{ConsumerView, RouteView, ServiceView};
+    use crate::apisix::routes::{apply_route_form_for_test, RouteForm};
+    use crate::apisix::services::{apply_service_form_for_test, ServiceForm};
+    use serde_json::{json, Value};
+
+    /// 와이어(camelCase) 그대로 만든다 — `api.ts` 가 보내는 모양을 거치게 한다.
+    fn route_form(personal: Value) -> RouteForm {
+        let mut f = json!({
+            "id": "r1", "name": "orders", "uri": "/orders", "serviceId": "svc",
+            "authMode": "public",
+        });
+        if !personal.is_null() {
+            f["personalAuth"] = personal;
+        }
+        serde_json::from_value(f).expect("route 폼")
+    }
+
+    fn service_form(personal: Value) -> ServiceForm {
+        let mut f = json!({
+            "id": "svc", "name": "order-api", "upstreamId": "ups", "jwtAuth": false,
+        });
+        if !personal.is_null() {
+            f["personalAuth"] = personal;
+        }
+        serde_json::from_value(f).expect("service 폼")
+    }
+
+    fn consumer_form(personal: Value, secret: &str) -> ConsumerForm {
+        let mut f = json!({
+            "username": "alpha", "key": "alpha-key", "secret": "jwt-secret",
+            "isNew": false, "personalSecret": secret,
+        });
+        if !personal.is_null() {
+            f["personalAuth"] = personal;
+        }
+        serde_json::from_value(f).expect("consumer 폼")
+    }
+
+    #[test]
+    fn route_toggle_adds_an_empty_block_and_removes_it() {
+        // ON → 빈 블록. 전체 허용 + 다른 플러그인 없음이어도 plugins 가 생긴다.
+        let on = apply_route_form_for_test(json!({}), &route_form(json!(true)), false);
+        assert_eq!(on.pointer("/plugins/shi-personal-auth"), Some(&json!({})));
+
+        // 이미 있으면 기존 옵션을 보존한다.
+        let base = json!({ "plugins": { "shi-personal-auth": { "mode": "strict" } } });
+        let kept = apply_route_form_for_test(base.clone(), &route_form(json!(true)), false);
+        assert_eq!(kept.pointer("/plugins/shi-personal-auth/mode"), Some(&json!("strict")));
+
+        // OFF → 지운다. 남은 플러그인이 없으면 plugins 키 자체가 사라진다.
+        let off = apply_route_form_for_test(base.clone(), &route_form(json!(false)), false);
+        assert!(off.get("plugins").is_none(), "{off}");
+
+        // 누락 → 건드리지 않는다.
+        let untouched = apply_route_form_for_test(base, &route_form(Value::Null), false);
+        assert_eq!(untouched.pointer("/plugins/shi-personal-auth/mode"), Some(&json!("strict")));
+    }
+
+    #[test]
+    fn route_toggle_keeps_other_plugins() {
+        let base = json!({ "plugins": {
+            "limit-count": { "count": 10 },
+            "shi-auth": { "allowed_groups": ["a"] },
+            "shi-personal-auth": {},
+        } });
+        let mut f = route_form(json!(false));
+        f.auth_mode = "groups".into();
+        f.groups = vec!["a".into()];
+        let out = apply_route_form_for_test(base, &f, false);
+        assert!(out.pointer("/plugins/shi-personal-auth").is_none());
+        assert_eq!(out.pointer("/plugins/limit-count/count"), Some(&json!(10)));
+        assert_eq!(out.pointer("/plugins/shi-auth/allowed_groups"), Some(&json!(["a"])));
+    }
+
+    #[test]
+    fn service_toggle_adds_an_empty_block_and_removes_it() {
+        let on = apply_service_form_for_test(json!({}), &service_form(json!(true)));
+        assert_eq!(on.pointer("/plugins"), Some(&json!({ "shi-personal-auth": {} })));
+
+        let base = json!({ "plugins": { "shi-personal-auth": {} } });
+        let off = apply_service_form_for_test(base.clone(), &service_form(json!(false)));
+        assert!(off.get("plugins").is_none(), "빈 plugins 를 남기지 않는다: {off}");
+
+        let untouched = apply_service_form_for_test(base, &service_form(Value::Null));
+        assert_eq!(untouched.pointer("/plugins/shi-personal-auth"), Some(&json!({})));
+    }
+
+    #[test]
+    fn consumer_block_carries_the_secret() {
+        let base = json!({
+            "username": "alpha",
+            "plugins": {
+                "jwt-auth": { "key": "alpha-key", "secret": "old" },
+                "shi-personal-auth": { "secret": "old-personal", "extra": 1 },
+            }
+        });
+
+        // ON → secret 만 갈아 끼우고 다른 필드는 보존한다. 앞뒤 공백은 다듬는다.
+        let f = consumer_form(json!(true), "  9f86d081884c7d65  ");
+        assert!(validate_consumer(&f).is_ok());
+        let on = apply_consumer_form_for_test(base.clone(), &f);
+        assert_eq!(
+            on.pointer("/plugins/shi-personal-auth"),
+            Some(&json!({ "secret": "9f86d081884c7d65", "extra": 1 }))
+        );
+
+        // OFF → 블록을 지운다. jwt-auth 는 그대로다.
+        let off = apply_consumer_form_for_test(base.clone(), &consumer_form(json!(false), ""));
+        assert!(off.pointer("/plugins/shi-personal-auth").is_none());
+        assert_eq!(off.pointer("/plugins/jwt-auth/key"), Some(&json!("alpha-key")));
+
+        // 누락 → 건드리지 않는다.
+        let untouched = apply_consumer_form_for_test(base, &consumer_form(Value::Null, ""));
+        assert_eq!(
+            untouched.pointer("/plugins/shi-personal-auth/secret"),
+            Some(&json!("old-personal"))
+        );
+    }
+
+    #[test]
+    fn consumer_cannot_save_the_plugin_without_a_secret() {
+        // (플러그인 + secret 없음) 은 저장할 수 없는 상태다.
+        let e = validate_consumer(&consumer_form(json!(true), "   ")).unwrap_err();
+        assert!(e.message.contains("secret"), "{}", e.message);
+        assert!(validate_consumer(&consumer_form(json!(true), "a b")).is_err());
+
+        // 끄면 secret 이 비어도 된다.
+        assert!(validate_consumer(&consumer_form(json!(false), "")).is_ok());
+    }
+
+    #[test]
+    fn views_report_the_plugin() {
+        let r = RouteView::from_value(&json!({ "id": "1", "plugins": { "shi-personal-auth": {} } }));
+        assert!(r.has_personal_auth);
+        assert!(!RouteView::from_value(&json!({ "id": "1" })).has_personal_auth);
+
+        let s = ServiceView::from_value(
+            &json!({ "id": "s", "plugins": { "shi-personal-auth": {} } }),
+            &[],
+        );
+        assert!(s.has_personal_auth);
+
+        let c = ConsumerView::from_value(&json!({
+            "username": "alpha",
+            "plugins": { "shi-personal-auth": { "secret": "abc" } }
+        }));
+        assert!(c.has_personal_auth);
+        assert_eq!(c.personal_secret, "abc");
+
+        // 캐시 왕복 — 옛 본문(필드 없음)도 읽힌다.
+        let mut old = serde_json::to_value(&r).unwrap();
+        old.as_object_mut().unwrap().remove("hasPersonalAuth");
+        let back: RouteView = serde_json::from_value(old).unwrap();
+        assert!(!back.has_personal_auth);
+    }
+}
+
+// ── 17. 숨김 라우트 (internal-) ─────────────────────────────
+
+mod hidden_routes {
+    use crate::apisix::models::{ConsumerView, RouteView};
+    use crate::db;
+    use rusqlite::Connection;
+    use serde_json::json;
+
+    fn conn() -> Connection {
+        let c = Connection::open_in_memory().expect("메모리 DB");
+        db::init(&c).expect("스키마");
+        c
+    }
+
+    fn route(id: &str, name: &str, status: i64) -> RouteView {
+        RouteView::from_value(&json!({
+            "id": id, "name": name, "uri": format!("/{id}"), "status": status,
+            "service_id": "svc", "plugins": { "shi-auth": { "allowed_groups": ["g"] } }
+        }))
+    }
+
+    #[test]
+    fn clause_matches_the_prefix_constant() {
+        assert!(db::HIDDEN_CLAUSE.contains(&format!(
+            "substr(lower(name), 1, {}) <> '{}'",
+            db::HIDDEN_ROUTE_PREFIX.len(),
+            db::HIDDEN_ROUTE_PREFIX
+        )));
+    }
+
+    #[test]
+    fn internal_routes_are_hidden_from_list_and_counts() {
+        let c = conn();
+        db::sync_routes(
+            &c,
+            "dev",
+            &[
+                route("1", "orders", 1),
+                route("2", "internal-health", 1),
+                route("3", "Internal-metrics", 0),
+                route("4", "my-internal-api", 0),
+            ],
+        )
+        .unwrap();
+        db::sync_consumers(
+            &c,
+            "dev",
+            &[ConsumerView::from_value(&json!({
+                "username": "alpha",
+                "plugins": { "jwt-auth": { "key": "k", "secret": "s", "auth_groups": ["g"] } }
+            }))],
+        )
+        .unwrap();
+
+        let page = db::query_routes(&c, "dev", "all", "", "", &db::RouteScope::All, "").unwrap();
+        let names: Vec<&str> = page.items.iter().map(|r| r.name.as_str()).collect();
+        // 접두사만 본다 — 이름 중간의 internal 은 숨기지 않는다.
+        assert_eq!(names, vec!["orders", "my-internal-api"]);
+        assert_eq!(page.total, 2);
+        assert_eq!((page.counts.all, page.counts.on, page.counts.off), (2, 1, 1));
+
+        // 검색어로도 끌어낼 수 없다.
+        let q = db::query_routes(&c, "dev", "all", "health", "", &db::RouteScope::All, "").unwrap();
+        assert_eq!(q.total, 0);
+
+        let acc = db::consumer_access_counts(&c, "dev", "").unwrap();
+        assert_eq!(acc.all, 2);
+        assert_eq!(acc.items[0].count, 2, "컨슈머 접근 건수에서도 빠진다");
+
+        let o = db::overview_counts(&c, "dev", "").unwrap();
+        assert_eq!((o.routes, o.routes_active, o.routes_inactive), (2, 1, 1));
+
+        // 캐시에는 남아 있다 — 상세 조회는 된다.
+        assert!(db::route_view(&c, "dev", "2").unwrap().is_some());
     }
 }

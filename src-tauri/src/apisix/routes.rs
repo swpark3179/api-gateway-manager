@@ -14,6 +14,11 @@
 //! 두는 것으로는 안 된다 — 게이트웨이에서 그 상태는 **정반대**(어느 그룹도 못 들어옴)다.
 //! 권한 검사를 실제로 떼려면 `plugins.shi-auth` 를 통째로 지워야 하고, 그래서 폼은 두 모드를
 //! 가진다: `groups`(그룹 목록을 되쓴다) · `public`(플러그인을 지운다).
+//!
+//! # 개인 식별기능 (`shi-personal-auth`)
+//!
+//! 폼의 on/off 토글이다. 라우트에서는 빈 블록(`{}`)으로 붙어 있기만 하면 되고,
+//! 붙이고 떼는 규칙은 `models::apply_personal_auth_flag` 한 곳에 있다 (service 와 공용).
 
 use reqwest::Method;
 use serde::Deserialize;
@@ -22,8 +27,8 @@ use tauri::{AppHandle, Wry};
 
 use super::client;
 use super::models::{
-    extract_list, extract_one, obj, set_groups_at, set_or_remove, strip_server_fields,
-    GroupsLocation, RouteView, ROUTE_AUTH_PLUGIN,
+    apply_personal_auth_flag, extract_list, extract_one, obj, set_groups_at, set_or_remove,
+    strip_server_fields, GroupsLocation, RouteView, ROUTE_AUTH_PLUGIN,
 };
 use crate::config::Env;
 use crate::error::{AppError, AppResult, ErrorKind};
@@ -62,6 +67,12 @@ pub struct RouteForm {
     /// 권한을 조용히 풀어 버리는 쪽으로 떨어지지 않는다 (`rewrite_mode` 와 같은 관례).
     #[serde(default)]
     pub auth_mode: String,
+    /// `plugins.shi-personal-auth` 를 붙일지 (개인 식별기능 토글).
+    ///
+    /// `None`(필드 누락)은 "건드리지 않는다" 다 — 누락이 게이트웨이의 플러그인을 조용히
+    /// 붙이거나 떼는 쪽으로 떨어지지 않게 한다 (`models::apply_personal_auth_flag`).
+    #[serde(default)]
+    pub personal_auth: Option<bool>,
     /// 디자인상 등록 시 1(활성) 고정. 기존 항목은 원래 status 를 유지한다.
     #[serde(default)]
     pub status: Option<i64>,
@@ -328,6 +339,10 @@ fn apply_route_form(base: Value, f: &RouteForm, is_new: bool) -> Value {
             plugins.remove(&loc.plugin);
         }
     }
+
+    // 개인 식별기능 — 권한그룹 처리 **뒤에** 둔다. 전체 허용이 그룹 자리의 플러그인을
+    // 지우는 대목이 이 플러그인을 건드리더라도 토글의 뜻이 최종 결과가 되게 한다.
+    apply_personal_auth_flag(&mut plugins, f.personal_auth);
 
     // 남은 플러그인이 하나도 없으면 키 자체를 없앤다 — Service 와 같은 규칙이다
     // (`services::apply_service_form`). 빈 껍데기(`plugins: {}`)를 남기지 않는다.

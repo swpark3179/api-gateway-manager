@@ -169,6 +169,38 @@ pub const ROUTE_AUTH_PLUGIN: &str = "shi-auth";
 /// 그 플러그인 안의 기본 키.
 pub const ROUTE_GROUPS_KEY: &str = "allowed_groups";
 
+/// 개인 식별기능 플러그인 — route · service · consumer 에 공통으로 붙는다.
+///
+/// route · service 에서는 **붙어 있다는 사실**만 뜻이 있어 빈 블록(`{}`)이고,
+/// consumer 에서는 `secret` 을 담는다 (`PERSONAL_AUTH_SECRET_KEY`). 폼의 토글이 붙이고 뗀다.
+pub const PERSONAL_AUTH_PLUGIN: &str = "shi-personal-auth";
+/// consumer 쪽 블록 안의 secret 키.
+pub const PERSONAL_AUTH_SECRET_KEY: &str = "secret";
+
+/// route · service 의 개인 식별기능 토글을 `plugins` 맵에 반영한다.
+///
+///   * `Some(true)`  — **없을 때만** `{}` 를 넣는다. 게이트웨이에 이미 옵션이 있으면 보존한다
+///                     (service 의 `jwt-auth` 와 같은 규칙).
+///   * `Some(false)` — 지운다.
+///   * `None`        — 건드리지 않는다. 이 필드를 모르는 호출이 게이트웨이의 플러그인을
+///                     조용히 붙이거나 떼지 않게 하는 자리다.
+pub fn apply_personal_auth_flag(plugins: &mut Map<String, Value>, on: Option<bool>) {
+    match on {
+        Some(true) => {
+            plugins.entry(PERSONAL_AUTH_PLUGIN).or_insert_with(|| Value::Object(Map::new()));
+        }
+        Some(false) => {
+            plugins.remove(PERSONAL_AUTH_PLUGIN);
+        }
+        None => {}
+    }
+}
+
+/// `plugins.shi-personal-auth` 가 붙어 있는가.
+pub fn has_personal_auth(v: &Value) -> bool {
+    v.get("plugins").and_then(|p| p.get(PERSONAL_AUTH_PLUGIN)).is_some()
+}
+
 impl GroupsLocation {
     /// Route 의 기본 위치. `Default` 는 Consumer 쪽(`jwt-auth.auth-groups`)이라 따로 둔다.
     pub fn route_default() -> Self {
@@ -476,6 +508,9 @@ pub struct RouteView {
     /// 실제 권한이 풀린다. 안전한 쪽으로 떨어져야 한다.
     #[serde(default = "yes")]
     pub has_auth: bool,
+    /// `plugins.shi-personal-auth` 가 붙어 있는가 (개인 식별기능).
+    #[serde(default)]
+    pub has_personal_auth: bool,
     pub update_time: Option<i64>,
     pub updated: String,
     /// 게이트웨이 원본 객체 — JSON 탭의 '게이트웨이 원본' 보기에 그대로 쓴다
@@ -522,6 +557,7 @@ impl RouteView {
             groups,
             groups_location,
             has_auth,
+            has_personal_auth: has_personal_auth(v),
             update_time: ts,
             updated: fmt_ts(ts),
             raw: v.clone(),
@@ -555,6 +591,12 @@ pub struct ConsumerView {
     pub groups_location: GroupsLocation,
     /// jwt-auth 플러그인이 붙어 있는지 (KPI 계산용)
     pub has_jwt_auth: bool,
+    /// `plugins.shi-personal-auth` 가 붙어 있는가 (개인 식별기능)
+    #[serde(default)]
+    pub has_personal_auth: bool,
+    /// `plugins.shi-personal-auth.secret`. 플러그인이 없거나 게이트웨이가 돌려주지 않으면 빈 문자열
+    #[serde(default)]
+    pub personal_secret: String,
     /// labels 의 `name{n}`/`dept{n}` 쌍에서 읽은 관련 담당자 목록
     pub contacts: Vec<Contact>,
     pub update_time: Option<i64>,
@@ -583,6 +625,14 @@ impl ConsumerView {
             groups,
             groups_location,
             has_jwt_auth: jwt.is_some(),
+            has_personal_auth: has_personal_auth(v),
+            personal_secret: v
+                .get("plugins")
+                .and_then(|p| p.get(PERSONAL_AUTH_PLUGIN))
+                .and_then(|p| p.get(PERSONAL_AUTH_SECRET_KEY))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             contacts: contacts_of(v),
             update_time: ts,
             updated: fmt_ts(ts),
@@ -710,6 +760,9 @@ pub struct ServiceView {
     pub log_key: String,
     /// `plugins["jwt-auth"]` 가 붙어 있는가
     pub has_jwt_auth: bool,
+    /// `plugins["shi-personal-auth"]` 가 붙어 있는가 (개인 식별기능)
+    #[serde(default)]
+    pub has_personal_auth: bool,
     /// 참조 upstream 의 대표 노드 (`10.20.3.11:8080`). 못 찾으면 빈 문자열
     pub upstream_label: String,
     /// `svc-order · order-api (10.20.3.11:8080)` — service_id 셀렉트 라벨.
@@ -780,6 +833,7 @@ impl ServiceView {
                 .unwrap_or("")
                 .to_string(),
             has_jwt_auth: plugins.and_then(|p| p.get("jwt-auth")).is_some(),
+            has_personal_auth: has_personal_auth(v),
             upstream_label,
             option_label,
             update_time: ts,

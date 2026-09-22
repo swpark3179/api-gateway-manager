@@ -418,6 +418,18 @@ const NAME_PREFIX_CLAUSE: &str =
 const SERVICE_CLAUSE: &str =
     " AND (?6 = '' OR instr(?6, char(10) || service_id || char(10)) > 0)";
 
+/// 목록에서 **숨기는** 라우트의 name 접두사 — 게이트웨이 내부용 라우트다.
+///
+/// 캐시에는 그대로 둔다 (Import 비교 · 상세 조회는 게이트웨이의 실제 상태를 봐야 한다).
+/// 가리는 것은 목록 · 건수 쪽이고, 조건은 `HIDDEN_CLAUSE` 한 곳에 있다.
+pub const HIDDEN_ROUTE_PREFIX: &str = "internal-";
+
+/// 숨김 라우트를 빼는 조건. 대소문자는 무시한다 (`Internal-` 도 같은 뜻으로 본다).
+///
+/// `LIKE 'internal-%'` 를 쓰지 않는 것은 `NAME_PREFIX_CLAUSE` 와 같은 관례다.
+/// 문자열은 `HIDDEN_ROUTE_PREFIX` 와 같아야 한다 — 테스트가 둘을 대조한다.
+pub const HIDDEN_CLAUSE: &str = " AND substr(lower(name), 1, 9) <> 'internal-'";
+
 /// chip 값(`all` / `on` / `off`)을 status 조건으로 바꾼다.
 fn status_clause(chip: &str) -> &'static str {
     match chip {
@@ -457,8 +469,9 @@ pub fn query_routes(
     // uri 에 밑줄이 흔하므로 검색어를 이스케이프해야 하는 부담을 아예 없앤다.
     let sql = format!(
         "SELECT view FROM routes
-          WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){}{}{}{}
+          WHERE env = ?1 AND (?2 = '' OR instr(search, ?2) > 0){}{}{}{}{}
           ORDER BY seq",
+        HIDDEN_CLAUSE,
         ACCESS_CLAUSE,
         NAME_PREFIX_CLAUSE,
         SERVICE_CLAUSE,
@@ -506,7 +519,7 @@ pub fn route_counts(
                FROM routes
               WHERE env = ?1
                 AND (?2 = '' OR instr(search, ?2) > 0)
-                {ACCESS_CLAUSE}{NAME_PREFIX_CLAUSE}{SERVICE_CLAUSE}"
+                {HIDDEN_CLAUSE}{ACCESS_CLAUSE}{NAME_PREFIX_CLAUSE}{SERVICE_CLAUSE}"
         ),
         params![env, &n, user, ungrouped, &pfx, allow],
         |row| Ok(RouteCounts { all: row.get(0)?, on: row.get(1)?, off: row.get(2)? }),
@@ -639,10 +652,12 @@ pub fn consumer_access_counts(
     // "전체 312" 라고 말하면 두 화면이 서로 다른 답을 하는 셈이다.
     // 여기서는 `?2` 가 허용목록이다 (`query_routes` 는 축이 더 많아 `?6` 이다).
     const ALLOW: &str = " AND (?2 = '' OR instr(?2, char(10) || service_id || char(10)) > 0)";
+    // 숨김 라우트(`HIDDEN_CLAUSE`)도 세 쿼리 모두에서 뺀다 — 목록에 없는 라우트를 패널이 세면
+    // 위와 같은 어긋남이 생긴다.
 
     let all: i64 = conn
         .query_row(
-            &format!("SELECT COUNT(*) FROM routes WHERE env = ?1{ALLOW}"),
+            &format!("SELECT COUNT(*) FROM routes WHERE env = ?1{ALLOW}{HIDDEN_CLAUSE}"),
             params![env, allow],
             |r| r.get(0),
         )
@@ -652,7 +667,7 @@ pub fn consumer_access_counts(
         .query_row(
             &format!(
                 "SELECT COUNT(*) FROM routes
-                  WHERE env = ?1{ALLOW}
+                  WHERE env = ?1{ALLOW}{HIDDEN_CLAUSE}
                     AND NOT EXISTS (SELECT 1 FROM route_groups rg
                                      WHERE rg.env = routes.env AND rg.route_id = routes.id)"
             ),
@@ -661,8 +676,10 @@ pub fn consumer_access_counts(
         )
         .map_err(sql_err)?;
 
+    // 이 쿼리의 routes 는 별칭 `r` 이라 `HIDDEN_CLAUSE` 를 그대로 붙일 수 없다 — 같은 조건을
+    // `r.name` 으로 ON 절에 둔다 (허용목록과 같은 이유로 WHERE 가 아니라 ON 이다).
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             // COUNT(DISTINCT …) 가 필수다: 컨슈머와 라우트가 그룹을 둘 이상 공유하면
             // 같은 (컨슈머, 라우트) 쌍이 조인 결과에 여러 행으로 나온다.
             // LEFT JOIN 이라 그룹이 없는 컨슈머도 0 으로 남는다.
@@ -682,10 +699,13 @@ pub fn consumer_access_counts(
                LEFT JOIN routes r
                       ON r.env = rg.env AND r.id = rg.route_id
                      AND (?2 = '' OR instr(?2, char(10) || r.service_id || char(10)) > 0)
+                     AND substr(lower(r.name), 1, {}) <> '{}'
               WHERE c.env = ?1
               GROUP BY c.username
               ORDER BY c.username",
-        )
+            HIDDEN_ROUTE_PREFIX.len(),
+            HIDDEN_ROUTE_PREFIX,
+        ))
         .map_err(sql_err)?;
 
     let rows = stmt
@@ -718,12 +738,15 @@ pub fn overview_counts(conn: &Connection, env: &str, allow: &str) -> AppResult<O
     // 라우트 KPI 도 관리 권한 범위로 좁힌다 — 목록에서 8건만 볼 수 있는 사용자에게
     // 대시보드가 312 를 보여 주면 두 화면이 서로 다른 답을 한다.
     // (컨슈머 KPI 는 좁히지 않는다. 컨슈머는 service 에 매달린 리소스가 아니다)
+    // 숨김 라우트도 뺀다 — 같은 이유로 목록과 대시보드의 건수가 같아야 한다.
     let (routes, routes_active, routes_inactive) = conn
         .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(status = 1), 0), COALESCE(SUM(status <> 1), 0)
-               FROM routes
-              WHERE env = ?1
-                AND (?2 = '' OR instr(?2, char(10) || service_id || char(10)) > 0)",
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(status = 1), 0), COALESCE(SUM(status <> 1), 0)
+                   FROM routes
+                  WHERE env = ?1
+                    AND (?2 = '' OR instr(?2, char(10) || service_id || char(10)) > 0){HIDDEN_CLAUSE}"
+            ),
             params![env, allow],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )

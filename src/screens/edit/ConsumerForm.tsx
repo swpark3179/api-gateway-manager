@@ -1,8 +1,12 @@
-/** Consumer 폼 탭 — username / desc / jwt-auth.key / jwt-auth.secret + 담당자 + 권한그룹. */
+/**
+ * Consumer 폼 탭 — username / desc / jwt-auth.key / jwt-auth.secret + 담당자 + 권한그룹 +
+ * 개인 식별기능(shi-personal-auth.secret).
+ */
 
 import { useStore } from "../../store";
 import ContactsCard from "./ContactsCard";
 import GroupsCard from "./GroupsCard";
+import PersonalAuthCard from "./PersonalAuthCard";
 
 const Req = () => <span style={{ color: "var(--red-600)" }}>*</span>;
 
@@ -98,6 +102,7 @@ export default function ConsumerForm() {
       {/* 담당자는 계정 메타데이터, 권한그룹은 인가 — 인가를 뒤에 둔다. */}
       <ContactsCard />
       <GroupsCard />
+      <PersonalAuthCard />
     </div>
   );
 }
