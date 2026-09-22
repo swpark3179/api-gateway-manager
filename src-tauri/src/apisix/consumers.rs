@@ -3,6 +3,12 @@
 //! APISIX 에서 consumer 의 식별자는 `username` 이고, 생성·수정 모두
 //! `PUT /apisix/admin/consumers` (본문에 username) 한 가지로 처리한다.
 //! routes 와 같은 이유로 `plugins` 는 통째로 교체하지 않고 `jwt-auth` 키만 머지한다.
+//!
+//! # 개인 식별기능 (`shi-personal-auth`)
+//!
+//! route · service 와 달리 consumer 쪽 블록은 `secret` 을 담아야 한다. 저장할 수 있는 상태는
+//! 둘뿐이다 — **(플러그인 + secret 있음)** 또는 **(플러그인 없음)**. secret 없는 빈 블록은
+//! `validate` 가 막는다. secret 은 화면에서 자동 생성하거나 직접 입력한다.
 
 use reqwest::Method;
 use serde::Deserialize;
@@ -12,7 +18,8 @@ use tauri::{AppHandle, Wry};
 use super::client;
 use super::models::{
     check_label_value, extract_list, extract_one, obj, set_contacts_at, set_groups_at,
-    strip_server_fields, Contact, ConsumerView, GroupsLocation,
+    strip_server_fields, Contact, ConsumerView, GroupsLocation, PERSONAL_AUTH_PLUGIN,
+    PERSONAL_AUTH_SECRET_KEY,
 };
 use crate::config::Env;
 use crate::error::{AppError, AppResult, ErrorKind};
@@ -42,6 +49,15 @@ pub struct ConsumerForm {
     /// `#[serde(default)]` 가 빈 배열을 만들어 게이트웨이의 담당자 라벨을 전부 지운다.
     #[serde(default)]
     pub contacts: Option<Vec<Contact>>,
+    /// `plugins.shi-personal-auth` 를 붙일지 (개인 식별기능 토글).
+    ///
+    /// `None`(필드 누락)은 게이트웨이의 블록을 **건드리지 않는다** — `contacts` 와 같은 관례다.
+    /// `Some(true)` 면 `personal_secret` 이 반드시 있어야 한다.
+    #[serde(default)]
+    pub personal_auth: Option<bool>,
+    /// `plugins.shi-personal-auth.secret`. `personal_auth` 가 `Some(true)` 일 때만 쓴다.
+    #[serde(default)]
+    pub personal_secret: String,
 }
 
 impl ConsumerForm {
@@ -65,6 +81,19 @@ impl ConsumerForm {
         }
         if self.secret.trim().is_empty() {
             return Err(AppError::config("jwt-auth.secret 은 필수입니다."));
+        }
+        // 플러그인만 있고 secret 이 없는 상태는 저장하지 않는다 — 켜려면 secret 까지 있어야 한다.
+        if self.personal_auth == Some(true) {
+            let ps = self.personal_secret.trim();
+            if ps.is_empty() {
+                return Err(AppError::config(
+                    "개인 식별기능을 적용하려면 secret 이 필요합니다.",
+                )
+                .with_hint("secret 을 직접 입력하거나 '생성' 으로 만드세요. 적용하지 않으려면 토글을 끄세요."));
+            }
+            if ps.chars().any(char::is_whitespace) {
+                return Err(AppError::config("개인 식별기능 secret 에 공백을 쓸 수 없습니다."));
+            }
         }
         // 담당자는 labels 로 저장되므로 APISIX 의 label 값 제약을 받는다.
         for (i, c) in self.contacts.iter().flatten().enumerate() {
@@ -187,6 +216,23 @@ fn apply_consumer_form(base: Value, f: &ConsumerForm) -> Value {
     jwt.insert("secret".into(), Value::String(f.secret.trim().to_string()));
     plugins.insert("jwt-auth".into(), Value::Object(jwt));
 
+    // 개인 식별기능 — 켜면 `secret` 만 갈아 끼우고 블록의 다른 필드는 보존한다.
+    // `None` 이면 건드리지 않는다 (ConsumerForm.personal_auth 주석 참조).
+    match f.personal_auth {
+        Some(true) => {
+            let mut pa = obj(plugins.remove(PERSONAL_AUTH_PLUGIN).unwrap_or(Value::Null));
+            pa.insert(
+                PERSONAL_AUTH_SECRET_KEY.into(),
+                Value::String(f.personal_secret.trim().to_string()),
+            );
+            plugins.insert(PERSONAL_AUTH_PLUGIN.into(), Value::Object(pa));
+        }
+        Some(false) => {
+            plugins.remove(PERSONAL_AUTH_PLUGIN);
+        }
+        None => {}
+    }
+
     m.insert("plugins".into(), Value::Object(plugins));
 
     // auth-groups — 조회 때 값이 있던 바로 그 자리에 되쓴다.
@@ -209,4 +255,10 @@ fn apply_consumer_form(base: Value, f: &ConsumerForm) -> Value {
 #[cfg(test)]
 pub fn apply_consumer_form_for_test(base: Value, f: &ConsumerForm) -> Value {
     apply_consumer_form(base, f)
+}
+
+/// 검증만 따로 확인하기 위한 테스트 통로 (`validate` 는 비공개다).
+#[cfg(test)]
+pub fn validate_for_test(f: &ConsumerForm) -> AppResult<()> {
+    f.validate()
 }

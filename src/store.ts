@@ -322,6 +322,8 @@ interface AppState {
   addGroup: (value?: string) => void;
   removeGroup: (i: number) => void;
   makeSecret: () => Promise<void>;
+  /** consumer 의 `shi-personal-auth.secret` 을 랜덤 hex 로 채운다 (`makeSecret` 과 같은 생성기). */
+  makePersonalSecret: () => Promise<void>;
 
   addContact: () => void;
   patchContact: (i: number, patch: Partial<Contact>) => void;
@@ -1402,6 +1404,14 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
+  async makePersonalSecret() {
+    try {
+      get().patchForm({ personalSecret: await api.genSecret() });
+    } catch (e) {
+      set({ error: api.toAppError(e) });
+    }
+  },
+
   // ── JSON 탭 ───────────────────────────────────────────────
   /**
    * 노드 편집 3형제. `addContact`/`patchContact`/`removeContact` 와 같은 모양이고,
@@ -1500,19 +1510,28 @@ export const useStore = create<AppState>((set, get) => ({
       get().flash("필수 항목을 입력하세요.");
       return;
     }
+    // 개인 식별기능은 (ON + secret) 또는 (OFF) 만 저장할 수 있다 — Rust validate 와 짝이다.
+    // 필수값과 따로 알리는 이유: 토글을 켠 것이 원인이라 "필수 항목" 이라고만 하면 찾기 어렵다.
+    if (form.kind === "consumer" && form.personalAuth && !form.personalSecret.trim()) {
+      get().flash("개인 식별기능을 적용하려면 secret 을 입력하거나 생성하세요.");
+      return;
+    }
 
     set({ saving: true, error: null });
     try {
       // 섹션(kindOf)이 아니라 폼의 판별 유니온으로 분기한다 — 화면과 폼이 어긋날 여지를 없앤다.
       if (form.kind === "consumer") {
         await api.consumerSave(env, form);
-        get().flash("Consumer가 저장되었습니다.");
+        get().flash(
+          "Consumer가 저장되었습니다." + (form.personalAuth ? " (개인 식별기능 적용)" : ""),
+        );
       } else if (form.kind === "service") {
         // 어느 플러그인이 붙었는지는 폼에서 정해진다 — "항상 둘 다" 라고 말하면 거짓이 된다.
         // serviceJson 이 plugins 를 조립하는 것과 같은 조건이다.
         const included: string[] = [];
         if (form.jwtAuth) included.push("jwt-auth");
         if (form.logKey.trim()) included.push("shi-log");
+        if (form.personalAuth) included.push("shi-personal-auth");
         await api.serviceSave(env, form);
         get().flash(
           `Service가 저장되었습니다. (${
@@ -1530,6 +1549,7 @@ export const useStore = create<AppState>((set, get) => ({
         const notes = [
           ...(isNew ? ["status: 1"] : []),
           ...(form.authMode === "public" ? ["전체 허용 · shi-auth 없음"] : []),
+          ...(form.personalAuth ? ["개인 식별기능 적용"] : []),
         ];
         get().flash(
           "Route가 저장되었습니다." + (notes.length > 0 ? ` (${notes.join(" · ")})` : ""),
@@ -1875,6 +1895,7 @@ function emptyServiceView(id: string, name: string): ServiceView {
     namePrefix: "",
     logKey: "",
     hasJwtAuth: false,
+    hasPersonalAuth: false,
     upstreamLabel: "",
     optionLabel: name && name !== id ? `${id} · ${name}` : id,
     updateTime: null,

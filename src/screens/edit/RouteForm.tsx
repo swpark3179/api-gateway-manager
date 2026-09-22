@@ -1,10 +1,11 @@
-/** Route 폼 탭 — 기본 정보 / methods / 권한그룹(또는 전체 허용) / status. */
+/** Route 폼 탭 — 기본 정보 / methods / 권한그룹(또는 전체 허용) / 개인 식별기능 / status. */
 
 import { useMemo } from "react";
 
 import { methodChips } from "../../lib/design";
 import { selectPerm, serviceOptions, useStore } from "../../store";
 import GroupsCard from "./GroupsCard";
+import PersonalAuthCard from "./PersonalAuthCard";
 
 const Req = () => <span style={{ color: "var(--red-600)" }}>*</span>;
 
@@ -212,6 +213,8 @@ export default function RouteForm() {
       </div>
 
       <GroupsCard />
+
+      <PersonalAuthCard />
 
       <div
         className="card-surface"

@@ -176,10 +176,19 @@ export default function JsonTab({ sub }: { sub: string }) {
           <>
             <br />
             <span className="font-mono">plugins</span> 는 폼을 따라갑니다 — 권한그룹 카드에서
-            ‘전체 허용’ 을 고르면 <span className="font-mono">shi-auth</span> 가 사라지고,{" "}
+            ‘전체 허용’ 을 고르면 <span className="font-mono">shi-auth</span> 가, ‘개인 식별기능
+            적용’ 을 끄면 <span className="font-mono">shi-personal-auth</span> 가 사라지고,{" "}
             <span className="font-mono">proxy-rewrite</span> 까지 없으면{" "}
             <span className="font-mono">plugins</span> 키 자체가 없습니다 (저장할 때도 그렇게
             지워집니다).
+          </>
+        )}
+        {!showRaw && form?.kind === "consumer" && (
+          <>
+            <br />
+            <span className="font-mono">shi-personal-auth</span> 는 ‘개인 식별기능 적용’ 을 켰을
+            때만 <span className="font-mono">secret</span> 과 함께 보입니다. 끄면 저장할 때 블록이
+            지워집니다.
           </>
         )}
         {/* 폼에 없는 키는 이 화면에도 없다. "왜 안 보이지" 를 화면에서 답한다. */}
@@ -196,7 +205,8 @@ export default function JsonTab({ sub }: { sub: string }) {
             <br />
             <span className="font-mono">plugins</span> 는 폼을 따라갑니다 — jwt-auth 토글을 끄면{" "}
             <span className="font-mono">jwt-auth</span> 가, <span className="font-mono">log-key</span>{" "}
-            를 비우면 <span className="font-mono">shi-log</span> 가 사라지고, 둘 다 없으면{" "}
+            를 비우면 <span className="font-mono">shi-log</span> 가, 개인 식별기능 토글을 끄면{" "}
+            <span className="font-mono">shi-personal-auth</span> 가 사라지고, 모두 없으면{" "}
             <span className="font-mono">plugins</span> 키 자체가 없습니다 (저장할 때도 그렇게
             지워집니다). 게이트웨이에 이미 설정이 있으면 그 값은 유지됩니다 —{" "}
             <span className="font-mono">{"jwt-auth: {}"}</span> 로 보여도{" "}

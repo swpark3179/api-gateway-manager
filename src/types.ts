@@ -155,6 +155,8 @@ export interface RouteView {
    * 파생되고, 목록도 이 값으로 두 상태를 다르게 그린다.
    */
   hasAuth: boolean;
+  /** `plugins["shi-personal-auth"]` 가 붙어 있는가 (개인 식별기능) */
+  hasPersonalAuth: boolean;
   updateTime: number | null;
   updated: string;
   /** 게이트웨이 원본 객체 — JSON 탭의 '게이트웨이 원본' 보기용 */
@@ -183,6 +185,10 @@ export interface ConsumerView {
   groups: string[];
   groupsLocation: GroupsLocation;
   hasJwtAuth: boolean;
+  /** `plugins["shi-personal-auth"]` 가 붙어 있는가 (개인 식별기능) */
+  hasPersonalAuth: boolean;
+  /** `plugins["shi-personal-auth"].secret`. 없거나 게이트웨이가 돌려주지 않으면 빈 문자열 */
+  personalSecret: string;
   contacts: Contact[];
   updateTime: number | null;
   updated: string;
@@ -242,6 +248,8 @@ export interface ServiceView {
   logKey: string;
   /** `plugins["jwt-auth"]` 가 붙어 있는가 */
   hasJwtAuth: boolean;
+  /** `plugins["shi-personal-auth"]` 가 붙어 있는가 (개인 식별기능) */
+  hasPersonalAuth: boolean;
   /** 참조 upstream 의 대표 노드. 못 찾으면 빈 문자열 */
   upstreamLabel: string;
   /** `svc-order · order-api (10.20.3.11:8080)` — Rust 가 조립한 셀렉트 라벨 */
@@ -510,6 +518,11 @@ export interface RouteFormState {
    * 있어야 하고, 배제는 `routeJson` 과 Rust 가 한다 — `rewriteMode` 와 같은 규칙이다.
    */
   authMode: RouteAuthMode;
+  /**
+   * `plugins["shi-personal-auth"]` 를 붙일지 (폼의 "개인 식별기능 적용" 토글).
+   * 라우트에서는 빈 블록(`{}`)이면 된다. OFF 면 저장할 때 지운다.
+   */
+  personalAuth: boolean;
   status: number;
   /** 조회 때 찾은 저장 위치. 신규면 null → 기본 위치를 쓴다 */
   groupsLocation: GroupsLocation | null;
@@ -560,6 +573,18 @@ export interface ConsumerFormState {
   hasSecret: boolean;
   /** 조회 때 찾은 저장 위치. 신규면 null → 기본 위치를 쓴다 */
   groupsLocation: GroupsLocation | null;
+  /**
+   * `plugins["shi-personal-auth"]` 를 붙일지 (폼의 "개인 식별기능 적용" 토글).
+   *
+   * 저장할 수 있는 상태는 **(ON + `personalSecret` 있음)** 또는 **(OFF)** 뿐이다 —
+   * secret 없는 빈 블록은 `store.save` 와 Rust `validate` 가 막는다.
+   */
+  personalAuth: boolean;
+  /**
+   * `plugins["shi-personal-auth"].secret`. 자동 생성(`makePersonalSecret`)하거나 직접 입력한다.
+   * OFF 로 바꿔도 **폼에 남긴다** — 토글을 실수로 눌렀다 되돌릴 때 값이 살아 있어야 한다.
+   */
+  personalSecret: string;
 }
 
 /**
@@ -605,6 +630,8 @@ export interface ServiceFormState {
    * apply_service_form). 앱이 모르는 플러그인이 남아 있으면 유지된다.
    */
   jwtAuth: boolean;
+  /** `plugins["shi-personal-auth"]` 를 붙일지 (개인 식별기능 토글). 빈 블록(`{}`)이면 된다 */
+  personalAuth: boolean;
 }
 
 export type FormState =
@@ -628,6 +655,7 @@ export const emptyRouteForm = (serviceId: string): RouteFormState => ({
   // 신규 등록은 권한그룹을 쓰는 쪽이 기본이다 — 권한 없이 열어 두는 라우트는 예외이고,
   // 예외를 기본값으로 두면 아무 말 없이 만든 라우트가 전부 공개된다.
   authMode: "groups",
+  personalAuth: false,
   status: 1,
   groupsLocation: null,
 });
@@ -643,6 +671,8 @@ export const emptyConsumerForm = (): ConsumerFormState => ({
   isNew: true,
   hasSecret: true,
   groupsLocation: null,
+  personalAuth: false,
+  personalSecret: "",
 });
 
 export const routeToForm = (r: RouteView): RouteFormState => ({
@@ -662,6 +692,8 @@ export const routeToForm = (r: RouteView): RouteFormState => ({
   // 이유) — 권한 플러그인이 없는 라우트를 열었다가 저장 한 번으로 되붙으면 안 되고,
   // 반대로 붙어 있는 라우트가 조용히 공개돼서도 안 된다.
   authMode: r.hasAuth ? "groups" : "public",
+  // 기본값이 아니라 게이트웨이의 실제 상태에서 파생한다 (authMode 와 같은 이유).
+  personalAuth: r.hasPersonalAuth,
   status: r.status,
   groupsLocation: r.groupsLocation,
 });
@@ -746,6 +778,7 @@ export const emptyServiceForm = (upstreamId: string): ServiceFormState => ({
   // 신규 등록은 jwt-auth 를 붙이는 쪽이 기본이다 — 대부분의 service 가 그렇고,
   // 필요 없는 쪽이 예외다. 예외는 폼에서 끈다.
   jwtAuth: true,
+  personalAuth: false,
 });
 
 const numText = (v: number | null, fallback = ""): string =>
@@ -784,6 +817,7 @@ export const serviceToForm = (s: ServiceView): ServiceFormState => ({
   // 기본값(true)이 아니라 **게이트웨이의 실제 상태**를 쓴다. 다른 도구로 만든 service 나
   // 이 앱에서 껐던 service 를 열었을 때 저장 한 번으로 jwt-auth 가 되붙으면 안 된다.
   jwtAuth: s.hasJwtAuth,
+  personalAuth: s.hasPersonalAuth,
 });
 
 export const consumerToForm = (c: ConsumerView): ConsumerFormState => ({
@@ -798,4 +832,6 @@ export const consumerToForm = (c: ConsumerView): ConsumerFormState => ({
   isNew: false,
   hasSecret: c.hasSecret,
   groupsLocation: c.groupsLocation,
+  personalAuth: c.hasPersonalAuth,
+  personalSecret: c.personalSecret,
 });

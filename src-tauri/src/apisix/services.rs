@@ -13,13 +13,15 @@
 //!
 //! # 플러그인
 //!
-//! 이 앱이 관리하는 것은 두 개뿐이고, **둘 다 없을 수 있다.** jwt-auth 가 불필요한 service 도
+//! 이 앱이 관리하는 것은 세 개이고, **모두 없을 수 있다.** jwt-auth 가 불필요한 service 도
 //! shi-log 가 불필요한 service 도 현장에 존재한다.
 //!   * `jwt-auth` — 폼의 토글. ON 이면 **없을 때만** `{}` 를 넣어 이미 있는 설정을 보존하고
 //!     (`{}` 로 덮으면 게이트웨이에 설정된 jwt-auth 옵션이 사라진다), OFF 면 지운다.
 //!   * `shi-log.key` — 폼의 `log-key` 값. 값이 있으면 `key` 만 갈아 끼우고 다른 필드는
 //!     건드리지 않는다. **빈 값이면 `shi-log` 를 통째로 지운다** — `key: ""` 로 남기면
 //!     플러그인은 붙어 있는데 로그 키가 없는 상태가 된다.
+//!   * `shi-personal-auth` — 폼의 "개인 식별기능 적용" 토글. 빈 블록(`{}`)이면 되고, 규칙은
+//!     jwt-auth 와 같다 (`models::apply_personal_auth_flag` — route 와 공용).
 //!
 //! 그 둘을 지우고 나서 **남은 플러그인이 하나도 없으면 `plugins` 키 자체를 없앤다.**
 //! `labels` 를 다루는 `models::set_label` 과 같은 규칙이다 — 빈 껍데기를 남기지 않는다.
@@ -33,8 +35,8 @@ use tauri::{AppHandle, Wry};
 
 use super::client;
 use super::models::{
-    check_label_constraints, extract_list, extract_one, obj, set_label, set_or_remove,
-    strip_server_fields, ServiceView, UpstreamView, NAME_PREFIX_LABEL, SPEC_URL_LABEL,
+    apply_personal_auth_flag, check_label_constraints, extract_list, extract_one, obj, set_label,
+    set_or_remove, strip_server_fields, ServiceView, UpstreamView, NAME_PREFIX_LABEL, SPEC_URL_LABEL,
 };
 use crate::config::Env;
 use crate::error::{AppError, AppResult, ErrorKind};
@@ -68,6 +70,12 @@ pub struct ServiceForm {
     /// (항상 붙인다)으로 떨어지는 쪽이 안전하다.
     #[serde(default = "jwt_auth_default")]
     pub jwt_auth: bool,
+    /// `plugins["shi-personal-auth"]` 를 붙일지 (개인 식별기능 토글).
+    ///
+    /// `jwt_auth` 와 달리 `Option` 이다 — 이 필드가 없던 시절에는 앱이 이 플러그인을
+    /// 다루지 않았으므로, 누락은 "건드리지 않는다" 로 떨어지는 것이 그 시절의 동작이다.
+    #[serde(default)]
+    pub personal_auth: Option<bool>,
 }
 
 fn jwt_auth_default() -> bool {
@@ -251,6 +259,8 @@ fn apply_service_form(base: Value, f: &ServiceForm) -> Value {
         log.insert("key".into(), Value::String(log_key.to_string()));
         plugins.insert("shi-log".into(), Value::Object(log));
     }
+
+    apply_personal_auth_flag(&mut plugins, f.personal_auth);
 
     // 남은 플러그인이 하나도 없으면 키 자체를 없앤다 — `models::set_label` 이 labels 에
     // 하는 것과 같은 규칙이다(빈 껍데기를 남기지 않는다). `limit-count` 처럼 앱이 모르는

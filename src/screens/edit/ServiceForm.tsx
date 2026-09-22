@@ -4,13 +4,15 @@
  * `spec_url` · `name 접두어` 는 `labels.spec_url` · `labels.name_prefix` 로 들어간다
  * (services.rs 의 모듈 주석에 labels 를 쓰는 이유가 있다).
  *
- * 플러그인 두 개는 **조건부**다 — jwt-auth 가 불필요한 service 도, shi-log 가 불필요한
- * service 도 있다. 토글을 끄거나 `log-key` 를 비우면 그 플러그인이 지워지고, 둘 다 없으면
+ * 플러그인 세 개는 모두 **조건부**다 — jwt-auth 가 불필요한 service 도, shi-log 가 불필요한
+ * service 도 있다. 토글을 끄거나 `log-key` 를 비우면 그 플러그인이 지워지고, 모두 없으면
  * `plugins` 키 자체가 사라진다. 판단은 services.rs 의 `apply_service_form` 이 한다.
+ * 개인 식별기능(`shi-personal-auth`)은 빈 블록으로 붙기만 하는 단순 on/off 다.
  */
 
 import { switchKnobStyle, switchStyle } from "../../lib/design";
 import { useStore } from "../../store";
+import { PersonalAuthSwitch } from "./PersonalAuthCard";
 
 const Req = () => <span style={{ color: "var(--red-600)" }}>*</span>;
 
@@ -44,9 +46,9 @@ export default function ServiceForm() {
   const logKey = form.logKey.trim();
   const logKeyHasSpace = /\s/.test(logKey);
 
-  // 두 플러그인이 다 빠지면 plugins 키 자체가 사라진다. 파괴적인 결과라 저장 전에 말해 준다
+  // 플러그인이 다 빠지면 plugins 키 자체가 사라진다. 파괴적인 결과라 저장 전에 말해 준다
   // (게이트웨이의 400 을 미리 짚어 주는 위 경고들과 같은 성질이다).
-  const noPlugins = !form.jwtAuth && logKey === "";
+  const noPlugins = !form.jwtAuth && logKey === "" && !form.personalAuth;
 
   // 조회한 값이 목록에 없으면 그대로 보여 준다 — 조용히 다른 upstream 으로 바뀌면 안 된다.
   const orphan = form.upstreamId && !upstreams.some((u) => u.id === form.upstreamId);
@@ -204,7 +206,7 @@ export default function ServiceForm() {
       <div className="card-surface" style={{ padding: 24 }}>
         <h5 className="h5">플러그인</h5>
         <p className="text-sm muted" style={{ margin: "4px 0 16px" }}>
-          두 플러그인 모두 <b>선택</b>입니다 — 필요 없는 service 는 토글을 끄거나{" "}
+          세 플러그인 모두 <b>선택</b>입니다 — 필요 없는 service 는 토글을 끄거나{" "}
           <span className="font-mono">log-key</span> 를 비우면 저장할 때 그 플러그인이
           지워집니다. 그 밖의 플러그인은 게이트웨이에 있는 그대로 보존됩니다.
         </p>
@@ -263,6 +265,26 @@ export default function ServiceForm() {
                   저장할 때 <span className="font-mono">plugins.jwt-auth</span> 를 삭제합니다.
                   게이트웨이에 설정돼 있던 <span className="font-mono">header</span> 등의 옵션도
                   함께 사라집니다.
+                </>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <label className="field-label">개인 식별기능 적용</label>
+            <div style={{ paddingTop: 6 }}>
+              <PersonalAuthSwitch />
+            </div>
+            <div className="text-xs muted" style={{ marginTop: 6 }}>
+              {form.personalAuth ? (
+                <>
+                  <span className="font-mono">{"plugins.shi-personal-auth: {}"}</span> — 게이트웨이에
+                  이미 옵션이 있으면 그 값을 유지합니다.
+                </>
+              ) : (
+                <>
+                  저장할 때 <span className="font-mono">plugins.shi-personal-auth</span> 를
+                  삭제합니다.
                 </>
               )}
             </div>

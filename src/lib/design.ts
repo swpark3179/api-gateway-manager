@@ -203,6 +203,9 @@ export function routeNamePrefix(servicePrefix: string, pathPrefix: string): stri
 
 // ── JSON 탭 본문 ─────────────────────────────────────────────
 
+/** 개인 식별기능 플러그인 이름 — Rust `models::PERSONAL_AUTH_PLUGIN` 과 같아야 한다. */
+export const PERSONAL_AUTH_PLUGIN = "shi-personal-auth";
+
 export function routeJson(f: RouteFormState): Record<string, unknown> {
   const plugins: Record<string, unknown> = {};
   // `uri` 와 `regex_uri` 중 **한쪽만** 내보낸다. APISIX 는 `uri` 가 있으면 `regex_uri` 를
@@ -218,6 +221,9 @@ export function routeJson(f: RouteFormState): Record<string, unknown> {
   } else if (f.rewrite) {
     plugins["proxy-rewrite"] = { uri: f.rewrite };
   }
+  // 개인 식별기능은 빈 블록으로 붙어 있기만 하면 된다. 게이트웨이에 옵션이 있으면 저장 때
+  // 보존된다 (Rust `apply_personal_auth_flag`) — service 의 jwt-auth 와 같은 근사다.
+  if (f.personalAuth) plugins[PERSONAL_AUTH_PLUGIN] = {};
   const o: Record<string, any> = {
     uri: f.uri,
     name: f.name,
@@ -297,10 +303,13 @@ export function contactsFromLabels(labels: unknown): Contact[] {
  * 구별할 수 없어진다. `jsonToForm` 이 그 구별에 기대어 담당자를 지킨다 (그쪽 주석 참조).
  */
 export function consumerJson(f: ConsumerFormState): Record<string, unknown> {
+  const plugins: Record<string, unknown> = { "jwt-auth": { key: f.key, secret: f.secret } };
+  // OFF 면 블록을 그리지 않는다 — 저장 때도 지워진다. secret 은 폼에 남아 있어도 싣지 않는다.
+  if (f.personalAuth) plugins[PERSONAL_AUTH_PLUGIN] = { secret: f.personalSecret };
   const o: Record<string, any> = {
     username: f.username,
     desc: f.desc,
-    plugins: { "jwt-auth": { key: f.key, secret: f.secret } },
+    plugins,
     labels: contactLabels(f.contacts),
   };
   putGroups(o, f.groupsLocation, CONSUMER_LOC, f.groups);
@@ -382,6 +391,7 @@ export function serviceJson(f: ServiceFormState): Record<string, unknown> {
   const plugins: Record<string, unknown> = {};
   if (f.jwtAuth) plugins["jwt-auth"] = {};
   if (f.logKey.trim()) plugins["shi-log"] = { key: f.logKey };
+  if (f.personalAuth) plugins[PERSONAL_AUTH_PLUGIN] = {};
   if (Object.keys(plugins).length > 0) o.plugins = plugins;
   // 빈 값이면 그 라벨을 지우는 쪽이라(Rust 의 set_label) 키를 만들지 않는다. 둘 다 비면
   // labels 키 자체가 없다 — 저장 때 라벨이 하나도 남지 않는 경우와 같은 모양이다.
@@ -428,8 +438,14 @@ export function jsonToForm(raw: string, current: FormState): FormState {
   switch (current.kind) {
     case "consumer": {
       const j = (o.plugins && o.plugins["jwt-auth"]) || {};
+      // 토글은 블록의 존재에서 파생한다 (service 의 jwtAuth 와 같은 규칙 — 왕복 무손실).
+      const pa = o.plugins && o.plugins[PERSONAL_AUTH_PLUGIN];
       return {
         ...current,
+        personalAuth: !!pa,
+        // 블록이 없으면 secret 은 **폼에 남긴다** — OFF 본문에 secret 이 없는 것은 정상이고,
+        // 그때 비우면 토글을 다시 켰을 때 입력해 둔 값이 조용히 사라진다.
+        personalSecret: pa ? (typeof pa.secret === "string" ? pa.secret : "") : current.personalSecret,
         username: o.username || "",
         desc: o.desc || "",
         key: j.key || "",
@@ -470,6 +486,7 @@ export function jsonToForm(raw: string, current: FormState): FormState {
         // 모드도 값에서 파생한다 (rewriteMode 와 같은 규칙) — `routeJson` 이 낸 본문을 그대로
         // 되읽으면 같은 폼이 나와야 한다. 그룹 필드의 자리가 없으면 전체 허용이다.
         authMode: slot ? "groups" : "public",
+        personalAuth: PERSONAL_AUTH_PLUGIN in p,
         status: typeof o.status === "number" ? o.status : current.status,
       };
     }
@@ -521,6 +538,7 @@ export function jsonToForm(raw: string, current: FormState): FormState {
         // "플러그인 없음"이 표현 가능한 정상 상태라 존재 여부에서 파생하는 쪽이 왕복
         // 무손실이다 — serviceJson 이 낸 본문을 되읽으면 같은 폼이 나온다.
         jwtAuth: "jwt-auth" in p,
+        personalAuth: PERSONAL_AUTH_PLUGIN in p,
       };
     }
 
