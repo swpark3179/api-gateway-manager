@@ -9,10 +9,11 @@
 //!
 //! # checks (헬스체크)
 //!
-//! 폼이 다루는 것은 능동 검사(`checks.active`)의 주요 키와 수동 검사(`checks.passive`)의
-//! 장애 판정 키뿐이다 ([`apply_checks`] 주석의 표). `concurrency` · `req_headers` ·
-//! `https_verify_certificate` · `passive.healthy` 같은 나머지는 **같은 머지 규칙으로 보존**한다.
-//! 폼의 빈 칸은 "그 키를 지워 APISIX 기본값에 맡긴다" 는 뜻이다 (`set_or_remove` 와 같은 규칙).
+//! 폼이 다루는 것은 능동 검사(`checks.active`)와 수동 검사(`checks.passive`)의 키 대부분이다
+//! ([`apply_checks`] 주석의 표). `req_headers` 처럼 폼에 없는 나머지는 **같은 머지 규칙으로
+//! 보존**한다. 폼의 빈 칸은 "그 키를 지워 APISIX 기본값에 맡긴다" 는 뜻이다 (`set_or_remove` 와
+//! 같은 규칙). 폼의 '기본값으로 자동설정' 버튼이 채우는 값은 프런트(`lib/checks.ts` 의
+//! `CHECK_PRESET`)에 있다 — 저장 규칙은 여기 그대로다.
 //!
 //! # 현재 상태는 두 곳에서 본다
 //!
@@ -122,6 +123,12 @@ pub struct PassiveInput {
     /// false 면 `checks.passive` 를 지운다
     #[serde(default)]
     pub enabled: bool,
+    /// 수동 검사가 보는 트래픽의 종류. 비우면 키를 지운다 (APISIX 기본값 `http`)
+    #[serde(default)]
+    pub r#type: String,
+    /// `interval` 은 쓰지 않는다 — 수동 검사에는 주기가 없다 (실제 트래픽을 센다)
+    #[serde(default)]
+    pub healthy: HealthyInput,
     #[serde(default)]
     pub unhealthy: UnhealthyInput,
 }
@@ -145,6 +152,12 @@ pub struct ChecksInput {
     /// 초
     #[serde(default)]
     pub timeout: Option<f64>,
+    /// 동시에 검사하는 노드 수
+    #[serde(default)]
+    pub concurrency: Option<i64>,
+    /// https 검사의 인증서 검증. `None` = 키를 지운다 (APISIX 기본값 `true`)
+    #[serde(default)]
+    pub https_verify_certificate: Option<bool>,
     #[serde(default)]
     pub healthy: HealthyInput,
     #[serde(default)]
@@ -154,8 +167,8 @@ pub struct ChecksInput {
 }
 
 impl ChecksInput {
-    /// tcp 검사에는 HTTP 요청이 없다 — `http_path` · `host` · 상태 코드 · `http_failures` 가
-    /// 뜻이 없으므로 저장 본문에서 뺀다 ([`apply_checks`]).
+    /// tcp 검사에는 HTTP 요청이 없다 — `http_path` · `host` · `https_verify_certificate` ·
+    /// 상태 코드 · `http_failures` 가 뜻이 없으므로 저장 본문에서 뺀다 ([`apply_checks`]).
     pub fn is_http(&self) -> bool {
         self.r#type != "tcp"
     }
@@ -203,11 +216,22 @@ impl ChecksInput {
                 return Err(AppError::config(format!("{label} 은 1초 이상이어야 합니다.")));
             }
         }
+        if matches!(self.concurrency, Some(n) if n < 1) {
+            return Err(AppError::config("checks 의 concurrency 는 1 이상이어야 합니다."));
+        }
         count("checks 정상 판정 successes", self.healthy.successes)?;
         count("checks 장애 판정 tcp_failures", self.unhealthy.tcp_failures)?;
         count("checks 장애 판정 timeouts", self.unhealthy.timeouts)?;
 
         if self.passive.enabled {
+            let t = self.passive.r#type.trim();
+            if !t.is_empty() && !CHECK_TYPES.contains(&t) {
+                return Err(AppError::config(format!(
+                    "수동 검사의 type 은 http · https · tcp 중 하나여야 합니다 ({t})."
+                )));
+            }
+            statuses("수동 검사 정상 판정 http_statuses", &self.passive.healthy.http_statuses)?;
+            count("수동 검사 정상 판정 successes", self.passive.healthy.successes)?;
             let u = &self.passive.unhealthy;
             statuses("수동 검사 http_statuses", &u.http_statuses)?;
             count("수동 검사 http_failures", u.http_failures)?;
@@ -700,9 +724,9 @@ fn apply_upstream_form(base: Value, f: &UpstreamForm) -> Value {
 /// | `checks` 필드 없음 (`None`) | 손대지 않는다 |
 /// | 헬스체크 OFF | `checks` 를 **통째로** 지운다 |
 /// | 빈 칸 (숫자 · 문자열 · 상태 코드 목록) | 그 키를 지운다 → APISIX 기본값 |
-/// | type `tcp` | `http_path` · `host` · `http_statuses` · `unhealthy.http_failures` 를 지운다 (뜻이 없다) |
+/// | type `tcp` | `http_path` · `host` · `https_verify_certificate` · `http_statuses` · `unhealthy.http_failures` 를 지운다 (뜻이 없다) |
 /// | 수동 검사 OFF | `checks.passive` 를 지운다 |
-/// | 폼이 모르는 키 (`concurrency` · `req_headers` · `passive.healthy` …) | 보존 |
+/// | 폼이 모르는 키 (`req_headers` …) | 보존 |
 ///
 /// 속이 빈 `healthy` · `unhealthy` 는 남기지 않는다 (빈 `plugins` 를 지우는 것과 같은 규칙).
 fn apply_checks(m: &mut Map<String, Value>, c: Option<&ChecksInput>) {
@@ -721,6 +745,9 @@ fn apply_checks(m: &mut Map<String, Value>, c: Option<&ChecksInput>) {
     set_or_remove(&mut active, "host", if http { c.host.trim() } else { "" });
     put(&mut active, "port", c.port.map(Value::from));
     put(&mut active, "timeout", c.timeout.map(Value::from));
+    put(&mut active, "concurrency", c.concurrency.map(Value::from));
+    let verify = if http { c.https_verify_certificate } else { None };
+    put(&mut active, "https_verify_certificate", verify.map(Value::from));
 
     let mut healthy = obj(active.remove("healthy").unwrap_or(Value::Null));
     put(&mut healthy, "interval", c.healthy.interval.map(Value::from));
@@ -741,8 +768,16 @@ fn apply_checks(m: &mut Map<String, Value>, c: Option<&ChecksInput>) {
 
     if c.passive.enabled {
         // 수동 검사는 실제로 프록시한 응답을 본다 — 능동 검사가 tcp 여도 HTTP 키가 뜻이 있다.
-        let u = &c.passive.unhealthy;
+        let p = &c.passive;
+        let u = &p.unhealthy;
         let mut passive = obj(checks.remove("passive").unwrap_or(Value::Null));
+        set_or_remove(&mut passive, "type", p.r#type.trim());
+
+        let mut ph = obj(passive.remove("healthy").unwrap_or(Value::Null));
+        put(&mut ph, "successes", p.healthy.successes.map(Value::from));
+        put_list(&mut ph, "http_statuses", &p.healthy.http_statuses);
+        put_obj(&mut passive, "healthy", ph);
+
         let mut pu = obj(passive.remove("unhealthy").unwrap_or(Value::Null));
         put(&mut pu, "http_failures", u.http_failures.map(Value::from));
         put(&mut pu, "tcp_failures", u.tcp_failures.map(Value::from));

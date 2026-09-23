@@ -693,6 +693,10 @@ export interface ChecksFormState {
   port: string;
   /** 초 */
   timeout: string;
+  /** 동시에 검사하는 노드 수 */
+  concurrency: string;
+  /** https 검사의 인증서 검증. `""` = 키 없음(APISIX 기본값 true) */
+  httpsVerify: "" | "true" | "false";
   healthyInterval: string;
   healthySuccesses: string;
   /** `200, 302` — 쉼표 · 공백으로 나눈다 */
@@ -704,6 +708,10 @@ export interface ChecksFormState {
   unhealthyStatuses: string;
   /** 수동 검사(`checks.passive`) — 실제 트래픽의 응답으로 장애를 판정한다 */
   passive: boolean;
+  /** 수동 검사가 보는 트래픽의 종류. `""` = 키 없음(APISIX 기본값 http) */
+  passiveType: "" | CheckType;
+  passiveHealthySuccesses: string;
+  passiveHealthyStatuses: string;
   passiveHttpFailures: string;
   passiveTcpFailures: string;
   passiveTimeouts: string;

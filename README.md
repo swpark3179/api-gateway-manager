@@ -14,7 +14,7 @@ OAS 3.0 스펙을 읽어 "이 API 가 게이트웨이에 등록돼 있는지" �
 npm install
 npm run tauri dev        # 개발 실행
 npm run tauri build      # 릴리스 빌드 (MSI · NSIS)
-cargo test --lib --manifest-path src-tauri/Cargo.toml   # 회귀 테스트 (139건)
+cargo test --lib --manifest-path src-tauri/Cargo.toml   # 회귀 테스트 (140건)
 npm run build                                          # tsc --noEmit + vite build
 ```
 
@@ -154,7 +154,7 @@ src-tauri/src/
 - Service → `shi-log`(폼의 `log-key` — 빈 값이면 **통째로 삭제**), `jwt-auth`(폼의 토글 — ON 이면 **없을 때만** `{}` 추가, OFF 면 삭제),
   `labels.spec_url` · `labels.name_prefix`. 관리 대상 플러그인이 하나도 안 남으면 `plugins` 키 자체를 지운다
 - Upstream → `name`, `desc`, `nodes`, `timeout`, `checks` 의 폼이 다루는 키 (`retries`·`scheme`·`type`,
-  그리고 `checks` 안의 `concurrency`·`req_headers`·`passive.healthy` 등은 보존 — 아래 'Upstream 헬스체크' 절)
+  그리고 `checks` 안의 `req_headers` 등 폼에 없는 키는 보존 — 아래 'Upstream 헬스체크' 절)
 
 그룹 필드의 실제 위치는 조회 때 찾아낸 자리를 그대로 쓴다 — 아래 절 참조.
 
@@ -927,18 +927,50 @@ APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에
 Upstream 폼 편집 탭의 `헬스체크` 카드. 켜면 `checks` 가 저장되고, 게이트웨이가 노드를 주기적으로
 검사해 장애로 판정된 노드에는 요청을 보내지 않는다.
 
+#### 기본값으로 자동설정
+
+대부분의 upstream 은 같은 헬스체크를 쓰고 **host · port 만** 다르다. 그래서 카드 맨 위의
+`기본값으로 자동설정` 버튼이 운영 설정(`lib/checks.ts` 의 `CHECK_PRESET`)을 한 번에 채운다.
+
+| 값 | 어디서 |
+|---|---|
+| `http_path: /actuator/health` · `timeout: 2` · `concurrency: 10` · `https_verify_certificate: false` | 고정 |
+| 정상 판정 `interval 5` · `successes 2` · `http_statuses [200]` | 고정 |
+| 장애 판정 `interval 2` · `http_failures 3` · `tcp_failures 3` · `timeouts 3` · `http_statuses [404, 500, 502, 503, 504]` | 고정 |
+| 수동 검사 `type http` · 정상 `successes 3` · `[200, 201, 204, 301, 302]` · 장애 `http_failures 3` · `tcp_failures 3` · `timeouts 3` · `[502, 503, 504]` | 고정 |
+| `host` · `port` | **편집 중인 upstream 의 노드** (저장 전 입력값 포함) |
+
+노드가 여럿이고 host(또는 port)가 서로 다르면 그 칸은 **비운다**(`presetChecks`) — 왜 비웠는지
+카드에 적는다. `checks.active.port` 는 모든 노드의 검사 포트를 한 값으로 바꾸므로 첫 노드의 포트를
+넣으면 포트가 다른 노드가 틀린 포트로 검사돼 장애로 빠진다. 비워 두면 APISIX 가 각 노드를 자기
+host · port 로 검사한다 — "upstream 의 host · port 를 그대로" 가 노드마다 성립하는 쪽이다.
+노드를 고친 뒤 다시 누르지 않아 검사 host · port 가 어느 노드와도 맞지 않으면 카드가 경고한다.
+
+확인 창 대신 `되돌리기` 를 둔다 (이 앱에는 확인 창이 없다). 채운 뒤에도 저장해야 게이트웨이에
+반영된다. 이 값이 폼 칸만으로 운영 JSON 과 **한 글자도 다르지 않게** 저장되는지는 회귀 테스트
+`preset_builds_the_reference_config_exactly` 가 못 박는다 — 값을 바꾸면 그 테스트의 기준 JSON 도
+함께 고친다.
+
+화면에는 upstream 마다 달라지는 칸(type · http_path · host · port · timeout)만 펼쳐 두고 나머지
+숫자는 `세부 설정` 으로 접어 한 줄 요약만 보여 준다. 형식 오류는 접어 둬도 보인다.
+
+#### 칸과 저장 위치
+
 **빈 칸은 APISIX 기본값이다.** 칸마다 기본값(`schema_def.lua` 의 health_checker)을 placeholder 로
-보여 주고, 비워 두면 그 키를 저장하지 않는다 — 대부분은 `http_path` 하나만 적으면 된다. 기본값을
-앱이 채워 넣지 않는 이유는 `timeout` 과 다르다: 게이트웨이가 이미 같은 기본값을 갖고 있어,
-채우면 "게이트웨이 기본값을 따른다" 와 "이 값으로 고정했다" 가 구별되지 않는다.
+보여 주고, 비워 두면 그 키를 저장하지 않는다. 기본값을 앱이 채워 넣지 않는 이유는 `timeout` 과
+다르다: 게이트웨이가 이미 같은 기본값을 갖고 있어, 채우면 "게이트웨이 기본값을 따른다" 와 "이 값으로
+고정했다" 가 구별되지 않는다 (자동설정은 운영 값으로 **고정하는** 버튼이다).
 
 | 카드 | 저장 위치 | 기본값 |
 |---|---|---|
 | type (`http` · `https` · `tcp`) | `checks.active.type` | `http` |
 | timeout · port · http_path · host | `checks.active.*` | `1` · 노드 port · `/` · 노드 host |
+| concurrency · https_verify_certificate | `checks.active.*` | `10` · `true` |
 | 정상 판정 interval · successes · http_statuses | `checks.active.healthy.*` | `1` · `2` · `200, 302` |
 | 장애 판정 interval · http_failures · tcp_failures · timeouts · http_statuses | `checks.active.unhealthy.*` | `1` · `5` · `2` · `3` · `429, 404, 500, 501, 502, 503, 504, 505` |
-| 수동 검사 (on/off) + http_failures · tcp_failures · timeouts · http_statuses | `checks.passive.unhealthy.*` | `5` · `2` · `7` · `429, 500, 503` |
+| 수동 검사 (on/off) + type | `checks.passive.type` | `http` |
+| 수동 검사 정상 판정 successes · http_statuses | `checks.passive.healthy.*` | `5` · 2xx·3xx 19개 |
+| 수동 검사 장애 판정 http_failures · tcp_failures · timeouts · http_statuses | `checks.passive.unhealthy.*` | `5` · `2` · `7` · `429, 500, 503` |
 
 저장은 다른 리소스와 같은 **머지**다 (`upstreams.rs` 의 `apply_checks`):
 
@@ -946,9 +978,9 @@ Upstream 폼 편집 탭의 `헬스체크` 카드. 켜면 `checks` 가 저장되�
 |---|---|
 | 헬스체크 OFF | `checks` 를 **통째로** 지운다 (게이트웨이에 있던 헬스체크를 끄고 저장하면 카드가 미리 경고한다) |
 | 빈 칸 | 그 키를 지운다 → APISIX 기본값. 속이 빈 `healthy` · `unhealthy` 는 남기지 않는다 |
-| type `tcp` | `http_path` · `host` · `http_statuses` · `unhealthy.http_failures` 를 지운다 — HTTP 요청이 없어 뜻이 없다 |
+| type `tcp` | `http_path` · `host` · `https_verify_certificate` · `http_statuses` · `unhealthy.http_failures` 를 지운다 — HTTP 요청이 없어 뜻이 없다 |
 | 수동 검사 OFF | `checks.passive` 를 지운다. 수동 검사만 켤 수는 없다 (APISIX 가 능동 검사 없는 수동 검사를 받지 않는다) |
-| 폼이 모르는 키 (`concurrency` · `req_headers` · `https_verify_certificate` · `passive.healthy` · `passive.type`) | **보존** |
+| 폼이 모르는 키 (`req_headers` 등) | **보존** |
 | `checks` 필드를 싣지 않은 호출 | 손대지 않는다 — 누락이 지우는 쪽으로 떨어지지 않게 (`contacts` 와 같은 관례) |
 
 끄거나 tcp 로 바꿔 본문에서 빠지는 칸도 **폼에는 남는다** (Route 의 `전체 허용` 이 그룹 목록을

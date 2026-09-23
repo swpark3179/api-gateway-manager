@@ -6,15 +6,18 @@
  *
  *   헬스체크 OFF         `checks` 키가 없다
  *   빈 칸               그 키가 없다 → APISIX 기본값 (`CHECK_DEFAULTS` 를 placeholder 로 보여 준다)
- *   type tcp            `http_path` · `host` · `http_statuses` · `unhealthy.http_failures` 가 없다
+ *   type tcp            `http_path` · `host` · `https_verify_certificate` · `http_statuses` ·
+ *                       `unhealthy.http_failures` 가 없다
  *   수동 검사 OFF        `checks.passive` 가 없다
  *   속이 빈 healthy 등   그 키가 없다
  *
- * 폼이 모르는 키(`concurrency` · `req_headers` · `passive.healthy` …)는 미리보기에 없지만 저장할 때
- * 보존된다 — JSON 탭이 그렇게 밝혀 둔다.
+ * 폼이 모르는 키(`req_headers` …)는 미리보기에 없지만 저장할 때 보존된다 — JSON 탭이 그렇게 밝혀 둔다.
+ *
+ * '기본값으로 자동설정' 이 채우는 값은 `CHECK_PRESET` 이다 (운영에서 쓰는 설정). host · port 만
+ * upstream 마다 달라서 편집 중인 노드에서 가져온다 (`presetChecks`).
  */
 
-import type { ChecksFormState, CheckType, HealthNode } from "../types";
+import type { ChecksFormState, CheckType, HealthNode, UpstreamNodeInput } from "../types";
 
 export const CHECK_TYPES: CheckType[] = ["http", "https", "tcp"];
 
@@ -25,6 +28,7 @@ export const CHECK_TYPES: CheckType[] = ["http", "https", "tcp"];
 export const CHECK_DEFAULTS = {
   httpPath: "/",
   timeout: "1",
+  concurrency: "10",
   healthyInterval: "1",
   healthySuccesses: "2",
   healthyStatuses: "200, 302",
@@ -33,6 +37,9 @@ export const CHECK_DEFAULTS = {
   unhealthyTcpFailures: "2",
   unhealthyTimeouts: "3",
   unhealthyStatuses: "429, 404, 500, 501, 502, 503, 504, 505",
+  passiveType: "http",
+  passiveHealthySuccesses: "5",
+  passiveHealthyStatuses: "2xx · 3xx 19개",
   passiveHttpFailures: "5",
   passiveTcpFailures: "2",
   passiveTimeouts: "7",
@@ -46,6 +53,8 @@ export const emptyChecks = (): ChecksFormState => ({
   host: "",
   port: "",
   timeout: "",
+  concurrency: "",
+  httpsVerify: "",
   healthyInterval: "",
   healthySuccesses: "",
   healthyStatuses: "",
@@ -55,6 +64,9 @@ export const emptyChecks = (): ChecksFormState => ({
   unhealthyTimeouts: "",
   unhealthyStatuses: "",
   passive: false,
+  passiveType: "",
+  passiveHealthySuccesses: "",
+  passiveHealthyStatuses: "",
   passiveHttpFailures: "",
   passiveTcpFailures: "",
   passiveTimeouts: "",
@@ -77,6 +89,9 @@ const numIn = (v: unknown): string =>
 const listIn = (v: unknown): string =>
   Array.isArray(v) ? v.filter((x) => typeof x === "number").join(", ") : "";
 
+const boolIn = (v: unknown): "" | "true" | "false" =>
+  v === true ? "true" : v === false ? "false" : "";
+
 /**
  * 게이트웨이의 `checks` · JSON 탭의 본문 → 폼.
  *
@@ -95,6 +110,7 @@ export function checksFromJson(v: unknown, base: ChecksFormState = emptyChecks()
   const h = asObj(a.healthy) ?? {};
   const u = asObj(a.unhealthy) ?? {};
   const p = asObj(o.passive);
+  const ph = asObj(p?.healthy) ?? {};
   const pu = asObj(p?.unhealthy) ?? {};
 
   return {
@@ -104,6 +120,8 @@ export function checksFromJson(v: unknown, base: ChecksFormState = emptyChecks()
     host: http ? text(a.host) : base.host,
     port: numIn(a.port),
     timeout: numIn(a.timeout),
+    concurrency: numIn(a.concurrency),
+    httpsVerify: http ? boolIn(a.https_verify_certificate) : base.httpsVerify,
     healthyInterval: numIn(h.interval),
     healthySuccesses: numIn(h.successes),
     healthyStatuses: http ? listIn(h.http_statuses) : base.healthyStatuses,
@@ -113,6 +131,9 @@ export function checksFromJson(v: unknown, base: ChecksFormState = emptyChecks()
     unhealthyTimeouts: numIn(u.timeouts),
     unhealthyStatuses: http ? listIn(u.http_statuses) : base.unhealthyStatuses,
     passive: p !== null,
+    passiveType: p ? (CHECK_TYPES.find((t) => t === p.type) ?? "") : base.passiveType,
+    passiveHealthySuccesses: p ? numIn(ph.successes) : base.passiveHealthySuccesses,
+    passiveHealthyStatuses: p ? listIn(ph.http_statuses) : base.passiveHealthyStatuses,
     passiveHttpFailures: p ? numIn(pu.http_failures) : base.passiveHttpFailures,
     passiveTcpFailures: p ? numIn(pu.tcp_failures) : base.passiveTcpFailures,
     passiveTimeouts: p ? numIn(pu.timeouts) : base.passiveTimeouts,
@@ -160,6 +181,8 @@ export function checksJson(c: ChecksFormState): Obj | undefined {
   }
   putNum(active, "port", c.port);
   putNum(active, "timeout", c.timeout);
+  putNum(active, "concurrency", c.concurrency);
+  if (http && c.httpsVerify !== "") active.https_verify_certificate = c.httpsVerify === "true";
 
   const healthy: Obj = {};
   putNum(healthy, "interval", c.healthyInterval);
@@ -177,13 +200,20 @@ export function checksJson(c: ChecksFormState): Obj | undefined {
 
   const out: Obj = { active };
   if (c.passive) {
+    // `passive: {}` 도 APISIX 가 받는다 — 모든 키에 기본값이 있다 (Rust 와 같은 모양).
+    const passive: Obj = {};
+    if (c.passiveType) passive.type = c.passiveType;
+    const ph: Obj = {};
+    putNum(ph, "successes", c.passiveHealthySuccesses);
+    putList(ph, "http_statuses", c.passiveHealthyStatuses);
+    putObj(passive, "healthy", ph);
     const pu: Obj = {};
     putNum(pu, "http_failures", c.passiveHttpFailures);
     putNum(pu, "tcp_failures", c.passiveTcpFailures);
     putNum(pu, "timeouts", c.passiveTimeouts);
     putList(pu, "http_statuses", c.passiveStatuses);
-    // `passive: {}` 는 APISIX 가 받는다 — 모든 키에 기본값이 있다 (Rust 와 같은 모양).
-    out.passive = Object.keys(pu).length > 0 ? { unhealthy: pu } : {};
+    putObj(passive, "unhealthy", pu);
+    out.passive = passive;
   }
   return out;
 }
@@ -206,6 +236,8 @@ export function checksWire(c: ChecksFormState): Record<string, unknown> {
     host: c.host.trim(),
     port: wireNum(c.port),
     timeout: wireNum(c.timeout),
+    concurrency: wireNum(c.concurrency),
+    httpsVerifyCertificate: c.httpsVerify === "" ? null : c.httpsVerify === "true",
     healthy: {
       interval: wireNum(c.healthyInterval),
       successes: wireNum(c.healthySuccesses),
@@ -220,6 +252,11 @@ export function checksWire(c: ChecksFormState): Record<string, unknown> {
     },
     passive: {
       enabled: c.passive,
+      type: c.passiveType,
+      healthy: {
+        successes: wireNum(c.passiveHealthySuccesses),
+        httpStatuses: wireList(c.passiveHealthyStatuses),
+      },
       unhealthy: {
         httpFailures: wireNum(c.passiveHttpFailures),
         tcpFailures: wireNum(c.passiveTcpFailures),
@@ -284,6 +321,7 @@ export function checksProblems(c: ChecksFormState): string[] {
   if (t !== "" && !(Number.isFinite(Number(t)) && Number(t) > 0)) {
     out.push("timeout 은 0 보다 큰 숫자여야 합니다.");
   }
+  int("concurrency", c.concurrency, 1, Number.MAX_SAFE_INTEGER);
   int("정상 판정 interval", c.healthyInterval, 1, Number.MAX_SAFE_INTEGER);
   int("정상 판정 successes", c.healthySuccesses, 1, 254);
   int("장애 판정 interval", c.unhealthyInterval, 1, Number.MAX_SAFE_INTEGER);
@@ -291,12 +329,140 @@ export function checksProblems(c: ChecksFormState): string[] {
   int("장애 판정 timeouts", c.unhealthyTimeouts, 1, 254);
 
   if (c.passive) {
+    list("수동 검사 정상 판정 http_statuses", c.passiveHealthyStatuses);
+    int("수동 검사 정상 판정 successes", c.passiveHealthySuccesses, 1, 254);
     list("수동 검사 http_statuses", c.passiveStatuses);
     int("수동 검사 http_failures", c.passiveHttpFailures, 1, 254);
     int("수동 검사 tcp_failures", c.passiveTcpFailures, 1, 254);
     int("수동 검사 timeouts", c.passiveTimeouts, 1, 254);
   }
   return out;
+}
+
+// ── 기본값으로 자동설정 ──────────────────────────────────────
+
+/**
+ * 운영에서 쓰는 헬스체크 설정 — '기본값으로 자동설정' 버튼이 채우는 값이다.
+ *
+ * `host` · `port` 는 없다. upstream 마다 달라서 누를 때 편집 중인 노드에서 가져온다
+ * (`presetChecks`). 이 값이 폼 칸만으로 그대로 저장되는지는 Rust 테스트
+ * `preset_builds_the_reference_config_exactly` 가 운영 JSON 과 대조해 못 박아 둔다 —
+ * 값을 바꾸면 그 테스트의 기준 JSON 도 함께 고친다.
+ */
+export const CHECK_PRESET: Omit<ChecksFormState, "host" | "port"> = {
+  enabled: true,
+  type: "http",
+  httpPath: "/actuator/health",
+  timeout: "2",
+  concurrency: "10",
+  httpsVerify: "false",
+  healthyInterval: "5",
+  healthySuccesses: "2",
+  healthyStatuses: "200",
+  unhealthyInterval: "2",
+  unhealthyHttpFailures: "3",
+  unhealthyTcpFailures: "3",
+  unhealthyTimeouts: "3",
+  unhealthyStatuses: "404, 500, 502, 503, 504",
+  passive: true,
+  passiveType: "http",
+  passiveHealthySuccesses: "3",
+  passiveHealthyStatuses: "200, 201, 204, 301, 302",
+  passiveHttpFailures: "3",
+  passiveTcpFailures: "3",
+  passiveTimeouts: "3",
+  passiveStatuses: "502, 503, 504",
+};
+
+const uniq = (xs: string[]): string[] => [...new Set(xs)];
+
+/**
+ * `CHECK_PRESET` + 편집 중인 노드의 host · port.
+ *
+ * 노드가 여럿이고 값이 서로 다르면 그 칸은 **비운다.** `checks.active.port` 는 모든 노드의 검사
+ * 포트를 한 값으로 바꾸므로 첫 노드의 포트를 채우면 다른 포트의 노드가 틀린 포트로 검사돼
+ * 장애로 빠진다. 비워 두면 APISIX 가 각 노드를 자기 host · port 로 검사한다 — "upstream 의
+ * host · port 를 그대로" 가 노드마다 성립하는 쪽이다. `host`(Host 헤더)도 같은 규칙이다.
+ * 왜 비웠는지는 `notes` 로 돌려줘 화면이 알린다.
+ */
+export function presetChecks(nodes: UpstreamNodeInput[]): {
+  checks: ChecksFormState;
+  notes: string[];
+} {
+  const filled = nodes.filter((n) => n.host.trim() !== "");
+  const hosts = uniq(filled.map((n) => n.host.trim()));
+  const ports = uniq(filled.map((n) => n.port.trim()).filter(Boolean));
+  const notes: string[] = [];
+
+  if (filled.length === 0) {
+    notes.push("노드가 비어 있어 host · port 를 채우지 못했습니다 — 노드를 입력한 뒤 다시 누르세요.");
+  } else {
+    if (hosts.length > 1) {
+      notes.push(
+        `노드마다 host 가 달라(${hosts.join(", ")}) host 는 비워 두었습니다 — 각 노드의 주소가 그대로 Host 헤더로 갑니다.`,
+      );
+    }
+    if (ports.length > 1) {
+      notes.push(
+        `노드마다 port 가 달라(${ports.join(", ")}) port 는 비워 두었습니다 — 각 노드를 자기 port 로 검사합니다.`,
+      );
+    } else if (ports.length === 0) {
+      notes.push("노드의 port 가 비어 있어 port 를 채우지 못했습니다.");
+    }
+  }
+
+  return {
+    checks: {
+      ...CHECK_PRESET,
+      host: hosts.length === 1 ? hosts[0] : "",
+      port: ports.length === 1 ? ports[0] : "",
+    },
+    notes,
+  };
+}
+
+/**
+ * 검사 host · port 가 지금의 노드와 어긋나는지 — 노드를 고친 뒤 자동설정을 다시 누르지 않은
+ * 경우를 잡는다. 저장은 막지 않는다 (일부러 다른 포트로 검사하는 upstream 도 있다).
+ */
+export function checksNodeWarnings(c: ChecksFormState, nodes: UpstreamNodeInput[]): string[] {
+  if (!c.enabled) return [];
+  const filled = nodes.filter((n) => n.host.trim() !== "");
+  if (filled.length === 0) return [];
+  const out: string[] = [];
+  const port = c.port.trim();
+  if (port !== "") {
+    if (!filled.some((n) => n.port.trim() === port)) {
+      out.push(`검사 port ${port} 가 어느 노드의 port 와도 다릅니다.`);
+    } else if (uniq(filled.map((n) => n.port.trim())).length > 1) {
+      out.push(`노드마다 port 가 다른데 검사 port 가 ${port} 로 고정돼 있어 다른 노드도 ${port} 로 검사합니다.`);
+    }
+  }
+  const host = c.host.trim();
+  if (c.type !== "tcp" && host !== "" && !filled.some((n) => n.host.trim() === host)) {
+    out.push(`검사 host ${host} 가 어느 노드의 host 와도 다릅니다 (Host 헤더로만 쓰입니다).`);
+  }
+  return out;
+}
+
+/** 세부 설정을 접었을 때 보여 줄 한 줄 — 빈 칸은 기본값으로 읽는다. */
+export function checksSummary(c: ChecksFormState): string {
+  const v = (x: string, d: string) => (x.trim() === "" ? d : x.trim());
+  const http = c.type !== "tcp";
+  const parts = [
+    `timeout ${v(c.timeout, CHECK_DEFAULTS.timeout)}초`,
+    `정상 ${v(c.healthyInterval, CHECK_DEFAULTS.healthyInterval)}초마다 ${v(c.healthySuccesses, CHECK_DEFAULTS.healthySuccesses)}회 성공`,
+    `장애 ${v(c.unhealthyInterval, CHECK_DEFAULTS.unhealthyInterval)}초마다 ` +
+      [
+        http ? `HTTP ${v(c.unhealthyHttpFailures, CHECK_DEFAULTS.unhealthyHttpFailures)}` : "",
+        `TCP ${v(c.unhealthyTcpFailures, CHECK_DEFAULTS.unhealthyTcpFailures)}`,
+        `시간 초과 ${v(c.unhealthyTimeouts, CHECK_DEFAULTS.unhealthyTimeouts)}회`,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    c.passive ? "수동 검사 사용" : "수동 검사 안 함",
+  ];
+  return parts.join("  /  ");
 }
 
 // ── 표시 ─────────────────────────────────────────────────────
