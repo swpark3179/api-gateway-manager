@@ -68,12 +68,13 @@ fn record_meta(app: &AppHandle<Wry>, env: Env, meta: &Meta) {
     }
 }
 
-/// 클라이언트 생성 — **프록시 정책이 결정되는 유일한 지점**.
-pub(crate) fn build(cfg: &EnvConfig) -> AppResult<reqwest::Client> {
+/// 빌더 — **프록시 정책이 결정되는 유일한 지점**.
+///
+/// 클라이언트는 [`build`] 와 [`build_probe`] 두 가지인데, 둘 다 여기서 시작한다. 용도별로
+/// 달라지는 것(타임아웃 · 리다이렉트)만 각자 얹고, 프록시 · 인증서 정책은 한 곳에만 둔다.
+fn builder(cfg: &EnvConfig) -> reqwest::ClientBuilder {
     let mut b = reqwest::Client::builder()
         .user_agent(concat!("api-gateway-manager/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(20))
         .pool_idle_timeout(std::time::Duration::from_secs(30));
 
     if cfg.no_proxy {
@@ -86,8 +87,29 @@ pub(crate) fn build(cfg: &EnvConfig) -> AppResult<reqwest::Client> {
         b = b.danger_accept_invalid_certs(true);
     }
 
-    b.build()
-        .map_err(|e| AppError::internal(format!("HTTP 클라이언트를 만들지 못했습니다: {e}")))
+    b
+}
+
+fn finish(b: reqwest::ClientBuilder) -> AppResult<reqwest::Client> {
+    b.build().map_err(|e| AppError::internal(format!("HTTP 클라이언트를 만들지 못했습니다: {e}")))
+}
+
+/// Admin API · Control API · 스펙 조회용 클라이언트.
+pub(crate) fn build(cfg: &EnvConfig) -> AppResult<reqwest::Client> {
+    finish(
+        builder(cfg)
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(20)),
+    )
+}
+
+/// upstream 노드 직접 점검용 클라이언트 (`upstreams::probe`).
+///
+/// **리다이렉트를 따라가지 않는다.** APISIX 의 능동 검사는 응답 코드 하나로 판정하고
+/// 기본 정상 목록에 `302` 가 들어 있다 — 따라가서 최종 페이지의 200 을 보면 판정이
+/// 게이트웨이와 달라진다. 타임아웃은 요청마다 `checks.active.timeout` 으로 건다.
+pub(crate) fn build_probe(cfg: &EnvConfig) -> AppResult<reqwest::Client> {
+    finish(builder(cfg).redirect(reqwest::redirect::Policy::none()))
 }
 
 fn client_for(app: &AppHandle<Wry>, env: Env, cfg: &EnvConfig) -> AppResult<reqwest::Client> {
@@ -236,6 +258,58 @@ fn too_large(max_bytes: usize) -> AppError {
     )
     .with_hint("스펙 파일을 내려받아 파일로 선택하세요.")
 }
+
+/// Control API 응답 한 건. 404 는 에러가 아니라 "그 체커가 없다" 는 답이라
+/// 상태 코드와 본문을 그대로 돌려주고 해석은 호출하는 쪽(`upstreams::health`)이 한다.
+pub struct ControlResponse {
+    /// 호출한 전체 주소 — 화면에 그대로 보여 준다
+    pub url: String,
+    pub status: u16,
+    pub body: String,
+}
+
+/// APISIX Control API `GET` (`path` 는 `/v1/...`).
+///
+/// Admin API 가 아니므로 `X-API-KEY` 를 **붙이지 않는다** — Control API 는 인증이 없고,
+/// 다른 포트로 관리키를 흘릴 이유가 없다. 이력(`history`)에도 남기지 않는다: 대시보드의
+/// "최근 관리 API 호출" 은 Admin API 호출 기록이다.
+///
+/// 연결 실패의 안내가 `From<reqwest::Error>` 와 다르다. 저쪽은 baseUrl 을 보라고 하지만,
+/// 여기서 가장 흔한 원인은 Control API 가 게이트웨이 내부(`127.0.0.1`)에만 열려 있는 것이다.
+pub async fn control_get(cfg: &EnvConfig, path: &str) -> AppResult<ControlResponse> {
+    let base = cfg.control_base()?;
+    let url = format!("{base}/{}", path.trim_start_matches('/'));
+    let client = build(cfg)?;
+
+    let res = client
+        .get(&url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|e| {
+            let timed_out = e.is_timeout();
+            let err = AppError::from(e);
+            if err.kind != ErrorKind::Connect {
+                return err;
+            }
+            let msg = if timed_out {
+                format!("Control API 가 시간 내에 응답하지 않았습니다 ({url}).")
+            } else {
+                format!("Control API 에 연결할 수 없습니다 ({url}).")
+            };
+            AppError::new(ErrorKind::Connect, msg).with_hint(CONTROL_HINT)
+        })?;
+
+    let status = res.status().as_u16();
+    let body = res.text().await.unwrap_or_default();
+    Ok(ControlResponse { url, status, body })
+}
+
+/// Control API 에 닿지 않을 때의 안내. 설정 화면 문구와 같은 내용이다.
+pub const CONTROL_HINT: &str =
+    "APISIX Control API 는 기본적으로 게이트웨이 내부(127.0.0.1:9090)에서만 열립니다. \
+     config.yaml 의 apisix.enable_control · apisix.control.ip 를 확인하거나, \
+     설정 화면에서 Control API 주소를 지정하세요.";
 
 /// 설정 화면 '연결 테스트' 전용.
 ///

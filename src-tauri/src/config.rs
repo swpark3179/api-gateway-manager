@@ -64,6 +64,11 @@ pub struct EnvConfig {
     pub no_proxy: bool,
     /// TLS 인증서 검증을 건너뛸지. 항상 ON (`load()` 가 강제한다).
     pub insecure_tls: bool,
+    /// APISIX Control API 주소 (예: http://60.101.107.90:9090) — upstream 헬스체크 상태 조회용.
+    /// 비어 있으면 baseUrl 의 호스트에 기본 포트 9090 을 붙여 쓴다 (`control_base`).
+    /// 예전 `settings.json` 에는 이 키가 없으므로 기본값(빈 문자열)으로 읽는다.
+    #[serde(default)]
+    pub control_url: String,
 }
 
 impl EnvConfig {
@@ -74,7 +79,12 @@ impl EnvConfig {
             Env::Dev => "http://60.101.107.90:9080",
             Env::Prod => "http://60.101.207.91:7096",
         };
-        Self { base_url: base_url.to_string(), no_proxy: true, insecure_tls: true }
+        Self {
+            base_url: base_url.to_string(),
+            no_proxy: true,
+            insecure_tls: true,
+            control_url: String::new(),
+        }
     }
 
     /// baseUrl 을 정규화해 `{base}/apisix/admin` 형태의 접두사를 만든다.
@@ -89,6 +99,45 @@ impl EnvConfig {
         // 사용자가 실수로 /apisix/admin 까지 넣은 경우를 흡수한다.
         let b = b.trim_end_matches("/apisix/admin").trim_end_matches('/').to_string();
         Ok(format!("{b}/apisix/admin"))
+    }
+
+    /// Control API 접두사 (`http://host:9090`) — 경로 `/v1/...` 은 호출하는 쪽이 붙인다.
+    ///
+    /// `control_url` 을 비워 두면 baseUrl 의 호스트에 APISIX 기본 포트 9090 을 붙인다
+    /// ([`control_default`](Self::control_default)). Control API 는 인증도 TLS 도 없는 평문
+    /// HTTP 가 기본이라, 스킴을 빠뜨린 입력은 `admin_base` 와 달리 `http://` 로 채운다.
+    pub fn control_base(&self) -> AppResult<String> {
+        let raw = self.control_url.trim();
+        if raw.is_empty() {
+            return self.control_default();
+        }
+        let b = if raw.starts_with("http://") || raw.starts_with("https://") {
+            raw.to_string()
+        } else {
+            format!("http://{raw}")
+        };
+        // 사용자가 `/v1` 이나 `/v1/healthcheck` 까지 적어 넣은 경우를 흡수한다.
+        let b = b.trim_end_matches('/');
+        let b = b.trim_end_matches("/v1/healthcheck").trim_end_matches("/v1").trim_end_matches('/');
+        reqwest::Url::parse(b).map_err(|_| {
+            AppError::config(format!("Control API 주소를 해석하지 못했습니다: {raw}"))
+        })?;
+        Ok(b.to_string())
+    }
+
+    /// baseUrl 의 호스트 + 9090 — APISIX `apisix.enable_control` 의 기본 포트다.
+    ///
+    /// 게이트웨이 설정이 기본값이면 Control API 는 `127.0.0.1` 에만 열리므로 이 주소가 닿지
+    /// 않을 수 있다. 그 안내는 호출이 실패했을 때 한다 (`client::control_get`).
+    pub fn control_default(&self) -> AppResult<String> {
+        let admin = self.admin_base()?;
+        let mut url = reqwest::Url::parse(&admin)
+            .map_err(|_| AppError::config("baseUrl 을 해석하지 못했습니다."))?;
+        // 두 호출 모두 실패하는 경우는 cannot-be-a-base URL 뿐인데, http(s) 에서는 생기지 않는다.
+        let _ = url.set_scheme("http");
+        let _ = url.set_port(Some(9090));
+        url.set_path("");
+        Ok(url.as_str().trim_end_matches('/').to_string())
     }
 }
 
@@ -229,6 +278,10 @@ pub struct EnvConfigView {
     pub token_masked: String,
     /// `{baseUrl}/apisix/admin` — 사이드 패널 ENDPOINT 표기에 그대로 쓴다.
     pub admin_base: String,
+    /// 사용자가 입력한 Control API 주소 (비어 있을 수 있다)
+    pub control_url: String,
+    /// 비워 두면 쓰일 주소 — 설정 화면의 placeholder
+    pub control_default: String,
     /// 이 환경의 관리키가 주는 관리 권한. 메뉴 노출 · 잠금 판정 · 설정 화면 상세가 모두 이걸 본다.
     pub perm: PermView,
 }
@@ -243,6 +296,8 @@ pub fn view(cfg: &EnvConfig, env: Env, names: impl Fn(&str) -> Option<String>) -
         has_token: token.is_some(),
         token_masked: token.as_deref().map(mask).unwrap_or_default(),
         admin_base: cfg.admin_base().unwrap_or_else(|_| cfg.base_url.clone()),
+        control_url: cfg.control_url.clone(),
+        control_default: cfg.control_default().unwrap_or_default(),
         perm: perm::view(env, names),
     }
 }

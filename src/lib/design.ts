@@ -8,6 +8,7 @@
  */
 
 import { rewriteModeOf } from "../types";
+import { checksFromJson, checksJson } from "./checks";
 import type {
   ConsumerFormState,
   Contact,
@@ -344,13 +345,16 @@ function numIn(v: unknown): string {
  *
  * `type` 은 넣지 않는다 — Rust 는 원본에 **없을 때만** 기본값을 채우고 이미 있으면 손대지
  * 않는다 (`apply_upstream_form`). 앱이 관리하는 값이 아니므로 여기서 보여 주면 편집할 수 있는
- * 것처럼 보이고, 실제로는 저장 때 무시된다. `checks` · `retries` 등도 같은 이유로 없다.
+ * 것처럼 보이고, 실제로는 저장 때 무시된다. `retries` 등도 같은 이유로 없다.
+ *
+ * `checks` 는 **폼이 다루는 키만** 넣는다 (`lib/checks.ts` 의 `checksJson`). 헬스체크를 끄면
+ * 키 자체가 없다 — 저장할 때도 그렇게 지워진다.
  *
  * `weight` 는 **넣는다.** 폼에는 없지만 요청 본문에는 항상 들어가는 값이라, 빼 두면 JSON 탭을
  * 한 번 왕복하는 것만으로 게이트웨이의 가중치가 1 로 덮인다 (types.ts 의 UpstreamNode 주석).
  */
 export function upstreamJson(f: UpstreamFormState): Record<string, unknown> {
-  return {
+  const o: Record<string, unknown> = {
     name: f.name,
     desc: f.desc,
     nodes: f.nodes.map((n) => ({
@@ -364,6 +368,9 @@ export function upstreamJson(f: UpstreamFormState): Record<string, unknown> {
       read: numOut(f.timeout.read),
     },
   };
+  const checks = checksJson(f.checks);
+  if (checks) o.checks = checks;
+  return o;
 }
 
 /**
@@ -519,6 +526,10 @@ export function jsonToForm(raw: string, current: FormState): FormState {
               read: numIn(t.read),
             }
           : current.timeout,
+        // timeout 과 달리 키가 없으면 "헬스체크 없음" 으로 읽는다 — `upstreamJson` 이 끈
+        // 헬스체크를 그렇게 내보내므로 존재 여부에서 파생해야 왕복이 무손실이다 (Service 의
+        // jwtAuth 와 같은 판단). 끈 채로도 입력해 둔 칸은 남는다 (`checksFromJson` 의 base).
+        checks: checksFromJson(o.checks, current.checks),
       };
     }
 

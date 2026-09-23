@@ -14,7 +14,7 @@ OAS 3.0 스펙을 읽어 "이 API 가 게이트웨이에 등록돼 있는지" �
 npm install
 npm run tauri dev        # 개발 실행
 npm run tauri build      # 릴리스 빌드 (MSI · NSIS)
-cargo test --lib --manifest-path src-tauri/Cargo.toml   # 회귀 테스트 (63건)
+cargo test --lib --manifest-path src-tauri/Cargo.toml   # 회귀 테스트 (139건)
 npm run build                                          # tsc --noEmit + vite build
 ```
 
@@ -22,6 +22,8 @@ npm run build                                          # tsc --noEmit + vite bui
 그대로 `X-API-KEY` 가 된다. `secret$token` 형태면 기간·권한까지 읽어 화면을 줄이고,
 그 형태가 아니면(예: 평범한 APISIX admin key 한 줄) 제한 없이 연결만 한다.
 관리키가 없는 환경은 잠금 화면이 뜨고 조회·변경이 막힌다.
+Upstream 헬스체크의 **현재 상태**까지 보려면 같은 화면의 `Control API 주소`도 확인한다 (선택 —
+비우면 baseUrl 의 호스트 + 9090. 아래 [Upstream 헬스체크](#upstream-헬스체크-checks) 절).
 
 ---
 
@@ -71,6 +73,7 @@ src/                        프런트엔드 (React 19 + TS + zustand)
 ├─ api.ts                   Rust 커맨드 래퍼 — 게이트웨이 HTTP 의 유일한 통로
 ├─ lib/design.ts            디자인 원본의 순수 헬퍼 (JSON 모양 · 아이콘 · 스타일)
 ├─ lib/importDiff.ts        스펙 적용본 vs 저장분 — 필드 차이 · 선택 반영 · 줄 diff
+├─ lib/checks.ts            Upstream 헬스체크(checks) — 폼 ⇄ JSON · 검사 · 표시 문구
 ├─ styles/                  OPUS-X 토큰 CSS (디자인 원본을 그대로 복사)
 ├─ components/              TitleBar · IconRail · SidePanel · Toast · BootProgress · GroupCombo · MetaList · ErrorBanner
 └─ screens/                 Locked · Dashboard · List · Upstreams · Services · Import ·
@@ -130,6 +133,14 @@ src-tauri/src/
 | Service 신규 · 수정 · 삭제 | `POST /services`, `PUT /services/{id}`, `DELETE /services/{id}` |
 | 대시보드 KPI | `GET /services`, `GET /upstreams` (건수만 — 라이브 실측) |
 
+헬스체크 **상태**는 Admin API 에 없어 APISIX **Control API**(`{controlUrl}/v1/...`, 기본 포트
+9090)를 부른다. 인증이 없는 API 라 `X-API-KEY` 를 보내지 않는다 (`client::control_get`).
+
+| 화면 동작 | 호출 |
+|---|---|
+| Upstream 목록의 `헬스 상태` 버튼 | `GET /v1/healthcheck` |
+| Upstream 상세의 `상태 조회` 버튼 | `GET /v1/healthcheck/upstreams/{id}` |
+
 ### 플러그인 보존
 
 디자인의 `routeJson()` 은 `plugins` 를 통째로 교체한다. 그대로 구현하면 게이트웨이에
@@ -142,7 +153,8 @@ src-tauri/src/
 - Consumer → `jwt-auth.key`, `jwt-auth.secret`, 그룹 필드(기본 `jwt-auth.auth_groups` — 아래 절 참조)
 - Service → `shi-log`(폼의 `log-key` — 빈 값이면 **통째로 삭제**), `jwt-auth`(폼의 토글 — ON 이면 **없을 때만** `{}` 추가, OFF 면 삭제),
   `labels.spec_url` · `labels.name_prefix`. 관리 대상 플러그인이 하나도 안 남으면 `plugins` 키 자체를 지운다
-- Upstream → `name`, `desc`, `nodes`, `timeout` (`checks`·`retries`·`scheme`·`type` 은 보존)
+- Upstream → `name`, `desc`, `nodes`, `timeout`, `checks` 의 폼이 다루는 키 (`retries`·`scheme`·`type`,
+  그리고 `checks` 안의 `concurrency`·`req_headers`·`passive.healthy` 등은 보존 — 아래 'Upstream 헬스체크' 절)
 
 그룹 필드의 실제 위치는 조회 때 찾아낸 자리를 그대로 쓴다 — 아래 절 참조.
 
@@ -907,7 +919,78 @@ APISIX 의 service 스키마는 `additionalProperties: false` 라 **최상위에
 
 `type`(로드밸런싱 방식)은 폼에 없다. 없을 때만 `roundrobin` 을 넣고, 이미 있으면 손대지
 않는다 — `chash` 로 운영 중인 upstream 을 저장 한 번으로 바꿔 버리면 안 된다.
-`checks`(헬스체크)·`retries`·`scheme`·`pass_host` 도 같은 이유로 보존한다.
+`retries`·`scheme`·`pass_host` 도 같은 이유로 보존한다. `checks`(헬스체크)는 아래 절대로
+폼에서 등록한다.
+
+### Upstream 헬스체크 (checks)
+
+Upstream 폼 편집 탭의 `헬스체크` 카드. 켜면 `checks` 가 저장되고, 게이트웨이가 노드를 주기적으로
+검사해 장애로 판정된 노드에는 요청을 보내지 않는다.
+
+**빈 칸은 APISIX 기본값이다.** 칸마다 기본값(`schema_def.lua` 의 health_checker)을 placeholder 로
+보여 주고, 비워 두면 그 키를 저장하지 않는다 — 대부분은 `http_path` 하나만 적으면 된다. 기본값을
+앱이 채워 넣지 않는 이유는 `timeout` 과 다르다: 게이트웨이가 이미 같은 기본값을 갖고 있어,
+채우면 "게이트웨이 기본값을 따른다" 와 "이 값으로 고정했다" 가 구별되지 않는다.
+
+| 카드 | 저장 위치 | 기본값 |
+|---|---|---|
+| type (`http` · `https` · `tcp`) | `checks.active.type` | `http` |
+| timeout · port · http_path · host | `checks.active.*` | `1` · 노드 port · `/` · 노드 host |
+| 정상 판정 interval · successes · http_statuses | `checks.active.healthy.*` | `1` · `2` · `200, 302` |
+| 장애 판정 interval · http_failures · tcp_failures · timeouts · http_statuses | `checks.active.unhealthy.*` | `1` · `5` · `2` · `3` · `429, 404, 500, 501, 502, 503, 504, 505` |
+| 수동 검사 (on/off) + http_failures · tcp_failures · timeouts · http_statuses | `checks.passive.unhealthy.*` | `5` · `2` · `7` · `429, 500, 503` |
+
+저장은 다른 리소스와 같은 **머지**다 (`upstreams.rs` 의 `apply_checks`):
+
+| 폼 | 저장 결과 |
+|---|---|
+| 헬스체크 OFF | `checks` 를 **통째로** 지운다 (게이트웨이에 있던 헬스체크를 끄고 저장하면 카드가 미리 경고한다) |
+| 빈 칸 | 그 키를 지운다 → APISIX 기본값. 속이 빈 `healthy` · `unhealthy` 는 남기지 않는다 |
+| type `tcp` | `http_path` · `host` · `http_statuses` · `unhealthy.http_failures` 를 지운다 — HTTP 요청이 없어 뜻이 없다 |
+| 수동 검사 OFF | `checks.passive` 를 지운다. 수동 검사만 켤 수는 없다 (APISIX 가 능동 검사 없는 수동 검사를 받지 않는다) |
+| 폼이 모르는 키 (`concurrency` · `req_headers` · `https_verify_certificate` · `passive.healthy` · `passive.type`) | **보존** |
+| `checks` 필드를 싣지 않은 호출 | 손대지 않는다 — 누락이 지우는 쪽으로 떨어지지 않게 (`contacts` 와 같은 관례) |
+
+끄거나 tcp 로 바꿔 본문에서 빠지는 칸도 **폼에는 남는다** (Route 의 `전체 허용` 이 그룹 목록을
+남기는 것과 같다). JSON 탭 미리보기(`lib/checks.ts` 의 `checksJson`)도 같은 키가 생기고
+사라진다 — 헬스체크를 끄면 `checks` 키 자체가 없다. 그래서 '폼에 적용' 은 `checks` 가 없는
+본문을 "헬스체크 없음" 으로 읽는다 (timeout 처럼 "건드리지 말라" 로 읽지 않는다).
+
+형식 검사(정수 · 1~254 · 상태 코드 200~599 · 중복 · `http_path` 는 `/` 로 시작)는 카드에
+인라인으로 보이고, 하나라도 있으면 저장이 막힌다 (`checksProblems` ↔ Rust `ChecksInput::validate`).
+게이트웨이의 400 은 어느 칸이 틀렸는지 알려 주지 않는다. **저장되지 않는 칸은 보지 않는다.**
+
+#### 현재 상태는 두 군데에서 본다
+
+| | 현재 상태 카드 · 목록의 `헬스 상태` | 헬스체크 카드의 `노드 점검` |
+|---|---|---|
+| 무엇 | 게이트웨이 헬스체커의 판정 (`healthy` · `mostly_healthy` · `mostly_unhealthy` · `unhealthy` + 카운터) | 이 PC 에서 노드로 검사 요청을 **한 번** 보낸 결과 |
+| 기준 | **저장된** checks | 폼의 노드 · checks (저장 전에도 된다) |
+| 호출 | Control API (`upstreams::health` · `health_all`) | 노드 직접 (`upstreams::probe`) |
+| 전제 | 이 PC 에서 Control API 에 닿아야 한다 | 이 PC 에서 노드에 닿아야 한다 |
+
+게이트웨이가 실제로 쓰는 판정은 앞쪽뿐이다. 뒤쪽은 `http_path` · 포트가 맞는지 등록 전에
+확인하는 용도라 화면에서도 "게이트웨이가 본 상태가 아니다" 라고 밝힌다 (네트워크 경로가 다르다).
+
+**Control API 주소.** 설정 화면의 `Control API 주소`, 비우면 baseUrl 의 호스트 + `9090`
+(`EnvConfig::control_base`). APISIX 기본 설정에서는 Control API 가 `127.0.0.1` 에만 열리므로 대개
+게이트웨이의 `config.yaml` 에서 `apisix.enable_control: true` · `apisix.control.ip` 를 열어 줘야
+닿는다. 연결이 안 되면 그 안내가 에러의 힌트로 붙는다 (`client::CONTROL_HINT`). 프록시 정책은
+Admin API 와 같다 — 같은 빌더(`client::builder`)에서 나온다.
+
+**헬스체커가 없다는 답은 에러가 아니다.** APISIX 는 upstream 으로 요청이 처음 흘러들 때 체커를
+만든다. 막 저장했거나 트래픽이 없던 upstream 의 `404 no checker` 는 파란 안내로 보여 주고
+(목록에서는 `체커 없음` 뱃지), 데이터 플레인 포트가 답한 `404 Route Not Found` 만 "Control API 가
+아닌 곳이 응답했다" 는 에러로 세운다. 응답 모양은 3.x(`status` · `counter`)와 2.x(`healthy_nodes`)를
+모두 읽는다 (`models::parse_health_checker`). 목록을 열 때마다 자동으로 부르지 않는 것도 같은
+사정이다 — 닿지 않는 환경이 흔해 버튼으로 둔다.
+
+**노드 점검의 판정은 게이트웨이와 같은 규칙이다.** 정상 목록에 있으면 성공, 장애 목록에 있으면
+실패, **두 목록 어디에도 없는 코드는 세지 않는다** (lua-resty-healthcheck). 리다이렉트는 따라가지
+않는다 — 기본 정상 목록에 `302` 가 있다 (`client::build_probe`). `host` 를 적으면 Host 헤더로
+보내고, tcp 는 연결만 본다. 인증서는 검증하지 않는다 (Admin API 와 같은 사내망 전제).
+
+회귀 테스트: `tests.rs` 의 `upstream_checks` · `upstream_health` · `upstream_probe` 모듈.
 
 ---
 
@@ -1179,6 +1262,7 @@ secret 이 코드에 없으니 그 토큰은 검증할 방법 자체가 없다 �
 | methods 칩 | `METHODS` 7개 고정 | + 폼에 실제로 들어 있는 비표준 메서드 | `CONNECT`·`TRACE`·`PURGE` 를 쓰는 라우트가 칩 하나 눌렀다고 조용히 그 값을 잃으면 안 된다 (`sortMethods` 가 버리지 않고 뒤에 붙인다) |
 | `API 스펙 Import` 화면 | 없음 | 신규 | 요청 기능 |
 | 아이콘 레일 | 대시보드 / Route / Consumer / 설정 | + `Upstream` · `Service` | service 에 `spec_url` 을 붙여야 Import 가 파일 없이도 동작한다. 그러려면 두 리소스를 앱에서 편집할 수 있어야 한다 |
+| Upstream 폼 · 목록 | 노드 · timeout | + `헬스체크` · `현재 상태` 카드, 목록의 `헬스체크` 열과 `헬스 상태` 버튼 | 요청 기능. `checks` 를 JSON 으로 손으로 쓰지 않고 등록하고, 등록된 upstream 의 노드 상태를 확인한다 (위 'Upstream 헬스체크' 절) |
 
 Service / Upstream 은 각각 레일 메뉴와 편집 화면을 갖는다 (아래 'Upstream · Service 관리' 절).
 

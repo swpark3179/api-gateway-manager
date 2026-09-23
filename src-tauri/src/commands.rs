@@ -11,7 +11,9 @@ use crate::apisix::meta::{self, Overview};
 use crate::apisix::models::{ConsumerView, RouteView, ServiceView, UpstreamView};
 use crate::apisix::routes::{self, RouteForm};
 use crate::apisix::services::{self, ServiceForm};
-use crate::apisix::upstreams::{self, UpstreamForm};
+use crate::apisix::upstreams::{
+    self, HealthList, HealthReport, ProbeInput, ProbeResult, UpstreamForm,
+};
 use crate::apisix::client;
 use crate::config::{self, Env, EnvConfig, SettingsView};
 use crate::db::{self, AccessCounts, Cache, CompareRow, RouteScope, RoutesPage};
@@ -30,6 +32,9 @@ pub struct EnvPayload {
     /// `null` = 기존 토큰 유지, `""` = 삭제, 그 외 = 교체
     #[serde(default)]
     pub token: Option<String>,
+    /// Control API 주소. 비우면 baseUrl 의 호스트 + 9090 (`EnvConfig::control_base`)
+    #[serde(default)]
+    pub control_url: String,
 }
 
 impl EnvPayload {
@@ -40,6 +45,7 @@ impl EnvPayload {
             base_url: self.base_url.trim().to_string(),
             no_proxy: true,
             insecure_tls: true,
+            control_url: self.control_url.trim().to_string(),
         }
     }
 }
@@ -84,8 +90,9 @@ pub fn settings_save(app: AppHandle<Wry>, env: Env, payload: EnvPayload) -> AppR
     if payload.base_url.trim().is_empty() {
         return Err(AppError::config("baseUrl 은 필수입니다."));
     }
-    // baseUrl 형식을 미리 검증해 저장 후에야 실패하는 상황을 막는다.
+    // baseUrl 형식을 미리 검증해 저장 후에야 실패하는 상황을 막는다. Control API 주소도 같다.
     payload.to_cfg().admin_base()?;
+    payload.to_cfg().control_base()?;
 
     if let Some(t) = &payload.token {
         // 관리키의 모양은 검사하지 않는다. 그 값이 유효한 `X-API-KEY` 인지 아는 것은
@@ -384,6 +391,36 @@ pub async fn upstream_delete(
 ) -> AppResult<()> {
     require_admin(env)?;
     upstreams::delete(&app, env, &id, name.as_deref().unwrap_or("")).await
+}
+
+// ── Upstream 헬스체크 ────────────────────────────────────────
+//
+// 셋 다 Admin API 를 부르지 않는다 — 관리키를 싣지 않으므로 `config::resolve` 대신 설정만
+// 읽는다. 조회라서 전체 관리자로 묶지도 않는다 (위 `upstreams_sync` 와 같은 판단).
+
+/// 저장된 upstream 하나의 헬스체커 상태 (Control API `GET /v1/healthcheck/upstreams/{id}`).
+#[tauri::command]
+pub async fn upstream_health(app: AppHandle<Wry>, env: Env, id: String) -> AppResult<HealthReport> {
+    let cfg = config::load(&app).get(env).clone();
+    upstreams::health(&cfg, &id).await
+}
+
+/// 전체 upstream 의 헬스체커 상태 (Control API `GET /v1/healthcheck`) — 목록 화면용.
+#[tauri::command]
+pub async fn upstreams_health(app: AppHandle<Wry>, env: Env) -> AppResult<HealthList> {
+    let cfg = config::load(&app).get(env).clone();
+    upstreams::health_all(&cfg).await
+}
+
+/// 폼의 checks 로 노드를 이 PC 에서 직접 한 번씩 두드려 본다 (저장 전 확인용).
+#[tauri::command]
+pub async fn upstream_probe(
+    app: AppHandle<Wry>,
+    env: Env,
+    input: ProbeInput,
+) -> AppResult<Vec<ProbeResult>> {
+    let cfg = config::load(&app).get(env).clone();
+    upstreams::probe(&cfg, input).await
 }
 
 // ── Service ──────────────────────────────────────────────────

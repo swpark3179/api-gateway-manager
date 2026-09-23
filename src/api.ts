@@ -18,9 +18,12 @@ import type {
   DashboardPayload,
   EnvKey,
   EnvPayload,
+  HealthList,
+  HealthReport,
   ImportSource,
   JwtResult,
   OasDoc,
+  ProbeResult,
   RouteFormState,
   RouteScope,
   RoutesPage,
@@ -32,6 +35,7 @@ import type {
   UpstreamFormState,
   UpstreamView,
 } from "./types";
+import { checksWire } from "./lib/checks";
 
 /** Rust 가 던진 AppError 인지 판별한다. */
 export function isAppError(e: unknown): e is AppError {
@@ -204,11 +208,37 @@ export const upstreamSave = (env: EnvKey, f: UpstreamFormState) =>
         send: Number(f.timeout.send),
         read: Number(f.timeout.read),
       },
+      // 이 줄을 빠뜨리면 Rust 가 None 으로 읽어 게이트웨이의 checks 를 건드리지 않는다
+      // (지우는 쪽이 아니라 유지되는 쪽으로 떨어진다 — consumerSave 의 contacts 와 같은 관례).
+      checks: checksWire(f.checks),
     },
   });
 
 export const upstreamDelete = (env: EnvKey, id: string, name: string) =>
   call<void>("upstream_delete", { env, id, name });
+
+/**
+ * 저장된 upstream 하나의 헬스체커 상태 — Control API `GET /v1/healthcheck/upstreams/{id}`.
+ * 관리키를 보내지 않는다 (Rust `client::control_get`).
+ */
+export const upstreamHealth = (env: EnvKey, id: string) =>
+  call<HealthReport>("upstream_health", { env, id });
+
+/** 전체 upstream 의 헬스체커 상태 — Control API `GET /v1/healthcheck` (목록 화면). */
+export const upstreamsHealth = (env: EnvKey) => call<HealthList>("upstreams_health", { env });
+
+/**
+ * 폼의 노드를 폼의 checks 로 **이 PC 에서** 한 번씩 두드려 본다 (저장 전 확인용).
+ * 게이트웨이의 판정이 아니다 — 네트워크 경로가 다르다 (Rust `upstreams::probe`).
+ */
+export const upstreamProbe = (env: EnvKey, f: UpstreamFormState) =>
+  call<ProbeResult[]>("upstream_probe", {
+    env,
+    input: {
+      nodes: f.nodes.map((n) => ({ host: n.host.trim(), port: Number(n.port) })),
+      checks: checksWire(f.checks),
+    },
+  });
 
 // ── Service ──────────────────────────────────────────────────
 

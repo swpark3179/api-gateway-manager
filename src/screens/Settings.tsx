@@ -181,6 +181,7 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
   const revealToken = useStore((s) => s.revealToken);
 
   const [baseUrl, setBaseUrl] = useState(cfg.baseUrl);
+  const [controlUrl, setControlUrl] = useState(cfg.controlUrl);
   const [token, setToken] = useState("");
   /**
    * 방금 불러온 관리키 원문. `token` 이 이 값과 같으면 **사용자가 손대지 않았다**는 뜻이다.
@@ -202,6 +203,7 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
   useEffect(() => {
     let alive = true;
     setBaseUrl(cfg.baseUrl);
+    setControlUrl(cfg.controlUrl);
     setReveal(false);
     if (!cfg.hasToken) {
       setToken("");
@@ -218,10 +220,11 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
     return () => {
       alive = false;
     };
-  }, [env, cfg.baseUrl, cfg.hasToken, cfg.tokenMasked, revealToken]);
+  }, [env, cfg.baseUrl, cfg.controlUrl, cfg.hasToken, cfg.tokenMasked, revealToken]);
 
   const payload = (tokenOverride?: string | null) => ({
     baseUrl,
+    controlUrl,
     // 손대지 않았으면 `null` — 저장이 자격 증명 관리자를 건드리지 않는다.
     token: tokenOverride !== undefined ? tokenOverride : token === loaded ? null : token,
   });
@@ -291,6 +294,26 @@ function EnvCard({ env, cfg }: { env: EnvKey; cfg: EnvConfigView }) {
           />
           <div className="text-xs muted" style={{ marginTop: 6 }}>
             경로 <span className="font-mono">/apisix/admin</span> 은 자동으로 붙습니다.
+          </div>
+        </div>
+
+        <div>
+          <label className="field-label">Control API 주소</label>
+          <input
+            className="text-input font-mono"
+            value={controlUrl}
+            onChange={(e) => setControlUrl(e.target.value)}
+            placeholder={cfg.controlDefault || "http://게이트웨이:9090"}
+          />
+          <div className="text-xs muted" style={{ marginTop: 6, lineHeight: "18px" }}>
+            Upstream 헬스체크의 <b>현재 상태</b>를 조회할 때만 씁니다 (
+            <span className="font-mono">/v1/healthcheck</span>, 관리키는 보내지 않습니다). 비워
+            두면 baseUrl 의 호스트에 기본 포트 <span className="font-mono">9090</span> 을 붙입니다.
+            게이트웨이 기본 설정에서는 Control API 가 내부(
+            <span className="font-mono">127.0.0.1</span>)에서만 열리므로, 닿지 않으면{" "}
+            <span className="font-mono">config.yaml</span> 의{" "}
+            <span className="font-mono">apisix.enable_control</span> ·{" "}
+            <span className="font-mono">apisix.control.ip</span> 를 확인하세요.
           </div>
         </div>
 

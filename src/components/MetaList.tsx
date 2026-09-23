@@ -57,6 +57,10 @@ interface Props {
   children: ReactNode;
   q: string;
   onQ: (v: string) => void;
+  /** 헤더 오른쪽, 동기화 시각 앞에 붙는 목록 전용 버튼 (Upstream 의 '헬스 상태') */
+  actions?: ReactNode;
+  /** 에러 배너 아래에 붙는 목록 전용 안내 — 스토어 `error` 와 별개인 조회 결과 */
+  notice?: ReactNode;
 }
 
 export default function MetaList({
@@ -72,6 +76,8 @@ export default function MetaList({
   children,
   q,
   onQ,
+  actions,
+  notice,
 }: Props) {
   const env = useStore((s) => s.env);
   const settings = useStore((s) => s.settings);
@@ -92,6 +98,7 @@ export default function MetaList({
           </h2>
         </div>
         <div className="page-actions">
+          {actions}
           <span
             className="text-xs muted font-mono"
             title={
@@ -152,6 +159,7 @@ export default function MetaList({
       </div>
 
       <ErrorBanner error={error} />
+      {notice}
 
       <div className="table-scroll">
         <table className="kw-table one-line" style={{ minWidth }}>
