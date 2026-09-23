@@ -35,6 +35,10 @@ reqwest = { version = "0.12", default-features = false, features = [
   "http2",
 ] }
 
+# upstream 노드 직접 점검 (upstreams::probe) — tcp 검사의 연결 시도 · 시간 제한 · 노드별 동시 실행.
+# 새 크레이트가 아니다: tauri · reqwest 가 이미 쓰는 런타임이라 기능 플래그만 켠다.
+tokio = { version = "1", features = ["net", "time", "rt"] }
+
 # 내장 SQLite — Route 목록 캐시/검색과 OAS 비교 인덱스 (db.rs).
 # bundled: SQLite C 소스를 함께 빌드한다. 배포본에 별도 DLL 을 끌고 다니지 않아도 된다.
 rusqlite = { version = "0.37", features = ["bundled"] }

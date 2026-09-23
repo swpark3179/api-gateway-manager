@@ -699,6 +699,13 @@ pub struct UpstreamView {
     pub timeout: UpstreamTimeout,
     /// `10.20.3.11:8080 외 2` — 목록/셀렉트 라벨용
     pub node_label: String,
+    /// 게이트웨이의 `checks`(헬스체크) 객체 그대로. 없으면 `null`.
+    ///
+    /// 폼 값으로 옮기는 것은 프런트(`lib/checks.ts` 의 `checksFromJson`)가 한다 — JSON 탭의
+    /// '폼에 적용' 도 같은 변환을 써야 해서 한 곳에 두었다. 캐시에 먼저 들어가 있던 뷰에는
+    /// 이 키가 없으므로 `default` 로 읽는다.
+    #[serde(default)]
+    pub checks: Value,
     pub update_time: Option<i64>,
     pub updated: String,
     /// 게이트웨이 원본 객체
@@ -722,10 +729,128 @@ impl UpstreamView {
             node_label: nodes_label(&nodes),
             nodes,
             timeout: timeout_of(v),
+            checks: v.get("checks").filter(|c| c.is_object()).cloned().unwrap_or(Value::Null),
             update_time: ts,
             updated: fmt_ts(ts),
             raw: v.clone(),
         }
+    }
+}
+
+// ── 헬스체크 상태 (Control API) ─────────────────────────────
+
+/// 게이트웨이의 헬스체커가 본 노드 하나.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthNode {
+    /// 노드의 host — 도메인 노드면 도메인, 아니면 IP
+    pub host: String,
+    /// 실제로 검사한 IP. host 가 IP 면 같은 값이다
+    pub ip: String,
+    pub port: Option<i64>,
+    /// `healthy` · `unhealthy` · `mostly_healthy` · `mostly_unhealthy` (APISIX 3.x).
+    /// 2.x 는 `healthy_nodes` 에 있으면 `healthy`, 없으면 `unhealthy` 로 옮긴다.
+    pub status: String,
+    /// 연속 카운터 (3.x 만). 2.x 응답에는 없어 `None` 이다
+    pub success: Option<i64>,
+    pub http_failure: Option<i64>,
+    pub tcp_failure: Option<i64>,
+    pub timeout_failure: Option<i64>,
+}
+
+/// 헬스체커 하나 (`GET /v1/healthcheck` 목록의 한 항목 · 단건 응답).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthChecker {
+    /// `upstreams` · `routes` · `services` — 인라인 upstream 은 그것을 품은 리소스 이름으로 온다
+    pub src_type: String,
+    pub src_id: String,
+    /// 검사 방식 (`http` · `https` · `tcp`). 응답에 없으면 빈 문자열
+    pub kind: String,
+    pub nodes: Vec<HealthNode>,
+}
+
+/// Control API 의 헬스체커 객체 하나를 읽는다. 버전마다 모양이 달라 둘 다 받는다.
+///
+/// ```text
+/// 3.x  { "name": "/apisix/upstreams/1", "type": "http",
+///        "nodes": [{ "ip", "port", "hostname", "status", "counter": {…} }] }
+/// 2.x  { "name": "upstream#/upstreams/1", "src_type": "upstreams", "src_id": "1",
+///        "nodes": [{ "host", "port", … }], "healthy_nodes": [{ "host", "port", … }] }
+/// ```
+pub fn parse_health_checker(v: &Value) -> Option<HealthChecker> {
+    let o = v.as_object()?;
+    let nodes = o.get("nodes").and_then(Value::as_array)?;
+
+    // 리소스 식별: 2.x 는 필드로 따로 주고, 3.x 는 name 이 etcd 키(`/apisix/upstreams/1`)다.
+    let (src_type, src_id) = match (o.get("src_type"), o.get("src_id")) {
+        (Some(t), Some(i)) => (scalar(t), scalar(i)),
+        _ => {
+            let name = o.get("name").and_then(Value::as_str).unwrap_or("");
+            // `upstream#/upstreams/1` 같은 접두어가 있어도 뒤쪽 두 세그먼트만 본다.
+            let mut segs = name.trim_end_matches('/').rsplit('/');
+            let id = segs.next().unwrap_or("").to_string();
+            let ty = segs.next().unwrap_or("").to_string();
+            (ty, id)
+        }
+    };
+
+    // 2.x: status 필드가 없고 healthy_nodes 에 들어 있는지로 갈린다.
+    let healthy_2x: Option<Vec<(String, Option<i64>)>> =
+        o.get("healthy_nodes").and_then(Value::as_array).map(|arr| {
+            arr.iter().map(|n| (s(n, "host"), n.get("port").and_then(Value::as_i64))).collect()
+        });
+
+    let nodes = nodes
+        .iter()
+        .map(|n| {
+            let ip = {
+                let ip = s(n, "ip");
+                if ip.is_empty() { s(n, "host") } else { ip }
+            };
+            let host = {
+                let h = s(n, "hostname");
+                if h.is_empty() { ip.clone() } else { h }
+            };
+            let port = n.get("port").and_then(Value::as_i64);
+            let status = match n.get("status").and_then(Value::as_str) {
+                Some(st) if !st.is_empty() => st.to_string(),
+                _ => match &healthy_2x {
+                    Some(list) if list.iter().any(|(h, p)| *h == ip && *p == port) => {
+                        "healthy".to_string()
+                    }
+                    Some(_) => "unhealthy".to_string(),
+                    None => "unknown".to_string(),
+                },
+            };
+            let counter = |k: &str| n.pointer(&format!("/counter/{k}")).and_then(Value::as_i64);
+            HealthNode {
+                host,
+                ip,
+                port,
+                status,
+                success: counter("success"),
+                http_failure: counter("http_failure"),
+                tcp_failure: counter("tcp_failure"),
+                timeout_failure: counter("timeout_failure"),
+            }
+        })
+        .collect();
+
+    Some(HealthChecker { src_type, src_id, kind: s(v, "type"), nodes })
+}
+
+/// `GET /v1/healthcheck` — 체커 목록. 하나도 없으면 APISIX 가 `{}` 를 주기도 한다
+/// (빈 Lua 테이블의 JSON 표기) — 배열이 아니면 빈 목록이다.
+pub fn parse_health_list(v: &Value) -> Vec<HealthChecker> {
+    v.as_array().map(|a| a.iter().filter_map(parse_health_checker).collect()).unwrap_or_default()
+}
+
+fn scalar(v: &Value) -> String {
+    match v {
+        Value::String(x) => x.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
     }
 }
 

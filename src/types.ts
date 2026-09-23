@@ -1,5 +1,7 @@
 /** Rust DTO(`src-tauri/src/**`)와 1:1 대응하는 타입. serde 가 camelCase 로 직렬화한다. */
 
+import { checksFromJson, emptyChecks } from "./lib/checks";
+
 export type EnvKey = "dev" | "prod";
 export type Section = "dash" | "routes" | "consumers" | "upstreams" | "services" | "settings";
 /**
@@ -72,6 +74,10 @@ export interface EnvConfigView {
   /** 마스킹된 표시용 문자열. secret 은 섞이지 않는다. 원문은 `settingsRevealToken` 으로만 받는다. */
   tokenMasked: string;
   adminBase: string;
+  /** 사용자가 입력한 Control API 주소. 비어 있으면 `controlDefault` 가 쓰인다 */
+  controlUrl: string;
+  /** baseUrl 의 호스트 + 9090 — Control API 주소를 비워 두면 쓰이는 값 (placeholder) */
+  controlDefault: string;
   perm: PermView;
 }
 
@@ -87,6 +93,8 @@ export interface EnvPayload {
    * null = 기존 관리키 유지, "" = 삭제, 그 외 = 교체
    */
   token: string | null;
+  /** Control API 주소 (헬스체크 상태 조회). 비우면 baseUrl 의 호스트 + 9090 */
+  controlUrl: string;
 }
 
 /** 관리키 발급 요청 (전체 관리자 전용). */
@@ -227,10 +235,72 @@ export interface UpstreamView {
   timeout: UpstreamTimeout;
   /** `10.20.3.11:8080 외 2` — 목록·셀렉트 라벨 */
   nodeLabel: string;
+  /**
+   * 게이트웨이의 `checks` 객체 그대로. 없으면 null. 폼 값으로 옮기는 것은
+   * `lib/checks.ts` 의 `checksFromJson` 한 곳이다 (JSON 탭의 '폼에 적용' 도 같은 변환을 쓴다).
+   */
+  checks: Record<string, unknown> | null;
   updateTime: number | null;
   updated: string;
   raw: unknown;
 }
+
+// ── 헬스체크 상태 (Control API · 직접 점검) ─────────────────
+
+/**
+ * 게이트웨이의 헬스체커가 본 노드 하나 (Rust `models::HealthNode`).
+ *
+ * `status` 는 APISIX 3.x 의 네 값(`healthy` · `mostly_healthy` · `mostly_unhealthy` ·
+ * `unhealthy`)이다. 2.x 는 카운터가 없어 `success` 등이 null 이다.
+ */
+export interface HealthNode {
+  host: string;
+  ip: string;
+  port: number | null;
+  status: string;
+  success: number | null;
+  httpFailure: number | null;
+  tcpFailure: number | null;
+  timeoutFailure: number | null;
+}
+
+export interface HealthChecker {
+  srcType: string;
+  srcId: string;
+  /** 검사 방식 (`http` · `https` · `tcp`). 응답에 없으면 빈 문자열 */
+  kind: string;
+  nodes: HealthNode[];
+}
+
+/** `upstream_health` — 저장된 upstream 하나. */
+export interface HealthReport {
+  /** 실제로 부른 주소 */
+  url: string;
+  /** null = 헬스체커가 없다 (`message` 에 Control API 가 준 사유) */
+  checker: HealthChecker | null;
+  message: string;
+}
+
+/** `upstreams_health` — 목록 화면이 한 번에 받는 전체 체커 (upstream 리소스만). */
+export interface HealthList {
+  url: string;
+  checkers: HealthChecker[];
+}
+
+/** `upstream_probe` — 이 PC 에서 노드 하나를 한 번 두드린 결과 (Rust `upstreams::ProbeResult`). */
+export interface ProbeResult {
+  node: string;
+  /** `GET http://10.20.3.11:8080/health` · `TCP 10.20.3.11:8080` */
+  target: string;
+  /** 게이트웨이가 이 응답을 셀 방향 — 성공 · 실패 · 세지 않음 */
+  verdict: "healthy" | "unhealthy" | "neutral";
+  status: number | null;
+  elapsedMs: number;
+  message: string;
+}
+
+/** 실패를 던지지 않고 돌려주는 스토어 액션의 결과 (`testSettings` 와 같은 관례). */
+export type Outcome<T> = { ok: true; value: T } | { ok: false; error: AppError };
 
 export interface ServiceView {
   id: string;
@@ -599,6 +669,47 @@ export interface UpstreamNodeInput {
   weight: string;
 }
 
+/** APISIX 능동 검사 방식 — 스키마의 enum 과 같다 (Rust `upstreams::CHECK_TYPES`). */
+export type CheckType = "http" | "https" | "tcp";
+
+/**
+ * 헬스체크(`checks`) 폼. 숫자 · 상태 코드 목록도 **문자열로** 든다 (노드의 port 와 같은 이유).
+ *
+ * 빈 칸은 "그 키를 지워 APISIX 기본값에 맡긴다" 는 뜻이다 — 화면은 기본값을 placeholder 로
+ * 보여 준다 (`lib/checks.ts` 의 `CHECK_DEFAULTS`). 폼이 다루지 않는 키(`concurrency` ·
+ * `req_headers` · `passive.healthy` …)는 Rust 가 저장할 때 보존한다 (`apply_checks`).
+ *
+ * 꺼 두거나(`enabled` · `passive`) tcp 로 바꿔 **저장 본문에서 빠지는 칸도 폼에는 남는다** —
+ * Route 의 `authMode` 가 그룹 목록을 남기는 것과 같다. 잘못 눌렀을 때 되돌릴 수 있어야 한다.
+ */
+export interface ChecksFormState {
+  /** false 면 저장할 때 `checks` 를 통째로 지운다 */
+  enabled: boolean;
+  type: CheckType;
+  httpPath: string;
+  /** 검사 요청의 Host 헤더. 비우면 노드 주소 */
+  host: string;
+  /** 검사 포트. 비우면 각 노드의 포트 */
+  port: string;
+  /** 초 */
+  timeout: string;
+  healthyInterval: string;
+  healthySuccesses: string;
+  /** `200, 302` — 쉼표 · 공백으로 나눈다 */
+  healthyStatuses: string;
+  unhealthyInterval: string;
+  unhealthyHttpFailures: string;
+  unhealthyTcpFailures: string;
+  unhealthyTimeouts: string;
+  unhealthyStatuses: string;
+  /** 수동 검사(`checks.passive`) — 실제 트래픽의 응답으로 장애를 판정한다 */
+  passive: boolean;
+  passiveHttpFailures: string;
+  passiveTcpFailures: string;
+  passiveTimeouts: string;
+  passiveStatuses: string;
+}
+
 export interface UpstreamFormState {
   kind: "upstream";
   /** null = 신규 (POST /upstreams 로 APISIX 가 id 자동 생성) */
@@ -607,6 +718,7 @@ export interface UpstreamFormState {
   desc: string;
   nodes: UpstreamNodeInput[];
   timeout: { connect: string; send: string; read: string };
+  checks: ChecksFormState;
 }
 
 export interface ServiceFormState {
@@ -764,6 +876,7 @@ export const emptyUpstreamForm = (): UpstreamFormState => ({
   desc: "",
   nodes: [{ host: "", port: "", weight: "1" }],
   timeout: { ...DEFAULT_TIMEOUT },
+  checks: emptyChecks(),
 });
 
 export const emptyServiceForm = (upstreamId: string): ServiceFormState => ({
@@ -803,6 +916,8 @@ export const upstreamToForm = (u: UpstreamView): UpstreamFormState => ({
     send: String(u.timeout.send),
     read: String(u.timeout.read),
   },
+  // 게이트웨이 상태 그대로 연다 — 헬스체크가 없는 upstream 은 꺼진 채로, 있으면 켜진 채로.
+  checks: checksFromJson(u.checks),
 });
 
 export const serviceToForm = (s: ServiceView): ServiceFormState => ({

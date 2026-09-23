@@ -25,6 +25,7 @@ import { create } from "zustand";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 
 import * as api from "./api";
+import { checksProblems } from "./lib/checks";
 import { jsonText, jsonToForm, sortMethods } from "./lib/design";
 import {
   NO_SELECTION,
@@ -52,6 +53,7 @@ import {
   type AdminTokenRequest,
   type AdminTokenResult,
   type AppError,
+  type ChecksFormState,
   type CompareRow,
   type Contact,
   type ConsumerView,
@@ -59,11 +61,15 @@ import {
   type EnvKey,
   type EnvPayload,
   type FormState,
+  type HealthList,
+  type HealthReport,
   type ImportSource,
   type JwtResult,
   type Kind,
   type OasDoc,
+  type Outcome,
   type PermView,
+  type ProbeResult,
   type RouteCounts,
   type RouteFormState,
   type RouteScope,
@@ -333,6 +339,19 @@ interface AppState {
   patchNode: (i: number, patch: Partial<UpstreamNodeInput>) => void;
   removeNode: (i: number) => void;
   patchTimeout: (patch: Partial<UpstreamFormState["timeout"]>) => void;
+  /** 헬스체크 칸. 켜고 끄는 것도 이걸로 한다 (끈 뒤에도 입력해 둔 칸은 남는다) */
+  patchChecks: (patch: Partial<ChecksFormState>) => void;
+
+  // ── Upstream 헬스체크 상태 ──
+  //
+  // 결과를 스토어에 두지 않고 돌려준다 (`testSettings` 와 같은 관례). 화면 하나에서만 쓰는
+  // 일회성 조회라, 스토어에 두면 상세를 옮겨 다닐 때마다 지울 곳이 늘어난다.
+  /** 저장된 upstream 하나의 헬스체커 상태 (Control API) */
+  checkUpstreamHealth: (id: string) => Promise<Outcome<HealthReport>>;
+  /** 전체 upstream 의 헬스체커 상태 (Control API) — 목록 화면 */
+  checkUpstreamsHealth: () => Promise<Outcome<HealthList>>;
+  /** 지금 폼의 노드 · checks 로 이 PC 에서 직접 점검한다 (저장 전에도 된다) */
+  probeUpstream: () => Promise<Outcome<ProbeResult[]>>;
 
   setJsonDraft: (v: string) => void;
   applyJson: () => void;
@@ -1447,6 +1466,53 @@ export const useStore = create<AppState>((set, get) => ({
     get().patchForm({ timeout: { ...form.timeout, ...patch } });
   },
 
+  patchChecks(patch) {
+    const { form } = get();
+    if (!form || form.kind !== "upstream") return;
+    get().patchForm({ checks: { ...form.checks, ...patch } });
+  },
+
+  async checkUpstreamHealth(id) {
+    try {
+      return { ok: true, value: await api.upstreamHealth(get().env, id) };
+    } catch (e) {
+      return { ok: false, error: api.toAppError(e) };
+    }
+  },
+
+  async checkUpstreamsHealth() {
+    try {
+      return { ok: true, value: await api.upstreamsHealth(get().env) };
+    } catch (e) {
+      return { ok: false, error: api.toAppError(e) };
+    }
+  },
+
+  async probeUpstream() {
+    const { form, env } = get();
+    if (!form || form.kind !== "upstream") {
+      return { ok: false, error: { kind: "internal", message: "Upstream 폼이 없습니다." } };
+    }
+    // 저장과 같은 문턱을 먼저 넘는다 — Rust 도 같은 검사를 하지만, 정수 칸의 `1.5` 는
+    // 역직렬화에서 죽어 어느 칸인지 알려 주지 못한다 (store.save 의 주석과 같은 이유).
+    const bad = form.nodes.findIndex((n) => !n.host.trim() || !intText(n.port));
+    if (bad >= 0) {
+      return {
+        ok: false,
+        error: { kind: "config", message: `${bad + 1}번 노드의 host · port 를 먼저 입력하세요.` },
+      };
+    }
+    const problems = checksProblems({ ...form.checks, enabled: true });
+    if (problems.length > 0) {
+      return { ok: false, error: { kind: "config", message: problems[0] } };
+    }
+    try {
+      return { ok: true, value: await api.upstreamProbe(env, form) };
+    } catch (e) {
+      return { ok: false, error: api.toAppError(e) };
+    }
+  },
+
   setJsonDraft(v) {
     set({ jsonDraft: v, jsonErr: "", jsonOk: "" });
   },
@@ -1510,6 +1576,15 @@ export const useStore = create<AppState>((set, get) => ({
       get().flash("필수 항목을 입력하세요.");
       return;
     }
+    // 헬스체크 칸은 필수값이 아니라 형식 문제다 — 무엇이 틀렸는지 첫 줄을 그대로 알린다
+    // (폼 카드가 같은 목록을 인라인으로 보여 준다). Rust validate 와 짝이다.
+    if (form.kind === "upstream") {
+      const problems = checksProblems(form.checks);
+      if (problems.length > 0) {
+        get().flash(`헬스체크 설정을 확인하세요 — ${problems[0]}`);
+        return;
+      }
+    }
     // 개인 식별기능은 (ON + secret) 또는 (OFF) 만 저장할 수 있다 — Rust validate 와 짝이다.
     // 필수값과 따로 알리는 이유: 토글을 켠 것이 원인이라 "필수 항목" 이라고만 하면 찾기 어렵다.
     if (form.kind === "consumer" && form.personalAuth && !form.personalSecret.trim()) {
@@ -1540,7 +1615,15 @@ export const useStore = create<AppState>((set, get) => ({
         );
       } else if (form.kind === "upstream") {
         await api.upstreamSave(env, form);
-        get().flash("Upstream이 저장되었습니다.");
+        // 헬스체크를 켰는지 껐는지는 저장 결과가 크게 달라지는 대목이라 밝힌다 (Service 가
+        // 붙은 플러그인을 알려 주는 것과 같은 이유). 끄면 게이트웨이의 checks 가 지워졌다.
+        const c = form.checks;
+        get().flash(
+          "Upstream이 저장되었습니다. " +
+            (c.enabled
+              ? `(헬스체크 ${c.type}${c.passive ? " + 수동 검사" : ""})`
+              : "(헬스체크 없음)"),
+        );
       } else {
         const isNew = !form.id;
         await api.routeSave(env, form);

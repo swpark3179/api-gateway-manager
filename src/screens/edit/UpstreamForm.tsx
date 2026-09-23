@@ -6,9 +6,14 @@
  *
  * `weight` 는 화면에 두지 않는다. 대신 조회한 값을 폼이 들고 있다가 그대로 되쓴다
  * (`types.UpstreamNode` 주석 참조) — 보이지 않는 값을 저장 한 번으로 1 로 덮으면 안 된다.
+ *
+ * 헬스체크(`checks`)와 그 현재 상태는 카드 두 개로 나눴다 (`UpstreamChecksCard` ·
+ * `UpstreamHealthCard`) — 앞은 저장할 설정, 뒤는 게이트웨이가 **저장된** 설정으로 판정한 결과다.
  */
 
 import { useStore } from "../../store";
+import UpstreamChecksCard from "./UpstreamChecksCard";
+import UpstreamHealthCard from "./UpstreamHealthCard";
 
 const Req = () => <span style={{ color: "var(--red-600)" }}>*</span>;
 
@@ -143,6 +148,9 @@ export default function UpstreamForm() {
           ))}
         </div>
       </div>
+
+      <UpstreamChecksCard />
+      <UpstreamHealthCard />
     </div>
   );
 }
