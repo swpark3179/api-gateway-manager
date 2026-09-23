@@ -199,9 +199,7 @@ export default function JsonTab({ sub }: { sub: string }) {
             처럼 폼에 없는 키는 여기에 적어도 저장되지 않습니다. 게이트웨이에 설정된 값은 그대로
             보존됩니다. <span className="font-mono">checks</span> 는 폼의 헬스체크 카드를
             따라갑니다 — 끄면 키가 사라지고(저장할 때도 지워집니다), 빈 칸은 키가 없습니다(APISIX
-            기본값). <span className="font-mono">concurrency</span> ·{" "}
-            <span className="font-mono">req_headers</span> ·{" "}
-            <span className="font-mono">passive.healthy</span> 처럼 카드에 없는 checks 키는 여기
+            기본값). <span className="font-mono">req_headers</span> 처럼 카드에 없는 checks 키는 여기
             보이지 않아도 저장할 때 보존됩니다.
           </>
         )}

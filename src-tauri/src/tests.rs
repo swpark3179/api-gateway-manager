@@ -3625,32 +3625,92 @@ mod upstream_checks {
 
     #[test]
     fn keys_the_form_does_not_show_survive_a_save() {
-        let out = apply(
-            gateway_checks(),
-            &form(json!({
+        let f = form(json!({
+            "enabled": true,
+            "type": "http",
+            "httpPath": "/health",
+            "host": "order.internal",
+            "concurrency": 5,
+            "httpsVerifyCertificate": false,
+            "healthy": { "interval": 5, "successes": 3, "httpStatuses": [200] },
+            "unhealthy": { "interval": 2, "httpFailures": 4, "httpStatuses": [500] },
+            "passive": {
                 "enabled": true,
                 "type": "http",
-                "httpPath": "/health",
-                "host": "order.internal",
-                "healthy": { "interval": 5, "successes": 3, "httpStatuses": [200] },
-                "unhealthy": { "interval": 2, "httpFailures": 4, "httpStatuses": [500] },
-                "passive": {
-                    "enabled": true,
-                    "unhealthy": { "httpStatuses": [500], "httpFailures": 3, "tcpFailures": 3 },
-                },
-            })),
-        );
+                "healthy": { "httpStatuses": [200, 201], "successes": 3 },
+                "unhealthy": { "httpStatuses": [500], "httpFailures": 3, "tcpFailures": 3 },
+            },
+        }));
+        let out = apply(gateway_checks(), &f);
         let a = out.pointer("/checks/active").expect("active");
         assert_eq!(a["http_path"], json!("/health"), "폼 값은 반영된다");
-        assert_eq!(a["concurrency"], json!(5));
+        // req_headers 는 폼에 없다 — 그대로 남는다.
         assert_eq!(a["req_headers"], json!(["User-Agent: probe"]));
-        assert_eq!(a["https_verify_certificate"], json!(false));
-        // 수동 검사의 healthy · type 은 폼에 없다 — 그대로 남는다.
-        assert_eq!(
-            out.pointer("/checks/passive/healthy"),
-            Some(&json!({ "http_statuses": [200, 201], "successes": 3 }))
-        );
-        assert_eq!(out.pointer("/checks/passive/type"), Some(&json!("http")));
+        assert_eq!(apply(out.clone(), &f), out, "같은 폼으로 다시 저장해도 달라지지 않는다");
+    }
+
+    /// 운영에서 쓰는 설정 그대로 — 폼의 '기본값으로 자동설정'(`lib/checks.ts` 의 CHECK_PRESET)이
+    /// 채우는 값이다. 폼 칸만으로 이 JSON 을 **빠짐없이** 만들 수 있어야 한다 (host · port 는
+    /// 편집 중인 upstream 의 노드에서 온다). 아래 와이어는 `checksWire` 가 보내는 모양이다.
+    #[test]
+    fn preset_builds_the_reference_config_exactly() {
+        let reference = json!({
+            "active": {
+                "concurrency": 10,
+                "healthy": { "http_statuses": [200], "interval": 5, "successes": 2 },
+                "host": "60.101.108.90",
+                "http_path": "/actuator/health",
+                "https_verify_certificate": false,
+                "port": 7001,
+                "timeout": 2.0,
+                "type": "http",
+                "unhealthy": {
+                    "http_failures": 3,
+                    "http_statuses": [404, 500, 502, 503, 504],
+                    "interval": 2,
+                    "tcp_failures": 3,
+                    "timeouts": 3,
+                },
+            },
+            "passive": {
+                "healthy": { "http_statuses": [200, 201, 204, 301, 302], "successes": 3 },
+                "type": "http",
+                "unhealthy": {
+                    "http_failures": 3,
+                    "http_statuses": [502, 503, 504],
+                    "tcp_failures": 3,
+                    "timeouts": 3,
+                },
+            },
+        });
+        let wire = json!({
+            "enabled": true,
+            "type": "http",
+            "httpPath": "/actuator/health",
+            "host": "60.101.108.90",
+            "port": 7001,
+            "timeout": 2,
+            "concurrency": 10,
+            "httpsVerifyCertificate": false,
+            "healthy": { "interval": 5, "successes": 2, "httpStatuses": [200] },
+            "unhealthy": {
+                "interval": 2, "httpFailures": 3, "tcpFailures": 3, "timeouts": 3,
+                "httpStatuses": [404, 500, 502, 503, 504],
+            },
+            "passive": {
+                "enabled": true,
+                "type": "http",
+                "healthy": { "successes": 3, "httpStatuses": [200, 201, 204, 301, 302] },
+                "unhealthy": {
+                    "httpFailures": 3, "tcpFailures": 3, "timeouts": 3,
+                    "httpStatuses": [502, 503, 504],
+                },
+            },
+        });
+        let f = form(wire);
+        assert!(!super::upstream_validate_fails(&f), "자동설정 값은 검증을 통과해야 한다");
+        let out = apply(json!({}), &f);
+        assert_eq!(out.get("checks"), Some(&reference));
     }
 
     /// 폼의 빈 칸 = 그 키를 지워 기본값에 맡긴다. 속이 빈 healthy 는 남기지 않는다.
@@ -3662,7 +3722,9 @@ mod upstream_checks {
         assert!(a.get("host").is_none());
         assert!(a.get("healthy").is_none(), "빈 껍데기를 남기지 않는다");
         assert!(a.get("unhealthy").is_none());
-        assert_eq!(a["concurrency"], json!(5), "폼이 모르는 키는 여전히 남는다");
+        assert!(a.get("concurrency").is_none(), "concurrency 도 폼이 다루는 칸이다");
+        assert!(a.get("https_verify_certificate").is_none());
+        assert_eq!(a["req_headers"], json!(["User-Agent: probe"]), "폼이 모르는 키는 여전히 남는다");
         assert!(out.pointer("/checks/passive").is_none(), "수동 검사를 끄면 지운다");
     }
 
@@ -3676,6 +3738,7 @@ mod upstream_checks {
                 "type": "tcp",
                 "httpPath": "/health",
                 "host": "order.internal",
+                "httpsVerifyCertificate": false,
                 "healthy": { "interval": 3, "httpStatuses": [200] },
                 "unhealthy": { "tcpFailures": 2, "httpFailures": 4, "httpStatuses": [500] },
                 "passive": { "enabled": true, "unhealthy": { "httpStatuses": [502] } },
@@ -3685,6 +3748,7 @@ mod upstream_checks {
         assert_eq!(a["type"], json!("tcp"));
         assert!(a.get("http_path").is_none());
         assert!(a.get("host").is_none());
+        assert!(a.get("https_verify_certificate").is_none());
         assert_eq!(a["healthy"], json!({ "interval": 3 }));
         assert_eq!(a["unhealthy"], json!({ "tcp_failures": 2 }));
         // 수동 검사는 실제 트래픽을 본다 — 능동 검사가 tcp 여도 HTTP 키가 남는다.
@@ -3715,6 +3779,12 @@ mod upstream_checks {
             (
                 "수동 검사",
                 json!({ "passive": { "enabled": true, "unhealthy": { "timeouts": 0 } } }),
+            ),
+            ("concurrency", json!({ "concurrency": 0 })),
+            ("수동 검사 type", json!({ "passive": { "enabled": true, "type": "grpc" } })),
+            (
+                "수동 검사 정상 판정",
+                json!({ "passive": { "enabled": true, "healthy": { "successes": 0 } } }),
             ),
         ];
         for (label, patch) in cases {
